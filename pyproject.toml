@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "taiwan-stock-agent"
+version = "0.1.0"
+description = "Taiwan stock broker label + Triple Confirmation signal engine"
+authors = ["howard"]
+packages = [{ include = "taiwan_stock_agent", from = "src" }]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pydantic = ">=2.0"
+psycopg2-binary = "*"
+pandas = "*"
+pyarrow = "*"
+tenacity = "*"
+anthropic = "*"
+python-dotenv = "*"
+requests = "*"
+
+[tool.poetry.dev-dependencies]
+pytest = "*"
+pytest-postgresql = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
