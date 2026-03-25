@@ -1,3 +1,31 @@
+## Project Context — Read First
+
+Before doing any work in this repo, read these files in order:
+
+1. `docs/design/signal-engine-design.md` — full technical spec: architecture decisions,
+   Triple Confirmation formula, FinMind data constraints, broker label classifier logic,
+   phase gates, and backtest success criteria. This is the source of truth for WHY
+   the code is structured the way it is.
+2. `docs/design/ceo-plan.md` — product vision, scope decisions, what was accepted vs
+   deferred, and the 12-month ideal state. Read before proposing scope changes.
+3. `DESIGN.md` — UI/visual design system for the Phase 3b landing page.
+   Read before touching any frontend code.
+
+If you skip these and make architectural decisions that contradict the design doc,
+you will create drift that is expensive to fix.
+
+## Phase Gates
+
+| Phase | Status | Gate condition |
+|-------|--------|----------------|
+| Pre-spike | ✅ Code written | Run `python scripts/data_alignment_check.py` then `python scripts/spike_validate.py` |
+| Phase 1 | ⏳ Not started | Spike must confirm 隔日沖 reversal_rate > 60% at D+2 |
+| Phase 2 | ⏳ Not started | Phase 1 broker label DB built and backtested |
+| Phase 3 | ⏳ Not started | Triple Confirmation validated on 30 tickers |
+| Phase 3b | ⏳ Not started | Landing page + FastAPI (see DESIGN.md) |
+
+Do not implement Phase N+1 without the Phase N gate condition being met.
+
 ## gstack
 
 Use the `/browse` skill from gstack for all web browsing. Never use `mcp__claude-in-chrome__*` tools.
