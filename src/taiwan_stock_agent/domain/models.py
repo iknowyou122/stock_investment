@@ -6,6 +6,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+# ---------------------------------------------------------------------------
+# Sector heat map models (Phase 2 — ScoutAgent.scan_sectors)
+# ---------------------------------------------------------------------------
+
 
 class DailyOHLCV(BaseModel):
     ticker: str
@@ -108,6 +112,47 @@ class SignalOutput(BaseModel):
     halt_flag: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
     free_tier_mode: bool | None = None   # None=legacy, True=free-tier signals, False=paid-tier
+
+
+class SectorChipScore(BaseModel):
+    sector_name: str
+    avg_concentration_top15: float     # mean over scanned tickers
+    avg_net_buyer_count_diff: float    # mean over scanned tickers
+    positive_signal_count: int         # tickers with confidence >= 50
+    total_tickers_scanned: int
+
+
+class SectorHeatMap(BaseModel):
+    scan_date: date
+    sectors: list[SectorChipScore]
+
+    def to_text(self) -> str:
+        """Plain-text table suitable for LINE group paste."""
+        lines = [f"=== 板塊籌碼熱力圖 {self.scan_date} ==="]
+        sorted_sectors = sorted(
+            self.sectors, key=lambda s: s.positive_signal_count, reverse=True
+        )
+        for s in sorted_sectors:
+            ratio = (
+                s.positive_signal_count / s.total_tickers_scanned
+                if s.total_tickers_scanned > 0
+                else 0.0
+            )
+            if ratio >= 0.6:
+                arrow = "↑↑↑"
+            elif ratio >= 0.3:
+                arrow = "↑"
+            else:
+                arrow = "→"
+
+            net_sign = "+" if s.avg_net_buyer_count_diff >= 0 else ""
+            lines.append(
+                f"{s.sector_name:<6} {arrow:<3}  "
+                f"{s.positive_signal_count}/{s.total_tickers_scanned} 強勢  "
+                f"集中度 {s.avg_concentration_top15:.0%}  "
+                f"淨買超差 {net_sign}{s.avg_net_buyer_count_diff:.0f}"
+            )
+        return "\n".join(lines)
 
 
 @dataclass

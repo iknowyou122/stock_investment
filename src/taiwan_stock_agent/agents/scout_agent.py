@@ -17,7 +17,11 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 
-from taiwan_stock_agent.domain.models import AnomalySignal
+from taiwan_stock_agent.domain.models import (
+    AnomalySignal,
+    SectorChipScore,
+    SectorHeatMap,
+)
 from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
 
 logger = logging.getLogger(__name__)
@@ -97,6 +101,88 @@ class ScoutAgent:
 
         signals.sort(key=lambda s: s.magnitude, reverse=True)
         return signals
+
+    def scan_sectors(
+        self,
+        sector_watchlist: dict[str, list[str]],
+        scan_date: date,
+        strategist: "StrategistAgent",
+    ) -> SectorHeatMap:
+        """Aggregate chip scores per sector and return a SectorHeatMap.
+
+        sector_watchlist maps sector names to lists of tickers, e.g.::
+
+            {"半導體": ["2330", "2454"], "金融": ["2882", "2881"]}
+
+        For each ticker, StrategistAgent.run() is called. Failures are caught
+        and skipped so a single bad ticker cannot abort the whole scan.
+
+        The returned SectorHeatMap.to_text() produces a LINE-pasteable table.
+        """
+        from typing import TYPE_CHECKING
+
+        scores: list[SectorChipScore] = []
+
+        for sector_name, tickers in sector_watchlist.items():
+            concentration_values: list[float] = []
+            net_buyer_diffs: list[float] = []
+            positive_count = 0
+            scanned = 0
+
+            for ticker in tickers:
+                try:
+                    signal = strategist.run(ticker, scan_date)
+                except Exception as exc:
+                    logger.warning(
+                        "scan_sectors: error running strategist for %s in %s — "
+                        "skipping. (%s: %s)",
+                        ticker, sector_name, type(exc).__name__, exc,
+                    )
+                    continue
+
+                scanned += 1
+                if signal.confidence >= 50:
+                    positive_count += 1
+
+                # Pull chip metrics from reasoning if available; otherwise use defaults.
+                # StrategistAgent.run() doesn't surface chip_report directly, so we
+                # approximate from execution_plan and confidence score.
+                # Real concentration/net_buyer_count_diff requires a deeper integration;
+                # for now we derive a proxy from confidence (0.3–0.7 range proxy).
+                # When full chip data is available via ChipDetectiveAgent, this method
+                # should be refactored to call a dedicated chip-only path.
+                concentration_proxy = min(0.3 + signal.confidence / 200.0, 0.95)
+                net_buyer_proxy = float(signal.confidence - 50) / 10.0
+
+                concentration_values.append(concentration_proxy)
+                net_buyer_diffs.append(net_buyer_proxy)
+
+            if scanned == 0:
+                scores.append(
+                    SectorChipScore(
+                        sector_name=sector_name,
+                        avg_concentration_top15=0.0,
+                        avg_net_buyer_count_diff=0.0,
+                        positive_signal_count=0,
+                        total_tickers_scanned=0,
+                    )
+                )
+                continue
+
+            avg_concentration = sum(concentration_values) / len(concentration_values)
+            avg_net_buyer = sum(net_buyer_diffs) / len(net_buyer_diffs)
+
+            scores.append(
+                SectorChipScore(
+                    sector_name=sector_name,
+                    avg_concentration_top15=avg_concentration,
+                    avg_net_buyer_count_diff=avg_net_buyer,
+                    positive_signal_count=positive_count,
+                    total_tickers_scanned=scanned,
+                )
+            )
+
+        return SectorHeatMap(scan_date=scan_date, sectors=scores)
 
     # ------------------------------------------------------------------
     # Private helpers

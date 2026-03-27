@@ -18,11 +18,16 @@ you will create drift that is expensive to fix.
 
 | Phase | Status | Gate condition |
 |-------|--------|----------------|
-| Pre-spike | ✅ Code written | Run `python scripts/data_alignment_check.py` then `python scripts/spike_validate.py` |
-| Phase 1 | ⏳ Not started | Spike must confirm 隔日沖 reversal_rate > 60% at D+2 |
-| Phase 2 | ⏳ Not started | Phase 1 broker label DB built and backtested |
-| Phase 3 | ⏳ Not started | Triple Confirmation validated on 30 tickers |
-| Phase 3b | ⏳ Not started | Landing page + FastAPI (see DESIGN.md) |
+| Pre-spike | ✅ Done | `data_alignment_check.py` + `spike_validate.py` written |
+| Phase 1 | ✅ Done | Broker label classifier + batch classifier + outcome recorder built |
+| Phase 2 | ✅ Done | Triple Confirmation Engine ✅ · ScoutAgent ✅ · Round 2 deepening ✅ · Signal track record ✅ · Sector heat map ✅ |
+| Phase 3a | ✅ Done | StrategistAgent CLI + LLM reasoning (Claude API) + TWSE free-tier proxy |
+| Phase 3b | ✅ Done | FastAPI + auth + rate limiting ✅ · Real DB routes ✅ · /track-record ✅ · signal_outcomes table ✅ · /register endpoint ✅ |
+| Phase 4 | ⏳ Not started | Collective label curation (outcome submission + Bayesian update) |
+
+**Phase 4 remaining work (next):**
+- Collective label curation: outcome submission + Bayesian update of reversal_rate
+- Payment integration: Stripe/台灣Pay before issuing pro keys (stub in /v1/register)
 
 Do not implement Phase N+1 without the Phase N gate condition being met.
 

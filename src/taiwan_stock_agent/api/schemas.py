@@ -63,3 +63,39 @@ class ErrorResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
+
+
+# ---------------------------------------------------------------------------
+# Track-record endpoint
+# ---------------------------------------------------------------------------
+
+class ConfidenceTierStats(BaseModel):
+    count: int
+    win_rate_1d: float | None
+    win_rate_3d: float | None
+    win_rate_5d: float | None
+
+
+class TrackRecordResponse(BaseModel):
+    days: int
+    total_signals: int
+    long_count: int
+    win_rate_1d: float | None
+    win_rate_3d: float | None
+    win_rate_5d: float | None
+    by_confidence_tier: dict[str, ConfidenceTierStats]
+
+
+# ---------------------------------------------------------------------------
+# API key registration
+# ---------------------------------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    email: str
+    tier: Literal["free", "pro"] = "free"
+
+
+class RegisterResponse(BaseModel):
+    api_key: str
+    tier: str
+    message: str
