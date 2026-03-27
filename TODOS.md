@@ -104,3 +104,39 @@
 **Effort:** S (human: 30 min / CC: 5 min)
 **Priority:** P3
 **Depends on:** Nothing — first task before spike.
+
+---
+
+## Chip Expansion Plan — Deferred Items (from /autoplan 2026-03-27)
+
+### TDCC Big-Holder Structure (B1)
+**What:** Fetch weekly TDCC shareholder tier data (400張/1000張大戶比率 change; 股東人數).
+**Why:** Deferred from chip-factors-expansion-plan.md (Tier B). Requires new TDCC client + weekly schedule.
+**Effort:** M (human: 2-3 days / CC: ~30 min implementation)
+**Priority:** P3 — after Tier A is validated and signal lift confirmed.
+
+### Turnover Rate (B2)
+**What:** Compute 週轉率 = daily volume / outstanding shares (float).
+**Why:** Deferred from chip-factors-expansion-plan.md (Tier B). Needs outstanding shares data source validation.
+**Effort:** S (human: 4 hours / CC: ~15 min) — after data source confirmed.
+**Priority:** P3 — after B1 or if outstanding shares source found.
+
+### Outcome-Driven Factor Validation
+**What:** Before adding chip factors, pull signal_outcomes table and analyze failure patterns.
+  - For each CAUTION signal that should have been LONG: which factors were 0?
+  - For each LONG signal that failed (T+2d loss): which factors were misleadingly high?
+**Why:** Both CEO dual voices recommend this. Prevents building factors that don't fix real failures.
+**Effort:** S (human: 2 hours / CC: ~15 min) — needs accumulated signal_outcomes data.
+**Priority:** P2 — do this when signal_outcomes has ≥30 entries.
+
+### LLM Prompt Quality Improvement
+**What:** Improve StrategistAgent._format_hints_for_prompt() to better narrate existing chip factors.
+**Why:** Claude subagent suggests this may yield more interpretive quality than adding scoring factors.
+**Effort:** S (human: 2 hours / CC: ~15 min)
+**Priority:** P2 — can run in parallel with chip factor implementation.
+
+### SBL Endpoint Validation
+**What:** Write scripts/validate_sbl_endpoint.py to test TWT93U endpoint availability and parse structure.
+**Why:** Pre-requisite for A4 (SBL ratio scoring). Same IP-block issue as T86/MI_MARGN affects this.
+**Effort:** XS (human: 30 min / CC: ~5 min)
+**Priority:** P1 within chip expansion — must do BEFORE implementing _fetch_sbl_data().

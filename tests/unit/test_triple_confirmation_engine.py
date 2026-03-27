@@ -1375,3 +1375,150 @@ class TestHigh52wPctHint:
         _, bd_normal, _ = engine.score_full(ohlcv, history_normal, _make_chip_report(), _make_volume_profile())
         _, bd_spike, _ = engine.score_full(ohlcv, history_spike, _make_chip_report(), _make_volume_profile())
         assert bd_normal.total == bd_spike.total
+
+
+# ------------------------------------------------------------------
+# Tier A: new chip factor scoring tests
+# ------------------------------------------------------------------
+
+def _make_twse_proxy_base(**kwargs) -> TWSEChipProxy:
+    """Helper: TWSEChipProxy with is_available=True and sensible defaults."""
+    defaults = dict(
+        ticker="9999",
+        trade_date=date(2025, 1, 31),
+        foreign_net_buy=1_000_000,
+        trust_net_buy=100_000,
+        dealer_net_buy=50_000,
+        margin_balance_change=-500,
+        foreign_consecutive_buy_days=3,
+        is_available=True,
+    )
+    defaults.update(kwargs)
+    return TWSEChipProxy(**defaults)
+
+
+class TestTierAChipFactors:
+    def test_trust_consec_scores_five_when_three_or_more(self):
+        """trust_consecutive_buy_days >= 3 adds +5 pts to twse_trust_consec_pts."""
+        engine = TripleConfirmationEngine(free_tier_mode=True)
+        history = _make_history(25)
+        proxy = _make_twse_proxy_base(trust_consecutive_buy_days=4)
+        chip = _make_chip_report(net_buyer_count_diff=0, active_branch_count=0)
+        _, bd = engine.score_with_breakdown(history[-1], history, chip, _make_volume_profile(), twse_proxy=proxy)
+        assert bd.twse_trust_consec_pts == 5
+
+    def test_trust_consec_scores_zero_when_below_three(self):
+        """trust_consecutive_buy_days < 3 does not award trust_consec_pts."""
+        engine = TripleConfirmationEngine(free_tier_mode=True)
+        history = _make_history(25)
+        proxy = _make_twse_proxy_base(trust_consecutive_buy_days=2)
+        chip = _make_chip_report(net_buyer_count_diff=0, active_branch_count=0)
+        _, bd = engine.score_with_breakdown(history[-1], history, chip, _make_volume_profile(), twse_proxy=proxy)
+        assert bd.twse_trust_consec_pts == 0
+
+    def test_dealer_consec_scores_three_when_three_or_more(self):
+        """dealer_consecutive_buy_days >= 3 adds +3 pts to twse_dealer_consec_pts."""
+        engine = TripleConfirmationEngine(free_tier_mode=True)
+        history = _make_history(25)
+        proxy = _make_twse_proxy_base(dealer_consecutive_buy_days=5)
+        chip = _make_chip_report(net_buyer_count_diff=0, active_branch_count=0)
+        _, bd = engine.score_with_breakdown(history[-1], history, chip, _make_volume_profile(), twse_proxy=proxy)
+        assert bd.twse_dealer_consec_pts == 3
+
+    def test_sbl_deduction_applied_when_ratio_exceeds_threshold(self):
+        """sbl_ratio > 0.10 with sbl_available=True → twse_sbl_deduction = 5."""
+        engine = TripleConfirmationEngine(free_tier_mode=True)
+        history = _make_history(25)
+        proxy = _make_twse_proxy_base(sbl_ratio=0.15, sbl_available=True)
+        chip = _make_chip_report(net_buyer_count_diff=0, active_branch_count=0)
+        _, bd = engine.score_with_breakdown(history[-1], history, chip, _make_volume_profile(), twse_proxy=proxy)
+        assert bd.twse_sbl_deduction == 5
+        assert any("SBL_HEAVY" in f for f in bd.flags)
+
+    def test_sbl_no_deduction_when_ratio_below_threshold(self):
+        """sbl_ratio <= 0.10 → no SBL deduction applied."""
+        engine = TripleConfirmationEngine(free_tier_mode=True)
+        history = _make_history(25)
+        proxy = _make_twse_proxy_base(sbl_ratio=0.05, sbl_available=True)
+        chip = _make_chip_report(net_buyer_count_diff=0, active_branch_count=0)
+        _, bd = engine.score_with_breakdown(history[-1], history, chip, _make_volume_profile(), twse_proxy=proxy)
+        assert bd.twse_sbl_deduction == 0
+
+    def test_sbl_no_deduction_when_unavailable(self):
+        """sbl_available=False → SBL deduction NOT applied even if ratio > 0.10."""
+        engine = TripleConfirmationEngine(free_tier_mode=True)
+        history = _make_history(25)
+        proxy = _make_twse_proxy_base(sbl_ratio=0.20, sbl_available=False)
+        chip = _make_chip_report(net_buyer_count_diff=0, active_branch_count=0)
+        _, bd = engine.score_with_breakdown(history[-1], history, chip, _make_volume_profile(), twse_proxy=proxy)
+        assert bd.twse_sbl_deduction == 0
+
+    def test_margin_util_low_awards_five_pts(self):
+        """margin_utilization_rate < 0.20 → twse_margin_util_pts = +5."""
+        engine = TripleConfirmationEngine(free_tier_mode=True)
+        history = _make_history(25)
+        proxy = _make_twse_proxy_base(margin_utilization_rate=0.15)
+        chip = _make_chip_report(net_buyer_count_diff=0, active_branch_count=0)
+        _, bd = engine.score_with_breakdown(history[-1], history, chip, _make_volume_profile(), twse_proxy=proxy)
+        assert bd.twse_margin_util_pts == 5
+
+    def test_margin_util_high_deducts_five_pts(self):
+        """margin_utilization_rate > 0.80 → twse_margin_util_pts = -5 and flag appended."""
+        engine = TripleConfirmationEngine(free_tier_mode=True)
+        history = _make_history(25)
+        proxy = _make_twse_proxy_base(margin_utilization_rate=0.85)
+        chip = _make_chip_report(net_buyer_count_diff=0, active_branch_count=0)
+        _, bd = engine.score_with_breakdown(history[-1], history, chip, _make_volume_profile(), twse_proxy=proxy)
+        assert bd.twse_margin_util_pts == -5
+        assert any("MARGIN_HIGH_UTIL" in f for f in bd.flags)
+
+    def test_margin_util_none_gives_zero_pts(self):
+        """margin_utilization_rate=None → twse_margin_util_pts remains 0."""
+        engine = TripleConfirmationEngine(free_tier_mode=True)
+        history = _make_history(25)
+        proxy = _make_twse_proxy_base(margin_utilization_rate=None)
+        chip = _make_chip_report(net_buyer_count_diff=0, active_branch_count=0)
+        _, bd = engine.score_with_breakdown(history[-1], history, chip, _make_volume_profile(), twse_proxy=proxy)
+        assert bd.twse_margin_util_pts == 0
+
+    def test_paid_chip_fii_detection_awards_five_points(self):
+        """Known FII branch code in top_buyers → paid_fii_presence_pts = 5."""
+        from taiwan_stock_agent.domain.models import BrokerWithLabel, ChipReport
+
+        fii_buyer = BrokerWithLabel(
+            branch_code="1480",   # 摩根大通
+            branch_name="摩根大通",
+            label="unknown",
+            reversal_rate=0.25,
+            buy_volume=100_000,
+            sell_volume=0,
+        )
+        chip = ChipReport(
+            ticker="9999",
+            report_date=date(2025, 1, 31),
+            top_buyers=[fii_buyer],
+            concentration_top15=0.50,
+            net_buyer_count_diff=3,
+            risk_flags=[],
+            active_branch_count=20,
+        )
+
+        engine = TripleConfirmationEngine()
+        history = _make_history(25)
+        _, bd = engine.score_with_breakdown(history[-1], history, chip, _make_volume_profile())
+        assert bd.paid_fii_presence_pts == 5
+        assert any("FII_PRESENT" in f and "摩根大通" in f for f in bd.flags)
+
+    def test_paid_chip_no_fii_gives_zero_pts(self):
+        """Non-FII branch code → paid_fii_presence_pts = 0."""
+        chip = _make_chip_report(net_buyer_count_diff=3, concentration_top15=0.50)
+        # Default _make_chip_report uses branch codes A001/B002/C003 — not in FII list
+        engine = TripleConfirmationEngine()
+        history = _make_history(25)
+        _, bd = engine.score_with_breakdown(history[-1], history, chip, _make_volume_profile())
+        assert bd.paid_fii_presence_pts == 0
+
+    def test_long_threshold_free_is_sixty(self):
+        """LONG threshold in free_tier_mode must be 60 (raised from 55 after Tier A)."""
+        from taiwan_stock_agent.domain.triple_confirmation_engine import _LONG_THRESHOLD_FREE
+        assert _LONG_THRESHOLD_FREE == 60

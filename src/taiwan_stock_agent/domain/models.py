@@ -70,6 +70,14 @@ class TWSEChipProxy(BaseModel):
     # Factor 7: 融券餘額 + 券資比
     short_balance_increased: bool = False   # True when today's 融券餘額 > yesterday's by > 20%
     short_margin_ratio: float = 0.0         # 融券餘額 / 融資餘額 (券資比); deduction when > 0.15
+    # Tier A expansion fields (chip-factors-expansion-plan)
+    trust_consecutive_buy_days: int = 0       # 投信連買天數
+    dealer_consecutive_buy_days: int = 0      # 自營商連買天數
+    sbl_ratio: float = 0.0                    # 借券賣出占成交量比重 (0–1)
+    sbl_available: bool = False               # True if SBL data was fetched successfully
+    margin_utilization_rate: float | None = None  # 融資餘額/融資限額; None if column missing
+    daytrade_ratio: float | None = None       # 當沖占成交量比重 (hint only)
+    short_cover_days: float | None = None     # derived: short_balance/avg_daily_volume
     is_available: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
 

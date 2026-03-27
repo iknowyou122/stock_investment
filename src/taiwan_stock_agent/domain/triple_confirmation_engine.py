@@ -81,14 +81,28 @@ logger = logging.getLogger(__name__)
 
 # --- Thresholds ---
 _LONG_THRESHOLD = 70           # default (paid tier)
-_LONG_THRESHOLD_FREE = 55      # free_tier_mode=True
+_LONG_THRESHOLD_FREE = 60      # free_tier_mode=True (raised from 55 after Tier A expansion)
 _CAUTION_THRESHOLD = 30
 
 # --- Pillar max scores (for documentation and future rebalancing) ---
 _PILLAR1_MAX = 55              # 20 (VWAP) + 20 (vol surge) + 5 (close strength) + 5 (consec up) + 5 (vol trend)
-_PILLAR2_PAID_MAX = 40
-_PILLAR2_FREE_MAX = 50         # 15+10+5+10 (base) + 5 (all-inst) + 5 (foreign consec)
+_PILLAR2_PAID_MAX = 45         # 40 base + 5 FII presence
+_PILLAR2_FREE_MAX = 63         # 50 base + 5 (trust consec) + 3 (dealer consec) + 5 (margin util) − 5 (SBL deduction worst case)
 _PILLAR3_MAX = 45              # 20 (20d high) + 10 (60d high) + 5 (MA align) + 5 (MA20 slope) + 5 (RS vs TAIEX)
+
+# --- Known FII branch codes (hardcoded; stable, ~1-2 changes per year) ---
+# Used in _apply_paid_chip() for FII presence detection.
+# Do NOT import this from broker_label_classifier to avoid coupling.
+_KNOWN_FII_BRANCH_CODES: dict[str, str] = {
+    "1480": "摩根大通",
+    "1560": "美林",
+    "9200": "瑞銀",
+    "1770": "花旗",
+    "2030": "高盛",
+    "1710": "法國巴黎",
+    "8150": "德意志",
+    "1790": "麥格理",
+}
 
 # --- MA20 slope ---
 _MA20_SLOPE_MIN_SESSIONS = 25  # 20 (MA window) + 5 (diff lookback) so iloc[-6] is valid
@@ -115,6 +129,9 @@ class _AnalysisHints:
     # Space hints
     gap_down_pct: float | None = None    # (open - prev_close) / prev_close; negative = gap down
     high52w_pct: float | None = None     # (close - 52w_high) / 52w_high; negative = below 52w high
+    # Chip hints (Tier A expansion)
+    daytrade_ratio: float | None = None    # 當沖占比; from TWSEChipProxy (non-scoring)
+    short_cover_days: float | None = None  # derived: short_balance / avg_daily_volume
 
 
 @dataclass
@@ -132,13 +149,14 @@ class _ScoreBreakdown:
     consec_up_pts: int = 0       # consecutive_up_days >= 3 → +5 (連漲天數)
     volume_trend_pts: int = 0    # 3 consecutive increasing vol sessions → +5 (量能遞增)
 
-    # Pillar 2: Chip — paid FinMind (max _PILLAR2_PAID_MAX = 40)
+    # Pillar 2: Chip — paid FinMind (max _PILLAR2_PAID_MAX = 45)
     # Active when chip_data_available=True; gated by Phase 1 spike validation
     net_buyer_diff_pts: int = 0
     concentration_pts: int = 0
     no_daytrade_pts: int = 0
+    paid_fii_presence_pts: int = 0  # known FII in top_buyers → +5
 
-    # Pillar 2: Chip — free-tier TWSE proxies (max _PILLAR2_FREE_MAX = 50)
+    # Pillar 2: Chip — free-tier TWSE proxies (max _PILLAR2_FREE_MAX = 63)
     # Active when chip_data_available=False; mutually exclusive with paid chip
     twse_foreign_pts: int = 0       # 外資買賣超 > 0  → +15
     twse_trust_pts: int = 0         # 投信買賣超 > 0  → +10
@@ -146,6 +164,11 @@ class _ScoreBreakdown:
     twse_margin_pts: int = 0        # 融資餘額 change ≤ 0 → +10
     twse_all_inst_pts: int = 0      # 三大法人同向 (all three > 0) → +5
     twse_foreign_consec_pts: int = 0  # 外資連買天數 >= 3 → +5
+    # Tier A expansion: new free-tier chip factors
+    twse_trust_consec_pts: int = 0    # 投信連買天數 >= 3 → +5
+    twse_dealer_consec_pts: int = 0   # 自營商連買天數 >= 3 → +3
+    twse_margin_util_pts: int = 0     # util < 20% → +5; util > 80% → -5 (can be negative)
+    twse_sbl_deduction: int = 0       # sbl_ratio > 10% → 5 (subtracted from total)
 
     # Pillar 3: Space (max _PILLAR3_MAX = 45)
     space_pts: int = 0              # close > twenty_day_high × 0.99 → +20
@@ -173,12 +196,17 @@ class _ScoreBreakdown:
             + self.net_buyer_diff_pts
             + self.concentration_pts
             + self.no_daytrade_pts
+            + self.paid_fii_presence_pts
             + self.twse_foreign_pts
             + self.twse_trust_pts
             + self.twse_dealer_pts
             + self.twse_margin_pts
             + self.twse_all_inst_pts
             + self.twse_foreign_consec_pts
+            + self.twse_trust_consec_pts
+            + self.twse_dealer_consec_pts
+            + self.twse_margin_util_pts    # can be negative
+            - self.twse_sbl_deduction      # subtract (positive value stored)
             + self.space_pts
             + self.sixty_day_high_pts
             + self.ma_alignment_pts
@@ -197,12 +225,17 @@ class _ScoreBreakdown:
             self.net_buyer_diff_pts
             + self.concentration_pts
             + self.no_daytrade_pts
+            + self.paid_fii_presence_pts
             + self.twse_foreign_pts
             + self.twse_trust_pts
             + self.twse_dealer_pts
             + self.twse_margin_pts
             + self.twse_all_inst_pts
             + self.twse_foreign_consec_pts
+            + self.twse_trust_consec_pts
+            + self.twse_dealer_consec_pts
+            + self.twse_margin_util_pts    # can be negative
+            - self.twse_sbl_deduction
         )
 
 
@@ -281,7 +314,7 @@ class TripleConfirmationEngine:
         """Score + breakdown + analysis hints. Use this from StrategistAgent."""
         self._taiex_history = taiex_history or []
         breakdown = self._compute(ohlcv, ohlcv_history, chip_report, volume_profile, twse_proxy)
-        hints = self._compute_hints(ohlcv, ohlcv_history)
+        hints = self._compute_hints(ohlcv, ohlcv_history, twse_proxy=twse_proxy)
         signal = self._build_signal(ohlcv, breakdown, volume_profile, chip_report)
         return signal, breakdown, hints
 
@@ -361,13 +394,19 @@ class TripleConfirmationEngine:
         bd.rs_pts = rs_pts
 
         logger.debug(
-            "score breakdown for %s: p1=%d+%d+%d+%d+%d p2_paid=%d+%d+%d p2_free=%d+%d+%d+%d+%d+%d "
+            "score breakdown for %s: p1=%d+%d+%d+%d+%d "
+            "p2_paid=%d+%d+%d+%d "
+            "p2_free=%d+%d+%d+%d+%d+%d+%d+%d+%d-%d "
             "p3=%d+%d+%d+%d+%d deduct=%d+%d flags=%s → total=%d",
             ohlcv.ticker,
-            bd.vwap_5d_pts, bd.volume_surge_pts, bd.close_strength_pts, bd.consec_up_pts, bd.volume_trend_pts,
+            bd.vwap_5d_pts, bd.volume_surge_pts, bd.close_strength_pts,
+            bd.consec_up_pts, bd.volume_trend_pts,
             bd.net_buyer_diff_pts, bd.concentration_pts, bd.no_daytrade_pts,
+            bd.paid_fii_presence_pts,
             bd.twse_foreign_pts, bd.twse_trust_pts, bd.twse_dealer_pts, bd.twse_margin_pts,
             bd.twse_all_inst_pts, bd.twse_foreign_consec_pts,
+            bd.twse_trust_consec_pts, bd.twse_dealer_consec_pts,
+            bd.twse_margin_util_pts, bd.twse_sbl_deduction,
             bd.space_pts, bd.sixty_day_high_pts, bd.ma_alignment_pts, bd.ma20_slope_pts, bd.rs_pts,
             bd.daytrade_deduction, bd.short_spike_deduction, bd.flags, bd.total,
         )
@@ -397,6 +436,17 @@ class TripleConfirmationEngine:
             bd.flags.append(f"隔日沖_TOP3: {', '.join(top3_names)}")
             chip_report.risk_flags.append("隔日沖_TOP3")
 
+        # Known FII branch code detection → +5 (Tier A, A5)
+        top_buyers = chip_report.top_buyers
+        if any(b.branch_code in _KNOWN_FII_BRANCH_CODES for b in top_buyers):
+            bd.paid_fii_presence_pts = 5
+            fii_names = [
+                _KNOWN_FII_BRANCH_CODES[b.branch_code]
+                for b in top_buyers
+                if b.branch_code in _KNOWN_FII_BRANCH_CODES
+            ]
+            bd.flags.append(f"FII_PRESENT: {', '.join(fii_names)}")
+
     def _apply_free_chip(self, bd: _ScoreBreakdown, proxy: TWSEChipProxy) -> None:
         """Apply TWSE free-tier chip scoring to breakdown (in-place)."""
         if proxy.foreign_net_buy > 0:
@@ -413,6 +463,26 @@ class TripleConfirmationEngine:
         # 外資連買天數 >= 3
         if proxy.foreign_consecutive_buy_days >= 3:
             bd.twse_foreign_consec_pts = 5
+
+        # --- Tier A expansion factors ---
+        # 投信連買天數 >= 3 → +5
+        if proxy.trust_consecutive_buy_days >= 3:
+            bd.twse_trust_consec_pts = 5
+        # 自營商連買天數 >= 3 → +3
+        if proxy.dealer_consecutive_buy_days >= 3:
+            bd.twse_dealer_consec_pts = 3
+        # 融資使用率
+        if proxy.margin_utilization_rate is not None:
+            if proxy.margin_utilization_rate < 0.20:
+                bd.twse_margin_util_pts = 5   # healthy: lots of room to buy
+            elif proxy.margin_utilization_rate > 0.80:
+                bd.twse_margin_util_pts = -5  # crowded: nearly maxed out
+                bd.flags.append(f"MARGIN_HIGH_UTIL: {proxy.margin_utilization_rate:.1%}")
+        # 借券賣出占比 > 10% → deduction
+        if proxy.sbl_available and proxy.sbl_ratio > 0.10:
+            bd.twse_sbl_deduction = 5
+            bd.flags.append(f"SBL_HEAVY: {proxy.sbl_ratio:.1%}")
+
         # 融券餘額暴增 + 券資比 > 15% → risk deduction
         if proxy.short_balance_increased and proxy.short_margin_ratio > 0.15:
             bd.short_spike_deduction = 10
@@ -610,11 +680,15 @@ class TripleConfirmationEngine:
         )
 
     def _compute_hints(
-        self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
+        self,
+        ohlcv: DailyOHLCV,
+        history: list[DailyOHLCV],
+        twse_proxy: TWSEChipProxy | None = None,
     ) -> _AnalysisHints:
         """Compute non-scoring contextual hints for LLM reasoning.
 
         All computations here are informational only — never affect scoring.
+        twse_proxy: optional; used to derive daytrade_ratio and short_cover_days.
         """
         hints = _AnalysisHints()
         sorted_history = sorted(history, key=lambda x: x.trade_date)
@@ -674,6 +748,30 @@ class TripleConfirmationEngine:
             period_high = max(all_highs)
             if period_high > 0:
                 hints.high52w_pct = round((ohlcv.close - period_high) / period_high * 100, 2)
+
+        # Chip hints from TWSE proxy (Tier A expansion)
+        if twse_proxy is not None and twse_proxy.is_available:
+            hints.daytrade_ratio = twse_proxy.daytrade_ratio
+
+            # Derive short_cover_days = short_balance_proxy / avg_daily_volume
+            # We use short_margin_ratio × margin_balance as a rough short balance proxy
+            # since the actual short balance isn't directly stored in TWSEChipProxy.
+            # More accurate: short_balance = short_margin_ratio × margin_balance
+            # avg_daily_volume from last 20 sessions of ohlcv_history
+            avg_vol = self._volume_20ma(history)
+            if (
+                avg_vol is not None
+                and avg_vol > 0
+                and twse_proxy.short_margin_ratio > 0
+            ):
+                # margin_balance_change is the diff, not the level — use it as a rough proxy
+                # when the margin balance level isn't available separately.
+                # short_cover_days requires actual short balance; if short_margin_ratio > 0
+                # and we have OHLCV volume, compute an approximate value.
+                # We cannot derive the exact short balance without the raw margin level,
+                # so we store None if the data is insufficient.
+                if twse_proxy.short_cover_days is not None:
+                    hints.short_cover_days = round(twse_proxy.short_cover_days, 1)
 
         return hints
 

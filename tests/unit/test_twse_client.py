@@ -303,6 +303,21 @@ class TestChipProxyFetcherCache:
                 Path(tmpdir) / f"twse_short_{ticker}_{trade_date - timedelta(days=1)}.parquet", index=False
             )
 
+            # SBL cache (Tier A new endpoint)
+            pd.DataFrame([{"sbl_ratio": 0.05}]).to_parquet(
+                Path(tmpdir) / f"twse_sbl_{ticker}_{trade_date}.parquet", index=False
+            )
+
+            # Margin utilization cache (Tier A new endpoint)
+            pd.DataFrame([{"margin_utilization": 0.30}]).to_parquet(
+                Path(tmpdir) / f"twse_margin_util_{ticker}_{trade_date}.parquet", index=False
+            )
+
+            # Daytrade ratio cache (Tier A new endpoint)
+            pd.DataFrame([{"daytrade_ratio": 0.12}]).to_parquet(
+                Path(tmpdir) / f"twse_daytrade_{ticker}_{trade_date}.parquet", index=False
+            )
+
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get") as mock_get:
                 proxy = fetcher.fetch(ticker, trade_date)
                 mock_get.assert_not_called()
@@ -528,3 +543,245 @@ class TestShortBalanceData:
 
         assert proxy.short_balance_increased is False
         assert proxy.short_margin_ratio == 0.0
+
+
+# ------------------------------------------------------------------
+# Tier A: _fetch_institution_consecutive_days (trust + dealer)
+# ------------------------------------------------------------------
+
+class TestInstitutionConsecutiveDays:
+    def test_fetch_institution_consecutive_days_returns_all_three(self):
+        """_fetch_institution_consecutive_days returns (foreign, trust, dealer) tuple."""
+        ticker = "2330"
+        trade_date = date(2026, 3, 26)
+
+        def _side_effect(url, params, **kwargs):
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            d = params["date"]
+            # All days: foreign +, trust +, dealer +
+            if d in ("20260326", "20260325", "20260324"):
+                mock_resp.json.return_value = _make_t86_response(
+                    ticker, net_buy=1_000_000, trust_buy=200_000, dealer_buy=50_000
+                )
+            elif d == "20260323":
+                mock_resp.json.return_value = _make_t86_response(
+                    ticker, net_buy=-100_000, trust_buy=-50_000, dealer_buy=-10_000
+                )
+            else:
+                mock_resp.json.return_value = {"stat": "NO_DATA"}
+            return mock_resp
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
+            with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
+                       side_effect=_side_effect):
+                flags: list = []
+                foreign_count, trust_count, dealer_count = (
+                    fetcher._fetch_institution_consecutive_days(ticker, trade_date, flags)
+                )
+
+        assert foreign_count == 3
+        assert trust_count == 3
+        assert dealer_count == 3
+
+    def test_trust_consecutive_days_breaks_on_non_positive(self):
+        """Trust consecutive day count resets when a day is zero or negative."""
+        ticker = "2330"
+        trade_date = date(2026, 3, 26)
+
+        def _side_effect(url, params, **kwargs):
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            d = params["date"]
+            if d == "20260326":
+                # Today: trust positive
+                mock_resp.json.return_value = _make_t86_response(
+                    ticker, net_buy=1_000_000, trust_buy=100_000, dealer_buy=50_000
+                )
+            elif d == "20260325":
+                # Yesterday: trust ZERO → breaks streak
+                mock_resp.json.return_value = _make_t86_response(
+                    ticker, net_buy=500_000, trust_buy=0, dealer_buy=50_000
+                )
+            else:
+                mock_resp.json.return_value = _make_t86_response(
+                    ticker, net_buy=300_000, trust_buy=80_000, dealer_buy=30_000
+                )
+            return mock_resp
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
+            with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
+                       side_effect=_side_effect):
+                flags: list = []
+                _, trust_count, _ = fetcher._fetch_institution_consecutive_days(
+                    ticker, trade_date, flags
+                )
+
+        # trust was 0 yesterday → streak is only 1 (today only)
+        assert trust_count == 1
+
+    def test_dealer_consecutive_days_zero_when_missing_column(self):
+        """When T86 response has no 自營商買賣超股數 column, dealer count is 0."""
+        ticker = "2330"
+        trade_date = date(2026, 3, 26)
+
+        no_dealer_response = {
+            "stat": "OK",
+            "fields": ["證券代號", "外陸資買賣超股數", "投信買賣超股數"],
+            "data": [[ticker, "+1,000,000", "+100,000"]],
+        }
+
+        def _side_effect(url, params, **kwargs):
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.json.return_value = no_dealer_response
+            return mock_resp
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
+            with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
+                       side_effect=_side_effect):
+                flags: list = []
+                foreign_count, trust_count, dealer_count = (
+                    fetcher._fetch_institution_consecutive_days(ticker, trade_date, flags)
+                )
+
+        assert foreign_count > 0
+        assert trust_count > 0
+        assert dealer_count == 0   # column absent → no dealer data → 0
+
+
+# ------------------------------------------------------------------
+# Tier A: _fetch_sbl_data
+# ------------------------------------------------------------------
+
+def _make_sbl_response(ticker: str, sbl_shares: int, total_shares: int) -> dict:
+    """Minimal valid TWSE TWT93U SBL JSON response."""
+    return {
+        "stat": "OK",
+        "fields": ["證券代號", "借券賣出成交股數", "當日成交股數"],
+        "data": [
+            [ticker, f"{sbl_shares:,}", f"{total_shares:,}"],
+        ],
+    }
+
+
+class TestFetchSblData:
+    def test_fetch_sbl_data_parses_correctly(self):
+        """_fetch_sbl_data returns ratio = sbl_shares / total_shares."""
+        ticker = "2330"
+        trade_date = date(2026, 3, 24)
+
+        sbl_resp = MagicMock()
+        sbl_resp.json.return_value = _make_sbl_response(ticker, sbl_shares=500_000, total_shares=5_000_000)
+        sbl_resp.raise_for_status = MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
+            with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
+                       return_value=sbl_resp):
+                flags: list = []
+                result = fetcher._fetch_sbl_data(ticker, trade_date, flags)
+
+        assert result == pytest.approx(0.10)  # 500_000 / 5_000_000
+
+    def test_fetch_sbl_data_returns_none_on_404(self):
+        """_fetch_sbl_data returns None when HTTP error occurs."""
+        import requests as req_module
+        ticker = "2330"
+        trade_date = date(2026, 3, 24)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
+            with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get") as mock_get:
+                mock_get.side_effect = req_module.exceptions.HTTPError("404")
+                flags: list = []
+                result = fetcher._fetch_sbl_data(ticker, trade_date, flags)
+
+        assert result is None
+        assert any("SBL_ERROR" in f for f in flags)
+
+    def test_fetch_sbl_data_returns_none_on_schema_change(self):
+        """_fetch_sbl_data returns None when required columns are missing."""
+        ticker = "2330"
+        trade_date = date(2026, 3, 24)
+
+        # Response with no SBL-related columns
+        bad_schema_resp = MagicMock()
+        bad_schema_resp.raise_for_status = MagicMock()
+        bad_schema_resp.json.return_value = {
+            "stat": "OK",
+            "fields": ["證券代號", "成交金額"],  # no SBL columns at all
+            "data": [[ticker, "1,000,000"]],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
+            with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
+                       return_value=bad_schema_resp):
+                flags: list = []
+                result = fetcher._fetch_sbl_data(ticker, trade_date, flags)
+
+        assert result is None
+        assert any("SBL_SCHEMA_CHANGED" in f for f in flags)
+
+
+# ------------------------------------------------------------------
+# Tier A: _fetch_margin_utilization
+# ------------------------------------------------------------------
+
+def _make_mi_margn_with_limit(ticker: str, balance: int, limit: int) -> dict:
+    """MI_MARGN response including 融資限額 column."""
+    return {
+        "stat": "OK",
+        "fields": ["股票代號", "融資餘額", "融資限額"],
+        "data": [[ticker, f"{balance:,}", f"{limit:,}"]],
+    }
+
+
+class TestFetchMarginUtilization:
+    def test_fetch_margin_utilization_parses_credit_limit(self):
+        """Returns balance/limit when 融資限額 column is present."""
+        ticker = "2330"
+        trade_date = date(2026, 3, 24)
+
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = _make_mi_margn_with_limit(
+            ticker, balance=20_000, limit=100_000
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
+            with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
+                       return_value=resp):
+                flags: list = []
+                result = fetcher._fetch_margin_utilization(ticker, trade_date, flags)
+
+        assert result == pytest.approx(0.20)  # 20_000 / 100_000
+
+    def test_fetch_margin_utilization_returns_none_without_limit_column(self):
+        """Returns None (no error flag) when 融資限額 column is absent."""
+        ticker = "2330"
+        trade_date = date(2026, 3, 24)
+
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {
+            "stat": "OK",
+            "fields": ["股票代號", "融資餘額"],  # no 融資限額
+            "data": [[ticker, "20,000"]],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
+            with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
+                       return_value=resp):
+                flags: list = []
+                result = fetcher._fetch_margin_utilization(ticker, trade_date, flags)
+
+        assert result is None
+        # No error flag appended — absent column is expected, not an error
+        assert not any("MARGN" in f or "UTIL" in f for f in flags)

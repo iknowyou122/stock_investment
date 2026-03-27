@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 TWSE_T86_URL = "https://www.twse.com.tw/rwd/zh/fund/T86"
 TWSE_MARGIN_URL = "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
+TWSE_SBL_URL = "https://www.twse.com.tw/rwd/zh/shortselling/TWT93U"
+TWSE_DAYTRADE_URL = "https://www.twse.com.tw/rwd/zh/block/TWTB4U"
 
 _TWSE_HEADERS = {
     "User-Agent": (
@@ -67,8 +69,12 @@ class ChipProxyFetcher:
         Populates:
           - foreign_net_buy, trust_net_buy, dealer_net_buy (T86)
           - margin_balance_change (MI_MARGN 融資)
-          - foreign_consecutive_buy_days (multi-day T86 lookback)
+          - foreign_consecutive_buy_days, trust_consecutive_buy_days,
+            dealer_consecutive_buy_days (multi-day T86 lookback)
           - short_balance_increased, short_margin_ratio (MI_MARGN 融券)
+          - sbl_ratio, sbl_available (TWT93U SBL endpoint)
+          - margin_utilization_rate (MI_MARGN 融資限額 column)
+          - daytrade_ratio (TWTB4U 當沖 endpoint, hint only)
 
         Returns TWSEChipProxy(is_available=False) on any failure — never raises.
         """
@@ -76,8 +82,13 @@ class ChipProxyFetcher:
 
         foreign_net, trust_net, dealer_net = self._fetch_t86_data(ticker, trade_date, flags)
         margin_change = self._fetch_margin_balance_change(ticker, trade_date, flags)
-        foreign_consec = self._fetch_foreign_consecutive_days(ticker, trade_date, flags)
+        foreign_consec, trust_consec, dealer_consec = self._fetch_institution_consecutive_days(
+            ticker, trade_date, flags
+        )
         short_increased, short_margin_ratio = self._fetch_short_data(ticker, trade_date, flags)
+        sbl_ratio = self._fetch_sbl_data(ticker, trade_date, flags)
+        margin_util = self._fetch_margin_utilization(ticker, trade_date, flags)
+        daytrade_ratio = self._fetch_daytrade_data(ticker, trade_date, flags)
 
         # Only mark available if at least one data source succeeded
         is_available = (
@@ -95,8 +106,14 @@ class ChipProxyFetcher:
             dealer_net_buy=dealer_net or 0,
             margin_balance_change=margin_change or 0,
             foreign_consecutive_buy_days=foreign_consec,
+            trust_consecutive_buy_days=trust_consec,
+            dealer_consecutive_buy_days=dealer_consec,
             short_balance_increased=short_increased,
             short_margin_ratio=short_margin_ratio,
+            sbl_ratio=sbl_ratio if sbl_ratio is not None else 0.0,
+            sbl_available=sbl_ratio is not None,
+            margin_utilization_rate=margin_util,
+            daytrade_ratio=daytrade_ratio,
             is_available=is_available,
             data_quality_flags=flags,
         )
@@ -371,32 +388,287 @@ class ChipProxyFetcher:
 
         return short_increased, short_margin_ratio
 
-    def _fetch_foreign_consecutive_days(
+    def _fetch_institution_consecutive_days(
         self, ticker: str, trade_date: date, flags: list[str]
-    ) -> int:
-        """Count consecutive calendar-adjusted days of foreign net buy ending on trade_date.
+    ) -> tuple[int, int, int]:
+        """Count consecutive calendar-adjusted buy days for all three institutions.
 
-        Looks back up to 14 calendar days (~7 trading days). Non-trading days
-        (weekends/holidays) that return no data are skipped transparently.
-        Returns 0 if trade_date itself has no foreign net buy data or if foreign <= 0.
+        Returns (foreign_count, trust_count, dealer_count).
+
+        Looks back up to 14 calendar days (~7 trading days) using the T86 data
+        already fetched/cached — zero additional network calls.
+        Non-trading days (weekends/holidays) are skipped transparently.
+        Returns 0 for an institution if it has no positive net buy on trade_date.
         """
-        trading_day_values: list[int] = []
+        foreign_vals: list[int] = []
+        trust_vals: list[int] = []
+        dealer_vals: list[int] = []
 
         for offset in range(15):  # 0 = trade_date, 1 = yesterday, ...
             check_date = trade_date - timedelta(days=offset)
             # Use throwaway flags so lookback days don't pollute the main flags
             _silent: list[str] = []
-            foreign_val, _, _ = self._fetch_t86_data(ticker, check_date, _silent)
+            foreign_val, trust_val, dealer_val = self._fetch_t86_data(ticker, check_date, _silent)
             if foreign_val is not None:
-                trading_day_values.append(foreign_val)
-                if len(trading_day_values) >= 7:  # 7 trading days is enough
+                foreign_vals.append(foreign_val)
+            if trust_val is not None:
+                trust_vals.append(trust_val)
+            if dealer_val is not None:
+                dealer_vals.append(dealer_val)
+            # Stop once we have 7 trading days of foreign data (same budget as original).
+            # Trust/dealer may have fewer entries if their columns are absent on some dates.
+            if len(foreign_vals) >= 7:
+                break
+
+        def _count_consec(vals: list[int]) -> int:
+            count = 0
+            for val in vals:
+                if val > 0:
+                    count += 1
+                else:
+                    break
+            return count
+
+        return (
+            _count_consec(foreign_vals),
+            _count_consec(trust_vals),
+            _count_consec(dealer_vals),
+        )
+
+    def _fetch_foreign_consecutive_days(
+        self, ticker: str, trade_date: date, flags: list[str]
+    ) -> int:
+        """Backward-compat wrapper. Returns foreign consecutive buy days only.
+
+        Prefer _fetch_institution_consecutive_days() for new call sites — it
+        returns all three institutions in one pass.
+        """
+        foreign_count, _, _ = self._fetch_institution_consecutive_days(ticker, trade_date, flags)
+        return foreign_count
+
+    def _fetch_sbl_data(
+        self, ticker: str, trade_date: date, flags: list[str]
+    ) -> float | None:
+        """Fetch 借券賣出占成交量比重 from TWSE TWT93U SBL endpoint.
+
+        Returns sbl_ratio (0.0–1.0) or None if unavailable/error.
+        Cache key: twse_sbl_{ticker}_{date}.parquet
+        """
+        cache = self._cache_dir / f"twse_sbl_{ticker}_{trade_date}.parquet"
+        if cache.exists():
+            try:
+                df = pd.read_parquet(cache)
+                if not df.empty and "sbl_ratio" in df.columns:
+                    return float(df["sbl_ratio"].iloc[0])
+            except Exception:
+                pass
+
+        try:
+            resp = requests.get(
+                TWSE_SBL_URL,
+                params={
+                    "date": trade_date.strftime("%Y%m%d"),
+                    "selectType": "ALL",
+                    "response": "json",
+                },
+                headers=_TWSE_HEADERS,
+                timeout=10,
+                verify=False,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+
+            if body.get("stat") != "OK" or not body.get("data"):
+                return None
+
+            fields = body.get("fields", [])
+            try:
+                code_idx = fields.index("證券代號")
+            except ValueError:
+                flags.append("TWSE_SBL_SCHEMA_CHANGED")
+                return None
+
+            # Find 借券賣出成交股數 and 當日成交股數 columns (dynamic lookup)
+            sbl_sell_idx: int | None = None
+            total_vol_idx: int | None = None
+            for candidate in ("借券賣出成交股數", "借券賣出張數"):
+                if candidate in fields:
+                    sbl_sell_idx = fields.index(candidate)
+                    break
+            for candidate in ("當日成交股數", "成交股數", "當日成交量"):
+                if candidate in fields:
+                    total_vol_idx = fields.index(candidate)
                     break
 
-        # Count consecutive days (newest first) where foreign net buy > 0
-        count = 0
-        for val in trading_day_values:
-            if val > 0:
-                count += 1
-            else:
-                break
-        return count
+            if sbl_sell_idx is None or total_vol_idx is None:
+                flags.append("TWSE_SBL_SCHEMA_CHANGED")
+                return None
+
+            for row in body["data"]:
+                if row[code_idx].strip() == ticker:
+                    sbl_raw = row[sbl_sell_idx].replace(",", "").strip()
+                    vol_raw = row[total_vol_idx].replace(",", "").strip()
+                    try:
+                        sbl_shares = int(sbl_raw)
+                        total_shares = int(vol_raw)
+                    except ValueError:
+                        flags.append("TWSE_SBL_PARSE_ERROR")
+                        return None
+                    if total_shares <= 0:
+                        return None
+                    ratio = sbl_shares / total_shares
+                    pd.DataFrame([{"sbl_ratio": ratio}]).to_parquet(cache, index=False)
+                    return ratio
+
+            return None
+
+        except Exception as e:
+            logger.warning(
+                "ChipProxyFetcher: SBL fetch failed for %s %s: %s", ticker, trade_date, e
+            )
+            flags.append(f"TWSE_SBL_ERROR:{type(e).__name__}")
+            return None
+
+    def _fetch_margin_utilization(
+        self, ticker: str, trade_date: date, flags: list[str]
+    ) -> float | None:
+        """Fetch 融資使用率 = 融資餘額 / 融資限額 from TWSE MI_MARGN.
+
+        Returns utilization ratio (0.0–1.0+) or None if 融資限額 column is missing
+        or unavailable. No error flag is appended when column is absent — it's an
+        optional enhancement, not a failure.
+        Cache key: twse_margin_util_{ticker}_{date}.parquet
+        """
+        cache = self._cache_dir / f"twse_margin_util_{ticker}_{trade_date}.parquet"
+        if cache.exists():
+            try:
+                df = pd.read_parquet(cache)
+                if not df.empty and "margin_utilization" in df.columns:
+                    val = df["margin_utilization"].iloc[0]
+                    return None if pd.isna(val) else float(val)
+            except Exception:
+                pass
+
+        try:
+            resp = requests.get(
+                TWSE_MARGIN_URL,
+                params={
+                    "date": trade_date.strftime("%Y%m%d"),
+                    "selectType": "ALL",
+                    "response": "json",
+                },
+                headers=_TWSE_HEADERS,
+                timeout=10,
+                verify=False,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+
+            if body.get("stat") != "OK" or not body.get("data"):
+                return None
+
+            fields = body.get("fields", [])
+            try:
+                code_idx = fields.index("股票代號")
+                balance_idx = fields.index("融資餘額")
+            except ValueError:
+                return None
+
+            # 融資限額 is optional — column may not be present in all responses
+            limit_idx: int | None = fields.index("融資限額") if "融資限額" in fields else None
+            if limit_idx is None:
+                return None  # Column absent — no error, just unavailable
+
+            for row in body["data"]:
+                if row[code_idx].strip() == ticker:
+                    try:
+                        balance = int(row[balance_idx].replace(",", "").strip())
+                        limit = int(row[limit_idx].replace(",", "").strip())
+                    except ValueError:
+                        return None
+                    if limit <= 0:
+                        return None
+                    ratio = balance / limit
+                    pd.DataFrame([{"margin_utilization": ratio}]).to_parquet(cache, index=False)
+                    return ratio
+
+            return None
+
+        except Exception as e:
+            logger.warning(
+                "ChipProxyFetcher: margin utilization fetch failed for %s %s: %s",
+                ticker, trade_date, e,
+            )
+            return None
+
+    def _fetch_daytrade_data(
+        self, ticker: str, trade_date: date, flags: list[str]
+    ) -> float | None:
+        """Fetch 當沖占成交量比重 from TWSE TWTB4U 當沖 endpoint.
+
+        Returns daytrade_ratio (0.0–1.0) or None if unavailable/error.
+        Non-scoring: value is for LLM hint only.
+        Cache key: twse_daytrade_{ticker}_{date}.parquet
+        """
+        cache = self._cache_dir / f"twse_daytrade_{ticker}_{trade_date}.parquet"
+        if cache.exists():
+            try:
+                df = pd.read_parquet(cache)
+                if not df.empty and "daytrade_ratio" in df.columns:
+                    val = df["daytrade_ratio"].iloc[0]
+                    return None if pd.isna(val) else float(val)
+            except Exception:
+                pass
+
+        try:
+            resp = requests.get(
+                TWSE_DAYTRADE_URL,
+                params={
+                    "date": trade_date.strftime("%Y%m%d"),
+                    "selectType": "ALL",
+                    "response": "json",
+                },
+                headers=_TWSE_HEADERS,
+                timeout=10,
+                verify=False,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+
+            if body.get("stat") != "OK" or not body.get("data"):
+                return None
+
+            fields = body.get("fields", [])
+            try:
+                code_idx = fields.index("證券代號")
+            except ValueError:
+                return None
+
+            # Find 當沖占比 column (dynamic lookup across naming variants)
+            ratio_idx: int | None = None
+            for candidate in ("當沖占成交量比重", "當沖比率", "當沖比例"):
+                if candidate in fields:
+                    ratio_idx = fields.index(candidate)
+                    break
+            if ratio_idx is None:
+                return None
+
+            for row in body["data"]:
+                if row[code_idx].strip() == ticker:
+                    raw = row[ratio_idx].replace(",", "").replace("%", "").strip()
+                    try:
+                        pct = float(raw)
+                        # Value may be expressed as percentage (e.g. 23.5) or ratio (0.235)
+                        ratio = pct / 100.0 if pct > 1.0 else pct
+                        pd.DataFrame([{"daytrade_ratio": ratio}]).to_parquet(cache, index=False)
+                        return ratio
+                    except ValueError:
+                        return None
+
+            return None
+
+        except Exception as e:
+            logger.warning(
+                "ChipProxyFetcher: daytrade fetch failed for %s %s: %s", ticker, trade_date, e
+            )
+            return None
