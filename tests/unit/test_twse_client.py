@@ -39,15 +39,27 @@ def _make_t86_response(ticker: str, net_buy: int, trust_buy: int = 0, dealer_buy
     }
 
 
-def _make_mi_margn_response(ticker: str, balance: int) -> dict:
-    """Minimal valid TWSE MI_MARGN JSON response."""
-    return {
-        "stat": "OK",
-        "fields": ["股票代號", "融資餘額"],
-        "data": [
-            [ticker, f"{balance:,}"],
-        ],
-    }
+def _make_mi_margn_openapi_response(
+    ticker: str,
+    today_margin: int = 0,
+    prev_margin: int = 0,
+    today_short: int = 0,
+    prev_short: int = 0,
+    margin_limit: int = 0,
+) -> list:
+    """Minimal openapi MI_MARGN list response."""
+    return [
+        {
+            "股票代號": ticker,
+            "股票名稱": "Test",
+            "融資今日餘額": str(today_margin),
+            "融資前日餘額": str(prev_margin),
+            "融券今日餘額": str(today_short),
+            "融券前日餘額": str(prev_short),
+            "融資限額": str(margin_limit) if margin_limit else "",
+            "融券限額": "",
+        }
+    ]
 
 
 # ------------------------------------------------------------------
@@ -64,20 +76,22 @@ class TestChipProxyFetcherSuccess:
         t86_resp.json.return_value = _make_t86_response(ticker, net_buy=5_000_000, trust_buy=200_000, dealer_buy=100_000)
         t86_resp.raise_for_status = MagicMock()
 
-        margn_today = MagicMock()
-        margn_today.json.return_value = _make_mi_margn_response(ticker, 10_000)
-        margn_today.raise_for_status = MagicMock()
-
-        margn_prev = MagicMock()
-        margn_prev.json.return_value = _make_mi_margn_response(ticker, 12_000)
-        margn_prev.raise_for_status = MagicMock()
+        margn_resp = MagicMock()
+        margn_resp.json.return_value = _make_mi_margn_openapi_response(
+            ticker, today_margin=10_000, prev_margin=12_000
+        )
+        margn_resp.raise_for_status = MagicMock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
 
+            def _side_effect(url, **kwargs):
+                if "T86" in url:
+                    return t86_resp
+                return margn_resp
+
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get") as mock_get:
-                # First call = T86, second = today's margin, third = yesterday's margin
-                mock_get.side_effect = [t86_resp, margn_today, margn_prev]
+                mock_get.side_effect = _side_effect
                 proxy = fetcher.fetch(ticker, trade_date)
 
         assert proxy.is_available is True
@@ -124,7 +138,7 @@ class TestChipProxyFetcherNetworkFailure:
 
 class TestChipProxyFetcherPartialData:
     def test_foreign_present_margin_missing_flags_partial(self):
-        """T86 returns data, MI_MARGN returns empty → partial proxy with flag."""
+        """T86 returns data, MI_MARGN returns empty list → partial proxy with flag."""
         ticker = "2330"
         trade_date = date(2026, 3, 24)
 
@@ -132,16 +146,21 @@ class TestChipProxyFetcherPartialData:
         t86_resp.json.return_value = _make_t86_response(ticker, net_buy=3_000_000, trust_buy=100_000)
         t86_resp.raise_for_status = MagicMock()
 
-        # MI_MARGN returns no data
+        # openapi MI_MARGN returns empty list (ticker not found)
         margn_resp = MagicMock()
-        margn_resp.json.return_value = {"stat": "OK", "data": [], "fields": ["股票代號", "融資餘額"]}
+        margn_resp.json.return_value = []
         margn_resp.raise_for_status = MagicMock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
 
+            def _side_effect(url, **kwargs):
+                if "T86" in url:
+                    return t86_resp
+                return margn_resp
+
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get") as mock_get:
-                mock_get.side_effect = [t86_resp, margn_resp]
+                mock_get.side_effect = _side_effect
                 proxy = fetcher.fetch(ticker, trade_date)
 
         # Foreign is available, so is_available=True (at least one source)
@@ -159,16 +178,21 @@ class TestChipProxyFetcherPartialData:
         t86_resp.json.return_value = _make_t86_response(ticker, net_buy=-500_000, trust_buy=300_000)
         t86_resp.raise_for_status = MagicMock()
 
-        # MI_MARGN returns no data — only T86 matters here
+        # openapi MI_MARGN returns empty list — only T86 matters here
         margn_resp = MagicMock()
-        margn_resp.json.return_value = {"stat": "OK", "data": [], "fields": ["股票代號", "融資餘額"]}
+        margn_resp.json.return_value = []
         margn_resp.raise_for_status = MagicMock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
 
+            def _side_effect(url, **kwargs):
+                if "T86" in url:
+                    return t86_resp
+                return margn_resp
+
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get") as mock_get:
-                mock_get.side_effect = [t86_resp, margn_resp]
+                mock_get.side_effect = _side_effect
                 proxy = fetcher.fetch(ticker, trade_date)
 
         # 外資 net sell but 投信 net buy — proxy still available
@@ -193,14 +217,19 @@ class TestChipProxyFetcherPartialData:
         t86_resp.raise_for_status = MagicMock()
 
         margn_resp = MagicMock()
-        margn_resp.json.return_value = {"stat": "OK", "data": [], "fields": ["股票代號", "融資餘額"]}
+        margn_resp.json.return_value = []
         margn_resp.raise_for_status = MagicMock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
 
+            def _side_effect(url, **kwargs):
+                if "T86" in url:
+                    return t86_resp
+                return margn_resp
+
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get") as mock_get:
-                mock_get.side_effect = [t86_resp, margn_resp]
+                mock_get.side_effect = _side_effect
                 proxy = fetcher.fetch(ticker, trade_date)
 
         assert proxy.foreign_net_buy == 1_000_000
@@ -219,14 +248,19 @@ class TestChipProxyFetcherPartialData:
         t86_resp.raise_for_status = MagicMock()
 
         margn_resp = MagicMock()
-        margn_resp.json.return_value = {"stat": "OK", "data": [], "fields": ["股票代號", "融資餘額"]}
+        margn_resp.json.return_value = []
         margn_resp.raise_for_status = MagicMock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
 
+            def _side_effect(url, **kwargs):
+                if "T86" in url:
+                    return t86_resp
+                return margn_resp
+
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get") as mock_get:
-                mock_get.side_effect = [t86_resp, margn_resp]
+                mock_get.side_effect = _side_effect
                 proxy = fetcher.fetch(ticker, trade_date)
 
         assert proxy.is_available is True
@@ -249,14 +283,19 @@ class TestChipProxyFetcherPartialData:
         t86_resp.raise_for_status = MagicMock()
 
         margn_resp = MagicMock()
-        margn_resp.json.return_value = {"stat": "OK", "data": [], "fields": ["股票代號", "融資餘額"]}
+        margn_resp.json.return_value = []
         margn_resp.raise_for_status = MagicMock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
 
+            def _side_effect(url, **kwargs):
+                if "T86" in url:
+                    return t86_resp
+                return margn_resp
+
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get") as mock_get:
-                mock_get.side_effect = [t86_resp, margn_resp]
+                mock_get.side_effect = _side_effect
                 proxy = fetcher.fetch(ticker, trade_date)
 
         assert proxy.foreign_net_buy == 2_000_000
@@ -277,12 +316,15 @@ class TestChipProxyFetcherCache:
             t86_cache = Path(tmpdir) / f"twse_t86_{ticker}_{trade_date}.parquet"
             pd.DataFrame([{"foreign_net_buy": 2_000_000, "trust_net_buy": 50_000, "dealer_net_buy": 30_000}]).to_parquet(t86_cache, index=False)
 
-            # Margin caches (today + yesterday for margin_balance_change)
-            pd.DataFrame([{"margin_balance": 8_000}]).to_parquet(
-                Path(tmpdir) / f"twse_margin_{ticker}_{trade_date}.parquet", index=False
-            )
-            pd.DataFrame([{"margin_balance": 10_000}]).to_parquet(
-                Path(tmpdir) / f"twse_margin_{ticker}_{trade_date - timedelta(days=1)}.parquet", index=False
+            # Unified margin row cache (replaces separate today/prev/short cache files)
+            pd.DataFrame([{
+                "today_margin": 8_000,
+                "prev_margin": 10_000,
+                "today_short": 5_000,
+                "prev_short": 4_000,
+                "margin_limit": 0,
+            }]).to_parquet(
+                Path(tmpdir) / f"twse_margin_row_{ticker}_{trade_date}.parquet", index=False
             )
 
             # T86 lookback caches (offsets 1-14) — weekends get a "no_data" sentinel
@@ -294,14 +336,6 @@ class TestChipProxyFetcherCache:
                     pd.DataFrame([{"no_data": True}]).to_parquet(path, index=False)
                 else:
                     pd.DataFrame([{"foreign_net_buy": 1_000_000, "trust_net_buy": 50_000, "dealer_net_buy": 30_000}]).to_parquet(path, index=False)
-
-            # Short balance caches (today + yesterday for short_balance_increased)
-            pd.DataFrame([{"short_balance": 5_000}]).to_parquet(
-                Path(tmpdir) / f"twse_short_{ticker}_{trade_date}.parquet", index=False
-            )
-            pd.DataFrame([{"short_balance": 4_000}]).to_parquet(
-                Path(tmpdir) / f"twse_short_{ticker}_{trade_date - timedelta(days=1)}.parquet", index=False
-            )
 
             # SBL cache (Tier A new endpoint)
             pd.DataFrame([{"sbl_ratio": 0.05}]).to_parquet(
@@ -328,8 +362,8 @@ class TestChipProxyFetcherCache:
         assert proxy.dealer_net_buy == 30_000
         assert proxy.margin_balance_change == -2_000          # 8_000 - 10_000
         assert proxy.foreign_consecutive_buy_days == 7        # today + 6 prior trading days
-        assert proxy.short_balance_increased is True          # 5_000 > 4_000 * 1.20
-        assert proxy.short_margin_ratio == pytest.approx(5_000 / 8_000)
+        assert proxy.short_balance_increased is True          # 5_000 > 4_000 * 1.20 = 4_800
+        assert proxy.short_margin_ratio == pytest.approx(5_000 / 8_000)  # today_short / today_margin
 
 
 # ------------------------------------------------------------------
@@ -436,17 +470,6 @@ class TestForeignConsecutiveDays:
 # Factor 7: 融券餘額 + 券資比 (short_balance_increased, short_margin_ratio)
 # ------------------------------------------------------------------
 
-def _make_mi_margn_full_response(ticker: str, margin: int, short: int) -> dict:
-    """Minimal MI_MARGN response with both 融資餘額 and 融券餘額."""
-    return {
-        "stat": "OK",
-        "fields": ["股票代號", "融資餘額", "融券餘額"],
-        "data": [
-            [ticker, f"{margin:,}", f"{short:,}"],
-        ],
-    }
-
-
 class TestShortBalanceData:
     def test_short_spike_detected(self):
         """When today's 融券餘額 > yesterday's × 1.20, short_balance_increased is True."""
@@ -457,26 +480,20 @@ class TestShortBalanceData:
         t86_resp.json.return_value = _make_t86_response("2330", net_buy=1_000_000)
         t86_resp.raise_for_status = MagicMock()
 
-        margn_today = MagicMock()
-        margn_today.json.return_value = _make_mi_margn_full_response(ticker, margin=10_000, short=6_000)
-        margn_today.raise_for_status = MagicMock()
-
-        margn_prev = MagicMock()
-        margn_prev.json.return_value = _make_mi_margn_full_response(ticker, margin=10_000, short=4_000)
-        margn_prev.raise_for_status = MagicMock()
+        # Single openapi call returns both today and prev values
+        margn_resp = MagicMock()
+        margn_resp.json.return_value = _make_mi_margn_openapi_response(
+            ticker, today_margin=10_000, prev_margin=10_000, today_short=6_000, prev_short=4_000
+        )
+        margn_resp.raise_for_status = MagicMock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
-            # T86 (today) + many lookback T86s + margin (today) + margin (prev)
-            # + short (today) + short (prev)
-            # We use a mapping approach to avoid ordering fragility
-            def _short_side_effect(url, params, **kwargs):
+
+            def _short_side_effect(url, **kwargs):
                 if "T86" in url:
                     return t86_resp
-                d = params["date"]
-                if d == trade_date.strftime("%Y%m%d"):
-                    return margn_today
-                return margn_prev
+                return margn_resp
 
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
                        side_effect=_short_side_effect):
@@ -491,22 +508,19 @@ class TestShortBalanceData:
         ticker = "2330"
         trade_date = date(2026, 3, 26)
 
-        t86_resp = MagicMock()
-        t86_resp.json.return_value = _make_t86_response("2330", net_buy=1_000_000)
-        t86_resp.raise_for_status = MagicMock()
+        margn_resp = MagicMock()
+        margn_resp.json.return_value = _make_mi_margn_openapi_response(
+            ticker, today_margin=10_000, prev_margin=10_000, today_short=4_500, prev_short=4_000
+        )
+        margn_resp.raise_for_status = MagicMock()
 
-        def _side_effect(url, params, **kwargs):
+        def _side_effect(url, **kwargs):
             mock_resp = MagicMock()
             mock_resp.raise_for_status = MagicMock()
             if "T86" in url:
                 mock_resp.json.return_value = _make_t86_response("2330", net_buy=1_000_000)
-            else:
-                d = params["date"]
-                if d == trade_date.strftime("%Y%m%d"):
-                    mock_resp.json.return_value = _make_mi_margn_full_response(ticker, margin=10_000, short=4_500)
-                else:
-                    mock_resp.json.return_value = _make_mi_margn_full_response(ticker, margin=10_000, short=4_000)
-            return mock_resp
+                return mock_resp
+            return margn_resp
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
@@ -518,22 +532,18 @@ class TestShortBalanceData:
         assert proxy.short_margin_ratio == pytest.approx(4_500 / 10_000)
 
     def test_short_data_unavailable_returns_defaults(self):
-        """When MI_MARGN returns no 融券餘額 column, short fields default to safe values."""
+        """When openapi MI_MARGN returns empty list, short fields default to safe values."""
         ticker = "2330"
         trade_date = date(2026, 3, 26)
 
-        def _side_effect(url, params, **kwargs):
+        def _side_effect(url, **kwargs):
             mock_resp = MagicMock()
             mock_resp.raise_for_status = MagicMock()
             if "T86" in url:
                 mock_resp.json.return_value = _make_t86_response("2330", net_buy=1_000_000)
             else:
-                # MI_MARGN without 融券餘額 column
-                mock_resp.json.return_value = {
-                    "stat": "OK",
-                    "fields": ["股票代號", "融資餘額"],
-                    "data": [[ticker, "10,000"]],
-                }
+                # openapi returns empty list — ticker not margin-eligible
+                mock_resp.json.return_value = []
             return mock_resp
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -732,25 +742,16 @@ class TestFetchSblData:
 # Tier A: _fetch_margin_utilization
 # ------------------------------------------------------------------
 
-def _make_mi_margn_with_limit(ticker: str, balance: int, limit: int) -> dict:
-    """MI_MARGN response including 融資限額 column."""
-    return {
-        "stat": "OK",
-        "fields": ["股票代號", "融資餘額", "融資限額"],
-        "data": [[ticker, f"{balance:,}", f"{limit:,}"]],
-    }
-
-
 class TestFetchMarginUtilization:
     def test_fetch_margin_utilization_parses_credit_limit(self):
-        """Returns balance/limit when 融資限額 column is present."""
+        """Returns balance/limit when 融資限額 is present in openapi response."""
         ticker = "2330"
         trade_date = date(2026, 3, 24)
 
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
-        resp.json.return_value = _make_mi_margn_with_limit(
-            ticker, balance=20_000, limit=100_000
+        resp.json.return_value = _make_mi_margn_openapi_response(
+            ticker, today_margin=20_000, prev_margin=18_000, margin_limit=100_000
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -763,17 +764,16 @@ class TestFetchMarginUtilization:
         assert result == pytest.approx(0.20)  # 20_000 / 100_000
 
     def test_fetch_margin_utilization_returns_none_without_limit_column(self):
-        """Returns None (no error flag) when 融資限額 column is absent."""
+        """Returns None (no error flag) when 融資限額 field is empty string."""
         ticker = "2330"
         trade_date = date(2026, 3, 24)
 
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
-        resp.json.return_value = {
-            "stat": "OK",
-            "fields": ["股票代號", "融資餘額"],  # no 融資限額
-            "data": [[ticker, "20,000"]],
-        }
+        # margin_limit=0 in helper → writes "" for 融資限額
+        resp.json.return_value = _make_mi_margn_openapi_response(
+            ticker, today_margin=20_000, prev_margin=18_000, margin_limit=0
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir))
@@ -783,5 +783,5 @@ class TestFetchMarginUtilization:
                 result = fetcher._fetch_margin_utilization(ticker, trade_date, flags)
 
         assert result is None
-        # No error flag appended — absent column is expected, not an error
+        # No error flag appended — absent limit is expected, not an error
         assert not any("MARGN" in f or "UTIL" in f for f in flags)

@@ -28,7 +28,8 @@ from taiwan_stock_agent.domain.models import TWSEChipProxy
 logger = logging.getLogger(__name__)
 
 TWSE_T86_URL = "https://www.twse.com.tw/rwd/zh/fund/T86"
-TWSE_MARGIN_URL = "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
+TWSE_MARGIN_OPENAPI_URL = "https://openapi.twse.com.tw/v1/marginTrading/MI_MARGN"
+# TWT93U SBL endpoint — returns 404 as of 2026-03-27; _fetch_sbl_data degrades to 0 gracefully.
 TWSE_SBL_URL = "https://www.twse.com.tw/rwd/zh/shortselling/TWT93U"
 TWSE_DAYTRADE_URL = "https://www.twse.com.tw/rwd/zh/block/TWTB4U"
 
@@ -68,12 +69,12 @@ class ChipProxyFetcher:
 
         Populates:
           - foreign_net_buy, trust_net_buy, dealer_net_buy (T86)
-          - margin_balance_change (MI_MARGN 融資)
+          - margin_balance_change (openapi MI_MARGN 融資今日/前日餘額)
           - foreign_consecutive_buy_days, trust_consecutive_buy_days,
             dealer_consecutive_buy_days (multi-day T86 lookback)
-          - short_balance_increased, short_margin_ratio (MI_MARGN 融券)
+          - short_balance_increased, short_margin_ratio (openapi MI_MARGN 融券今日/前日餘額)
           - sbl_ratio, sbl_available (TWT93U SBL endpoint)
-          - margin_utilization_rate (MI_MARGN 融資限額 column)
+          - margin_utilization_rate (openapi MI_MARGN 融資限額 column)
           - daytrade_ratio (TWTB4U 當沖 endpoint, hint only)
 
         Returns TWSEChipProxy(is_available=False) on any failure — never raises.
@@ -222,142 +223,103 @@ class ChipProxyFetcher:
             flags.append(f"TWSE_T86_ERROR:{type(e).__name__}")
             return None, None, None
 
+    def _fetch_margin_row_openapi(
+        self, ticker: str, trade_date: date, flags: list[str]
+    ) -> tuple[int | None, int | None, int | None, int | None, int | None]:
+        """Fetch per-stock margin row from TWSE openapi MI_MARGN endpoint.
+
+        Cache key: twse_margin_row_{ticker}_{trade_date}.parquet
+        Columns: today_margin, prev_margin, today_short, prev_short, margin_limit
+
+        The openapi endpoint always returns today's data (date param is ignored).
+        Both today and previous day values are embedded in a single response row.
+
+        Returns:
+            (today_margin, prev_margin, today_short, prev_short, margin_limit)
+            Any value may be None if the field is absent or an empty string.
+        """
+        cache = self._cache_dir / f"twse_margin_row_{ticker}_{trade_date}.parquet"
+        if cache.exists():
+            try:
+                df = pd.read_parquet(cache)
+                if not df.empty:
+                    def _col(col: str) -> int | None:
+                        if col not in df.columns:
+                            return None
+                        val = df[col].iloc[0]
+                        return None if pd.isna(val) else int(val)
+                    return (
+                        _col("today_margin"),
+                        _col("prev_margin"),
+                        _col("today_short"),
+                        _col("prev_short"),
+                        _col("margin_limit"),
+                    )
+            except Exception:
+                pass
+
+        try:
+            resp = requests.get(
+                TWSE_MARGIN_OPENAPI_URL,
+                timeout=10,
+                verify=False,  # openapi.twse.com.tw shares same CA cert issue (Missing Subject Key Identifier)
+            )
+            resp.raise_for_status()
+            rows = resp.json()
+
+            if not isinstance(rows, list):
+                flags.append("TWSE_MARGN_ERROR:UnexpectedFormat")
+                return (None, None, None, None, None)
+
+            def _parse_int(val: str) -> int | None:
+                if val is None or val.strip() == "":
+                    return None
+                try:
+                    return int(val.replace(",", "").strip())
+                except ValueError:
+                    return None
+
+            for row in rows:
+                if row.get("股票代號", "").strip() == ticker:
+                    today_margin = _parse_int(row.get("融資今日餘額", ""))
+                    prev_margin = _parse_int(row.get("融資前日餘額", ""))
+                    today_short = _parse_int(row.get("融券今日餘額", ""))
+                    prev_short = _parse_int(row.get("融券前日餘額", ""))
+                    margin_limit = _parse_int(row.get("融資限額", ""))
+
+                    pd.DataFrame([{
+                        "today_margin": today_margin,
+                        "prev_margin": prev_margin,
+                        "today_short": today_short,
+                        "prev_short": prev_short,
+                        "margin_limit": margin_limit,
+                    }]).to_parquet(cache, index=False)
+                    return today_margin, prev_margin, today_short, prev_short, margin_limit
+
+            # Ticker not in response — stock may not be margin-eligible
+            return (None, None, None, None, None)
+
+        except Exception as e:
+            logger.warning(
+                "ChipProxyFetcher: openapi MI_MARGN fetch failed for %s %s: %s",
+                ticker, trade_date, e,
+            )
+            flags.append(f"TWSE_MARGN_ERROR:{type(e).__name__}")
+            return (None, None, None, None, None)
+
     def _fetch_margin_balance_change(
         self, ticker: str, trade_date: date, flags: list[str]
     ) -> int | None:
-        """Fetch 融資餘額 change (today - yesterday) from TWSE MI_MARGN.
+        """Fetch 融資餘額 change (today - prev) from openapi MI_MARGN.
 
         Returns change in shares (negative = decreasing), or None if unavailable.
-        Fetches today and previous trading day, computes diff.
+        Both today and previous values come from a single openapi response row.
         """
-        today_balance = self._fetch_margin_balance_one_day(ticker, trade_date, flags)
-        if today_balance is None:
+        today, prev, _, _, _ = self._fetch_margin_row_openapi(ticker, trade_date, flags)
+        if today is None or prev is None:
+            flags.append(f"TWSE_MARGIN_NO_PREV:{trade_date - timedelta(days=1)}")
             return None
-
-        prev_date = trade_date - timedelta(days=1)
-        prev_balance = self._fetch_margin_balance_one_day(ticker, prev_date, flags, silent=True)
-        if prev_balance is None:
-            # Can't compute change without yesterday; partial data
-            flags.append(f"TWSE_MARGIN_NO_PREV:{prev_date}")
-            return None
-
-        return today_balance - prev_balance
-
-    def _fetch_margin_balance_one_day(
-        self, ticker: str, trade_date: date, flags: list[str], *, silent: bool = False
-    ) -> int | None:
-        """Fetch 融資餘額 (shares) for one day. Returns None on failure."""
-        cache = self._cache_dir / f"twse_margin_{ticker}_{trade_date}.parquet"
-        if cache.exists():
-            try:
-                df = pd.read_parquet(cache)
-                if not df.empty:
-                    return int(df["margin_balance"].iloc[0])
-            except Exception:
-                pass
-
-        try:
-            resp = requests.get(
-                TWSE_MARGIN_URL,
-                params={
-                    "date": trade_date.strftime("%Y%m%d"),
-                    "selectType": "ALL",
-                    "response": "json",
-                },
-                headers=_TWSE_HEADERS,
-                timeout=10,
-                verify=False,  # TWSE CA cert missing Subject Key Identifier (OpenSSL 3.x strict)
-            )
-            resp.raise_for_status()
-            body = resp.json()
-
-            if body.get("stat") != "OK" or not body.get("data"):
-                return None
-
-            fields = body.get("fields", [])
-            try:
-                code_idx = fields.index("股票代號")
-                balance_idx = fields.index("融資餘額")
-            except ValueError:
-                if not silent:
-                    flags.append("TWSE_MARGN_SCHEMA_CHANGED")
-                return None
-
-            for row in body["data"]:
-                if row[code_idx].strip() == ticker:
-                    raw = row[balance_idx].replace(",", "").strip()
-                    value = int(raw)
-                    pd.DataFrame([{"margin_balance": value}]).to_parquet(cache, index=False)
-                    return value
-
-            return None
-
-        except Exception as e:
-            if not silent:
-                logger.warning(
-                    "ChipProxyFetcher: MI_MARGN fetch failed for %s %s: %s",
-                    ticker, trade_date, e,
-                )
-                flags.append(f"TWSE_MARGN_ERROR:{type(e).__name__}")
-            return None
-
-    def _fetch_short_balance_one_day(
-        self, ticker: str, trade_date: date, flags: list[str], *, silent: bool = False
-    ) -> int | None:
-        """Fetch 融券餘額 (shares) for one day from TWSE MI_MARGN. Returns None on failure."""
-        cache = self._cache_dir / f"twse_short_{ticker}_{trade_date}.parquet"
-        if cache.exists():
-            try:
-                df = pd.read_parquet(cache)
-                if not df.empty:
-                    return int(df["short_balance"].iloc[0])
-            except Exception:
-                pass
-
-        try:
-            resp = requests.get(
-                TWSE_MARGIN_URL,
-                params={
-                    "date": trade_date.strftime("%Y%m%d"),
-                    "selectType": "ALL",
-                    "response": "json",
-                },
-                headers=_TWSE_HEADERS,
-                timeout=10,
-                verify=False,  # TWSE CA cert missing Subject Key Identifier (OpenSSL 3.x strict)
-            )
-            resp.raise_for_status()
-            body = resp.json()
-
-            if body.get("stat") != "OK" or not body.get("data"):
-                return None
-
-            fields = body.get("fields", [])
-            try:
-                code_idx = fields.index("股票代號")
-                short_idx = fields.index("融券餘額")
-            except ValueError:
-                if not silent:
-                    flags.append("TWSE_SHORT_SCHEMA_MISSING")
-                return None
-
-            for row in body["data"]:
-                if row[code_idx].strip() == ticker:
-                    raw = row[short_idx].replace(",", "").strip()
-                    value = int(raw)
-                    pd.DataFrame([{"short_balance": value}]).to_parquet(cache, index=False)
-                    return value
-
-            return None
-
-        except Exception as e:
-            if not silent:
-                logger.warning(
-                    "ChipProxyFetcher: short balance fetch failed for %s %s: %s",
-                    ticker, trade_date, e,
-                )
-                flags.append(f"TWSE_SHORT_ERROR:{type(e).__name__}")
-            return None
+        return today - prev
 
     def _fetch_short_data(
         self, ticker: str, trade_date: date, flags: list[str]
@@ -369,19 +331,16 @@ class ChipProxyFetcher:
             short_balance_increased: True if today's 融券餘額 > yesterday's by > 20%.
             short_margin_ratio: 融券餘額 / 融資餘額 (0.0 if unavailable).
         """
-        today_short = self._fetch_short_balance_one_day(ticker, trade_date, flags)
+        today_margin, _, today_short, prev_short, _ = self._fetch_margin_row_openapi(
+            ticker, trade_date, flags
+        )
         if today_short is None:
             return False, 0.0
-
-        prev_date = trade_date - timedelta(days=1)
-        prev_short = self._fetch_short_balance_one_day(ticker, prev_date, flags, silent=True)
 
         short_increased = False
         if prev_short is not None and prev_short > 0:
             short_increased = today_short > prev_short * 1.20
 
-        # 券資比 = 融券餘額 / 融資餘額
-        today_margin = self._fetch_margin_balance_one_day(ticker, trade_date, flags, silent=True)
         short_margin_ratio = 0.0
         if today_margin is not None and today_margin > 0:
             short_margin_ratio = today_short / today_margin
@@ -532,74 +491,30 @@ class ChipProxyFetcher:
     def _fetch_margin_utilization(
         self, ticker: str, trade_date: date, flags: list[str]
     ) -> float | None:
-        """Fetch 融資使用率 = 融資餘額 / 融資限額 from TWSE MI_MARGN.
+        """Fetch 融資使用率 = 融資餘額 / 融資限額 from openapi MI_MARGN.
 
-        Returns utilization ratio (0.0–1.0+) or None if 融資限額 column is missing
-        or unavailable. No error flag is appended when column is absent — it's an
-        optional enhancement, not a failure.
-        Cache key: twse_margin_util_{ticker}_{date}.parquet
+        Returns utilization ratio (0.0–1.0+) or None if 融資限額 is missing or zero.
+        No error flag is appended when limit is absent — it's an optional enhancement.
+        Cache key: twse_margin_util_{ticker}_{date}.parquet (backward-compat cache)
         """
-        cache = self._cache_dir / f"twse_margin_util_{ticker}_{trade_date}.parquet"
-        if cache.exists():
+        util_cache = self._cache_dir / f"twse_margin_util_{ticker}_{trade_date}.parquet"
+        if util_cache.exists():
             try:
-                df = pd.read_parquet(cache)
+                df = pd.read_parquet(util_cache)
                 if not df.empty and "margin_utilization" in df.columns:
                     val = df["margin_utilization"].iloc[0]
                     return None if pd.isna(val) else float(val)
             except Exception:
                 pass
 
-        try:
-            resp = requests.get(
-                TWSE_MARGIN_URL,
-                params={
-                    "date": trade_date.strftime("%Y%m%d"),
-                    "selectType": "ALL",
-                    "response": "json",
-                },
-                headers=_TWSE_HEADERS,
-                timeout=10,
-                verify=False,
-            )
-            resp.raise_for_status()
-            body = resp.json()
-
-            if body.get("stat") != "OK" or not body.get("data"):
-                return None
-
-            fields = body.get("fields", [])
-            try:
-                code_idx = fields.index("股票代號")
-                balance_idx = fields.index("融資餘額")
-            except ValueError:
-                return None
-
-            # 融資限額 is optional — column may not be present in all responses
-            limit_idx: int | None = fields.index("融資限額") if "融資限額" in fields else None
-            if limit_idx is None:
-                return None  # Column absent — no error, just unavailable
-
-            for row in body["data"]:
-                if row[code_idx].strip() == ticker:
-                    try:
-                        balance = int(row[balance_idx].replace(",", "").strip())
-                        limit = int(row[limit_idx].replace(",", "").strip())
-                    except ValueError:
-                        return None
-                    if limit <= 0:
-                        return None
-                    ratio = balance / limit
-                    pd.DataFrame([{"margin_utilization": ratio}]).to_parquet(cache, index=False)
-                    return ratio
-
+        today, _, _, _, limit = self._fetch_margin_row_openapi(ticker, trade_date, flags)
+        if today is None or limit is None or limit <= 0:
             return None
-
-        except Exception as e:
-            logger.warning(
-                "ChipProxyFetcher: margin utilization fetch failed for %s %s: %s",
-                ticker, trade_date, e,
-            )
-            return None
+        ratio = today / limit
+        # Write backward-compat util cache for any consumers reading twse_margin_util_*
+        if not util_cache.exists():
+            pd.DataFrame([{"margin_utilization": ratio}]).to_parquet(util_cache, index=False)
+        return ratio
 
     def _fetch_daytrade_data(
         self, ticker: str, trade_date: date, flags: list[str]

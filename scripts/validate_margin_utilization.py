@@ -17,83 +17,62 @@ import requests
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-TWSE_MARGIN_URL = "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
-_TWSE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://www.twse.com.tw/",
-    "Accept": "application/json, text/plain, */*",
-}
+# TWSE openapi endpoint — returns per-stock list including 融資限額
+TWSE_MARGIN_OPENAPI_URL = "https://openapi.twse.com.tw/v1/marginTrading/MI_MARGN"
 
 
 def validate(ticker: str, trade_date: date) -> int:
     try:
         resp = requests.get(
-            TWSE_MARGIN_URL,
-            params={
-                "date": trade_date.strftime("%Y%m%d"),
-                "selectType": "ALL",
-                "response": "json",
-            },
-            headers=_TWSE_HEADERS,
+            TWSE_MARGIN_OPENAPI_URL,
+            params={"date": trade_date.strftime("%Y%m%d")},
             timeout=15,
-            verify=False,
+            verify=False,  # openapi.twse.com.tw: Missing Subject Key Identifier (OpenSSL 3.x)
         )
         resp.raise_for_status()
-        body = resp.json()
+        rows = resp.json()
     except Exception as e:
         print(f"UNAVAILABLE: network/HTTP error — {e}")
         return 1
 
-    if body.get("stat") != "OK" or not body.get("data"):
-        print(f"UNAVAILABLE: stat={body.get('stat')!r}, data rows={len(body.get('data', []))}")
+    if not isinstance(rows, list):
+        print(f"SCHEMA_CHANGED: expected list, got {type(rows).__name__}")
         return 1
 
-    fields = body.get("fields", [])
-
-    # Required columns
-    if "股票代號" not in fields:
-        print(f"SCHEMA_CHANGED: 股票代號 column missing. fields={fields}")
-        return 1
-    if "融資餘額" not in fields:
-        print(f"SCHEMA_CHANGED: 融資餘額 column missing. fields={fields}")
+    if not rows:
+        print("UNAVAILABLE: empty response list")
         return 1
 
-    # Check for optional 融資限額 column
-    if "融資限額" not in fields:
-        print(
-            f"UNAVAILABLE: 融資限額 column not present in MI_MARGN response.\n"
-            f"Available fields: {fields}"
-        )
+    # Check schema on first row
+    sample = rows[0]
+    required = {"股票代號", "融資今日餘額", "融資限額"}
+    missing = required - set(sample.keys())
+    if missing:
+        print(f"SCHEMA_CHANGED: missing keys {missing}. keys={list(sample.keys())}")
         return 1
 
-    code_idx = fields.index("股票代號")
-    balance_idx = fields.index("融資餘額")
-    limit_idx = fields.index("融資限額")
-
-    for row in body["data"]:
-        if row[code_idx].strip() == ticker:
+    for row in rows:
+        if str(row.get("股票代號", "")).strip() == ticker:
+            balance_raw = row.get("融資今日餘額", "")
+            limit_raw = row.get("融資限額", "")
             try:
-                balance = int(row[balance_idx].replace(",", "").strip())
-                limit = int(row[limit_idx].replace(",", "").strip())
+                balance = int(str(balance_raw).replace(",", "").strip())
+                limit = int(str(limit_raw).replace(",", "").strip()) if limit_raw else 0
             except ValueError as e:
                 print(f"SCHEMA_CHANGED: parse error — {e}. row={row}")
                 return 1
             if limit <= 0:
-                print(f"UNAVAILABLE: 融資限額={limit} for {ticker} on {trade_date} (zero/negative)")
+                print(f"UNAVAILABLE: 融資限額={limit!r} for {ticker} (zero/empty)")
                 return 1
             util = balance / limit
             print(
-                f"AVAILABLE: {ticker} on {trade_date} — "
-                f"融資餘額={balance:,}, 融資限額={limit:,}, "
+                f"AVAILABLE: {ticker} — "
+                f"融資今日餘額={balance:,}, 融資限額={limit:,}, "
                 f"utilization={util:.1%}"
             )
             return 0
 
-    print(f"UNAVAILABLE: ticker {ticker!r} not found in {trade_date} response ({len(body['data'])} rows)")
+    print(f"UNAVAILABLE: ticker {ticker!r} not found in response ({len(rows)} rows)")
     return 1
 
 
