@@ -1,55 +1,16 @@
-"""pytest fixtures: real PostgreSQL via pytest-postgresql, mock FinMind client."""
+"""pytest fixtures: mock FinMind client and domain object factories.
+
+PostgreSQL fixtures (pg_conn, db_migrations_dir) live in
+tests/integration/conftest.py so unit tests don't require a running DB
+or libpq installation.
+"""
 from __future__ import annotations
 
-import os
-from datetime import date
-from pathlib import Path
-from typing import Generator
+from datetime import date, timedelta
 from unittest.mock import MagicMock
 
 import pandas as pd
-import psycopg2
 import pytest
-
-# ---------------------------------------------------------------------------
-# PostgreSQL fixtures (real DB — no mocks per project testing policy)
-# ---------------------------------------------------------------------------
-
-# pytest-postgresql fixture — creates a fresh test DB per session
-pytest_plugins = ["pytest_postgresql.plugin"]
-
-
-@pytest.fixture(scope="session")
-def db_migrations_dir() -> Path:
-    return Path(__file__).resolve().parents[1] / "db" / "migrations"
-
-
-@pytest.fixture(scope="function")
-def pg_conn(postgresql):
-    """Yield a psycopg2 connection to the test PostgreSQL instance.
-
-    Applies all migrations from db/migrations/ before yielding.
-    Rolls back after each test for isolation.
-    """
-    conn = psycopg2.connect(
-        host=postgresql.info.host,
-        port=postgresql.info.port,
-        user=postgresql.info.user,
-        dbname=postgresql.info.dbname,
-    )
-    migrations_dir = Path(__file__).resolve().parents[1] / "db" / "migrations"
-    _apply_migrations(conn, migrations_dir)
-    yield conn
-    conn.rollback()
-    conn.close()
-
-
-def _apply_migrations(conn, migrations_dir: Path) -> None:
-    sql_files = sorted(migrations_dir.glob("*.sql"))
-    with conn.cursor() as cur:
-        for sql_file in sql_files:
-            cur.execute(sql_file.read_text(encoding="utf-8"))
-    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +32,6 @@ def sample_ohlcv_df() -> pd.DataFrame:
     base_close = 100.0
     base_date = date(2025, 1, 2)
 
-    from datetime import timedelta
-
     d = base_date
     for i in range(25):
         close = base_close + i * 0.5  # slowly rising
@@ -87,7 +46,6 @@ def sample_ohlcv_df() -> pd.DataFrame:
                 "volume": 10_000 + i * 500,
             }
         )
-        # Skip weekends naively
         d += timedelta(days=1)
         while d.weekday() >= 5:
             d += timedelta(days=1)
@@ -102,50 +60,14 @@ def sample_broker_df() -> pd.DataFrame:
     dates = [date(2025, 1, 28), date(2025, 1, 29), date(2025, 1, 30)]
 
     for i, d in enumerate(dates):
-        # Branch A: large buyer (no 隔日沖 label)
-        rows.append(
-            {
-                "trade_date": d,
-                "ticker": "9999",
-                "branch_code": "A001",
-                "branch_name": "元大-板橋",
-                "buy_volume": 50_000 + i * 1000,
-                "sell_volume": 5_000,
-            }
-        )
-        # Branch B: medium buyer
-        rows.append(
-            {
-                "trade_date": d,
-                "ticker": "9999",
-                "branch_code": "B002",
-                "branch_name": "富邦-台北",
-                "buy_volume": 30_000,
-                "sell_volume": 8_000,
-            }
-        )
-        # Branch C: small buyer
-        rows.append(
-            {
-                "trade_date": d,
-                "ticker": "9999",
-                "branch_code": "C003",
-                "branch_name": "國泰-信義",
-                "buy_volume": 10_000,
-                "sell_volume": 20_000,
-            }
-        )
-        # Branch D: daytrade branch
-        rows.append(
-            {
-                "trade_date": d,
-                "ticker": "9999",
-                "branch_code": "D004",
-                "branch_name": "凱基-台北",
-                "buy_volume": 8_000,
-                "sell_volume": 5_000,
-            }
-        )
+        rows.append({"trade_date": d, "ticker": "9999", "branch_code": "A001",
+                     "branch_name": "元大-板橋", "buy_volume": 50_000 + i * 1000, "sell_volume": 5_000})
+        rows.append({"trade_date": d, "ticker": "9999", "branch_code": "B002",
+                     "branch_name": "富邦-台北", "buy_volume": 30_000, "sell_volume": 8_000})
+        rows.append({"trade_date": d, "ticker": "9999", "branch_code": "C003",
+                     "branch_name": "國泰-信義", "buy_volume": 10_000, "sell_volume": 20_000})
+        rows.append({"trade_date": d, "ticker": "9999", "branch_code": "D004",
+                     "branch_name": "凱基-台北", "buy_volume": 8_000, "sell_volume": 5_000})
 
     return pd.DataFrame(rows)
 

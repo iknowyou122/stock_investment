@@ -1,0 +1,1355 @@
+<!DOCTYPE html>
+<html lang="zh-TW" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>分點情報 — Taiwan Broker Intelligence API</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    /* -----------------------------------------------------------------------
+       Design tokens
+    ----------------------------------------------------------------------- */
+    :root {
+      --bg:          #0F1117;
+      --surface:     #1A1D23;
+      --surface-2:   #21252D;
+      --text:        #F0F4F8;
+      --text-muted:  #8B98A5;
+      --text-faint:  #4A5568;
+      --accent:      #E8A100;
+      --accent-dim:  rgba(232,161,0,0.12);
+      --teal:        #00BFA5;
+      --teal-dim:    rgba(0,191,165,0.12);
+      --border:      #262B33;
+      --border-2:    #2F3740;
+
+      --badge-daytrade:  rgba(232,161,0,0.18);
+      --badge-wave:      rgba(0,191,165,0.18);
+      --badge-geo:       rgba(120,149,211,0.18);
+      --badge-managed:   rgba(180,120,211,0.18);
+
+      --badge-daytrade-text: #E8A100;
+      --badge-wave-text:     #00BFA5;
+      --badge-geo-text:      #7895D3;
+      --badge-managed-text:  #B478D3;
+
+      --font-display: 'Instrument Serif', Georgia, serif;
+      --font-body:    'Geist', -apple-system, system-ui, sans-serif;
+      --font-mono:    'Geist Mono', 'Menlo', monospace;
+
+      --radius-sm: 6px;
+      --radius-md: 8px;
+      --radius-lg: 10px;
+      --radius-xl: 12px;
+    }
+
+    /* Light mode overrides */
+    [data-theme="light"] {
+      --bg:         #F7F8FA;
+      --surface:    #FFFFFF;
+      --surface-2:  #F0F2F5;
+      --text:       #111318;
+      --text-muted: #556070;
+      --text-faint: #9AA3B0;
+      --accent:     #C47A00;
+      --accent-dim: rgba(196,122,0,0.10);
+      --teal:       #008F7A;
+      --teal-dim:   rgba(0,143,122,0.10);
+      --border:     #E2E6EC;
+      --border-2:   #D0D6DF;
+    }
+
+    /* -----------------------------------------------------------------------
+       Reset & base
+    ----------------------------------------------------------------------- */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: var(--font-body);
+      font-size: 16px;
+      line-height: 1.6;
+      background: var(--bg);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+      transition: background 300ms ease, color 300ms ease;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    img { display: block; max-width: 100%; }
+
+    /* -----------------------------------------------------------------------
+       Layout utilities
+    ----------------------------------------------------------------------- */
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 48px;
+    }
+
+    @media (max-width: 768px) {
+      .container { padding: 0 20px; }
+    }
+
+    /* -----------------------------------------------------------------------
+       Entrance animations (driven by IntersectionObserver)
+    ----------------------------------------------------------------------- */
+    .reveal {
+      opacity: 0;
+      transform: translateY(16px);
+      transition: opacity 300ms ease-out, transform 300ms ease-out;
+    }
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* -----------------------------------------------------------------------
+       Navigation
+    ----------------------------------------------------------------------- */
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(15, 17, 23, 0.80);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      transition: background 300ms ease, border-color 300ms ease;
+    }
+
+    [data-theme="light"] nav {
+      background: rgba(247, 248, 250, 0.85);
+    }
+
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 60px;
+    }
+
+    .nav-logo {
+      font-family: var(--font-display);
+      font-size: 20px;
+      color: var(--text);
+      letter-spacing: -0.01em;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 32px;
+      list-style: none;
+    }
+
+    .nav-links a {
+      font-size: 14px;
+      color: var(--text-muted);
+      font-weight: 500;
+      transition: color 150ms ease;
+    }
+    .nav-links a:hover { color: var(--text); }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    /* Theme toggle */
+    .theme-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: background 300ms ease, color 150ms ease, border-color 150ms ease;
+    }
+    .theme-toggle:hover {
+      background: var(--surface);
+      color: var(--text);
+    }
+    .theme-toggle .icon-sun  { display: none; }
+    .theme-toggle .icon-moon { display: block; }
+    [data-theme="light"] .theme-toggle .icon-sun  { display: block; }
+    [data-theme="light"] .theme-toggle .icon-moon { display: none; }
+
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+    }
+
+    /* -----------------------------------------------------------------------
+       Buttons
+    ----------------------------------------------------------------------- */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 20px;
+      border-radius: var(--radius-md);
+      font-family: var(--font-body);
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: opacity 150ms ease, background 150ms ease;
+      white-space: nowrap;
+    }
+    .btn:hover { opacity: 0.88; }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #000;
+    }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-muted);
+      border: 1px solid var(--border-2);
+    }
+    .btn-ghost:hover {
+      color: var(--text);
+      border-color: var(--text-faint);
+      opacity: 1;
+    }
+
+    .btn-lg {
+      padding: 13px 28px;
+      font-size: 16px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Section rhythm
+    ----------------------------------------------------------------------- */
+    section {
+      padding: 96px 0;
+    }
+
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    .section-title {
+      font-family: var(--font-display);
+      font-size: 40px;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      margin-top: 12px;
+    }
+
+    .section-sub {
+      font-size: 16px;
+      color: var(--text-muted);
+      margin-top: 12px;
+      max-width: 520px;
+    }
+
+    @media (max-width: 768px) {
+      .section-title { font-size: 30px; }
+      section { padding: 64px 0; }
+    }
+
+    /* -----------------------------------------------------------------------
+       Hero
+    ----------------------------------------------------------------------- */
+    #hero {
+      padding-top: 80px;
+      padding-bottom: 96px;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 64px;
+      align-items: center;
+    }
+
+    @media (max-width: 768px) {
+      .hero-grid {
+        grid-template-columns: 1fr;
+        gap: 48px;
+      }
+    }
+
+    .hero-eyebrow {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 20px;
+    }
+
+    .hero-headline {
+      font-family: var(--font-display);
+      font-size: 52px;
+      line-height: 1.1;
+      letter-spacing: -0.03em;
+      color: var(--text);
+      margin-bottom: 20px;
+    }
+
+    .hero-headline em {
+      font-style: italic;
+      color: var(--accent);
+    }
+
+    @media (max-width: 768px) {
+      .hero-headline { font-size: 38px; }
+    }
+
+    .hero-sub {
+      font-size: 17px;
+      line-height: 1.65;
+      color: var(--text-muted);
+      margin-bottom: 36px;
+      max-width: 480px;
+    }
+
+    .hero-ctas {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 48px;
+    }
+
+    .hero-stats {
+      display: flex;
+      gap: 32px;
+      flex-wrap: wrap;
+    }
+
+    .stat-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .stat-value {
+      font-family: var(--font-mono);
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-faint);
+    }
+
+    /* Code window */
+    .code-window {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xl);
+      overflow: hidden;
+      animation: amber-glow-pulse 3.5s ease-in-out infinite;
+    }
+
+    @keyframes amber-glow-pulse {
+      0%   { box-shadow: 0 0 0 0 rgba(232, 161, 0, 0); }
+      40%  { box-shadow: 0 0 28px 4px rgba(232, 161, 0, 0.10); }
+      70%  { box-shadow: 0 0 18px 2px rgba(232, 161, 0, 0.06); }
+      100% { box-shadow: 0 0 0 0 rgba(232, 161, 0, 0); }
+    }
+
+    .code-window-bar {
+      background: var(--surface-2);
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .traffic-lights {
+      display: flex;
+      gap: 6px;
+    }
+
+    .traffic-light {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+    .tl-red    { background: #FF5F57; }
+    .tl-yellow { background: #FEBC2E; }
+    .tl-green  { background: #28C840; }
+
+    .code-window-label {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-faint);
+      flex: 1;
+      text-align: center;
+    }
+
+    .code-window-body {
+      padding: 24px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.75;
+      overflow-x: auto;
+    }
+
+    /* JSON syntax highlighting */
+    .j-key    { color: var(--text-muted); }
+    .j-str    { color: var(--teal); }
+    .j-num    { color: var(--accent); }
+    .j-bool   { color: #7895D3; }
+    .j-null   { color: var(--text-faint); }
+    .j-punc   { color: var(--text-faint); }
+    .j-indent { display: block; }
+
+    pre {
+      white-space: pre;
+      font-family: var(--font-mono);
+    }
+
+    /* -----------------------------------------------------------------------
+       Label taxonomy
+    ----------------------------------------------------------------------- */
+    #taxonomy { background: var(--bg); }
+
+    .taxonomy-header {
+      margin-bottom: 48px;
+    }
+
+    .label-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+    }
+
+    @media (max-width: 768px) {
+      .label-grid { grid-template-columns: 1fr; }
+    }
+
+    .label-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xl);
+      padding: 28px 32px;
+      transition: border-color 200ms ease, background 200ms ease;
+    }
+
+    .label-card:hover {
+      border-color: var(--border-2);
+      background: var(--surface-2);
+    }
+
+    .label-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      margin-bottom: 16px;
+      letter-spacing: 0.02em;
+    }
+
+    .badge-daytrade {
+      background: var(--badge-daytrade);
+      color: var(--badge-daytrade-text);
+    }
+    .badge-wave {
+      background: var(--badge-wave);
+      color: var(--badge-wave-text);
+    }
+    .badge-geo {
+      background: var(--badge-geo);
+      color: var(--badge-geo-text);
+    }
+    .badge-managed {
+      background: var(--badge-managed);
+      color: var(--badge-managed-text);
+    }
+
+    .label-card-title {
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 10px;
+    }
+
+    .label-card-desc {
+      font-size: 15px;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    /* -----------------------------------------------------------------------
+       Data proof
+    ----------------------------------------------------------------------- */
+    #data-proof {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .data-proof-header {
+      margin-bottom: 56px;
+    }
+
+    .stats-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xl);
+      overflow: hidden;
+      margin-bottom: 40px;
+    }
+
+    @media (max-width: 768px) {
+      .stats-row {
+        grid-template-columns: 1fr;
+        border-radius: var(--radius-lg);
+      }
+    }
+
+    .stat-block {
+      padding: 40px 36px;
+      border-right: 1px solid var(--border);
+      background: var(--bg);
+    }
+
+    .stat-block:last-child { border-right: none; }
+
+    @media (max-width: 768px) {
+      .stat-block {
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 32px 28px;
+      }
+      .stat-block:last-child { border-bottom: none; }
+    }
+
+    .stat-big {
+      font-family: var(--font-display);
+      font-size: 52px;
+      line-height: 1;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+
+    .stat-big-label {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-faint);
+      margin-bottom: 6px;
+    }
+
+    .stat-big-desc {
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    .data-callout {
+      background: var(--accent-dim);
+      border: 1px solid rgba(232, 161, 0, 0.22);
+      border-radius: var(--radius-lg);
+      padding: 24px 28px;
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+
+    .callout-marker {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--accent);
+      white-space: nowrap;
+      margin-top: 2px;
+    }
+
+    .callout-text {
+      font-size: 14px;
+      color: var(--text-muted);
+      line-height: 1.65;
+    }
+
+    .callout-text strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* -----------------------------------------------------------------------
+       API docs
+    ----------------------------------------------------------------------- */
+    #api-docs { background: var(--bg); }
+
+    .api-docs-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 64px;
+      align-items: start;
+    }
+
+    @media (max-width: 768px) {
+      .api-docs-layout { grid-template-columns: 1fr; }
+    }
+
+    .api-docs-copy { }
+
+    .api-features {
+      list-style: none;
+      margin-top: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .api-feature-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    .api-feature-item::before {
+      content: '→';
+      color: var(--teal);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      margin-top: 1px;
+      flex-shrink: 0;
+    }
+
+    /* Tab switcher */
+    .tab-switcher {
+      display: flex;
+      gap: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      margin-bottom: 0;
+      width: fit-content;
+    }
+
+    .tab-btn {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 8px 16px;
+      background: transparent;
+      color: var(--text-faint);
+      border: none;
+      cursor: pointer;
+      border-right: 1px solid var(--border);
+      transition: background 150ms ease, color 150ms ease;
+    }
+    .tab-btn:last-child { border-right: none; }
+    .tab-btn.active {
+      background: var(--surface-2);
+      color: var(--text);
+    }
+    .tab-btn:hover:not(.active) {
+      background: var(--surface);
+      color: var(--text-muted);
+    }
+
+    .code-panel {
+      display: none;
+    }
+    .code-panel.active {
+      display: block;
+    }
+
+    .api-code-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .tab-header {
+      margin-bottom: 12px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Pricing
+    ----------------------------------------------------------------------- */
+    #pricing { background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+
+    .pricing-header {
+      text-align: left;
+      margin-bottom: 48px;
+    }
+
+    .pricing-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+
+    @media (max-width: 768px) {
+      .pricing-grid { grid-template-columns: 1fr; }
+    }
+
+    .pricing-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xl);
+      padding: 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      transition: border-color 200ms ease;
+    }
+
+    .pricing-card:hover { border-color: var(--border-2); }
+
+    .pricing-card.featured {
+      border-color: var(--accent);
+      background: var(--accent-dim);
+    }
+
+    .pricing-tier-label {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-faint);
+      margin-bottom: 8px;
+    }
+
+    .pricing-card.featured .pricing-tier-label {
+      color: var(--accent);
+    }
+
+    .pricing-price {
+      font-family: var(--font-display);
+      font-size: 40px;
+      line-height: 1;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+
+    .pricing-period {
+      font-size: 14px;
+      color: var(--text-faint);
+      margin-bottom: 24px;
+    }
+
+    .pricing-divider {
+      height: 1px;
+      background: var(--border);
+      margin-bottom: 24px;
+    }
+
+    .pricing-features {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 32px;
+      flex: 1;
+    }
+
+    .pricing-feature {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    .pricing-feature .check {
+      color: var(--teal);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Signup CTA
+    ----------------------------------------------------------------------- */
+    #signup {
+      background: var(--bg);
+      padding: 96px 0;
+    }
+
+    .signup-inner {
+      max-width: 600px;
+    }
+
+    .signup-title {
+      font-family: var(--font-display);
+      font-size: 40px;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      margin-bottom: 12px;
+    }
+
+    .signup-sub {
+      font-size: 16px;
+      color: var(--text-muted);
+      margin-bottom: 36px;
+    }
+
+    .signup-form {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .signup-input {
+      flex: 1;
+      min-width: 220px;
+      padding: 12px 16px;
+      background: var(--surface);
+      border: 1px solid var(--border-2);
+      border-radius: var(--radius-md);
+      color: var(--text);
+      font-family: var(--font-body);
+      font-size: 15px;
+      outline: none;
+      transition: border-color 150ms ease;
+    }
+
+    .signup-input::placeholder {
+      color: var(--text-faint);
+    }
+
+    .signup-input:focus {
+      border-color: var(--accent);
+    }
+
+    /* -----------------------------------------------------------------------
+       Footer
+    ----------------------------------------------------------------------- */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 32px 0;
+    }
+
+    .footer-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .footer-logo {
+      font-family: var(--font-display);
+      font-size: 16px;
+      color: var(--text-muted);
+    }
+
+    .footer-note {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-faint);
+    }
+
+  </style>
+</head>
+<body>
+
+  <!-- =====================================================================
+       Navigation
+  ===================================================================== -->
+  <nav>
+    <div class="container">
+      <div class="nav-inner">
+        <a href="#" class="nav-logo">分點情報</a>
+        <ul class="nav-links">
+          <li><a href="#taxonomy">功能</a></li>
+          <li><a href="#api-docs">文件</a></li>
+          <li><a href="#pricing">定價</a></li>
+        </ul>
+        <div class="nav-actions">
+          <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme">
+            <!-- Moon icon (shown in dark mode) -->
+            <svg class="icon-moon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 10.5A6 6 0 1 1 5.5 2a4.5 4.5 0 0 0 8.5 8.5Z"/>
+            </svg>
+            <!-- Sun icon (shown in light mode) -->
+            <svg class="icon-sun" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="8" cy="8" r="3"/>
+              <path d="M8 1v1M8 14v1M1 8h1M14 8h1M3.05 3.05l.7.7M12.25 12.25l.7.7M12.95 3.05l-.7.7M3.75 12.25l-.7.7"/>
+            </svg>
+          </button>
+          <a href="#signup" class="btn btn-primary" style="padding: 8px 18px; font-size: 14px;">免費試用</a>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- =====================================================================
+       Hero
+  ===================================================================== -->
+  <section id="hero">
+    <div class="container">
+      <div class="hero-grid">
+
+        <!-- Left: copy -->
+        <div class="reveal">
+          <p class="hero-eyebrow">分點情報 API &nbsp;·&nbsp; Broker Intelligence</p>
+          <h1 class="hero-headline">找出誰在買<br><em>在他們離場之前。</em></h1>
+          <p class="hero-sub">即時識別台股主力分點行為—隔日沖、波段贏家、代操官股—並轉化為可程式化的交易信號。</p>
+          <div class="hero-ctas">
+            <a href="#signup" class="btn btn-primary btn-lg">免費試用 →</a>
+            <a href="#api-docs" class="btn btn-ghost btn-lg">查看文件</a>
+          </div>
+          <div class="hero-stats">
+            <div class="stat-item">
+              <span class="stat-value">234個分點</span>
+              <span class="stat-label">已標籤</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-value">D+2 反轉率 74%</span>
+              <span class="stat-label">隔日沖驗證</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-value">3,200+</span>
+              <span class="stat-label">開發者使用中</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: live API code window -->
+        <div class="reveal" style="transition-delay: 80ms;">
+          <div class="code-window">
+            <div class="code-window-bar">
+              <div class="traffic-lights">
+                <span class="traffic-light tl-red"></span>
+                <span class="traffic-light tl-yellow"></span>
+                <span class="traffic-light tl-green"></span>
+              </div>
+              <span class="code-window-label">GET /v1/signal/2330</span>
+            </div>
+            <div class="code-window-body">
+<pre><span class="j-punc">{</span>
+  <span class="j-key">"ticker"</span><span class="j-punc">:</span>       <span class="j-str">"2330"</span><span class="j-punc">,</span>
+  <span class="j-key">"date"</span><span class="j-punc">:</span>         <span class="j-str">"2024-08-06"</span><span class="j-punc">,</span>
+  <span class="j-key">"signal"</span><span class="j-punc">:</span>       <span class="j-str">"LONG"</span><span class="j-punc">,</span>
+  <span class="j-key">"confidence"</span><span class="j-punc">:</span>   <span class="j-num">88</span><span class="j-punc">,</span>
+  <span class="j-key">"triple_confirmation"</span><span class="j-punc">: {</span>
+    <span class="j-key">"momentum"</span><span class="j-punc">:</span>          <span class="j-bool">true</span><span class="j-punc">,</span>
+    <span class="j-key">"chip_concentration"</span><span class="j-punc">:</span> <span class="j-bool">true</span><span class="j-punc">,</span>
+    <span class="j-key">"price_above_poc"</span><span class="j-punc">:</span>   <span class="j-bool">true</span>
+  <span class="j-punc">},</span>
+  <span class="j-key">"top_brokers"</span><span class="j-punc">: [</span>
+    <span class="j-punc">{</span>
+      <span class="j-key">"branch_code"</span><span class="j-punc">:</span>  <span class="j-str">"9A00"</span><span class="j-punc">,</span>
+      <span class="j-key">"branch_name"</span><span class="j-punc">:</span>  <span class="j-str">"元大-竹北"</span><span class="j-punc">,</span>
+      <span class="j-key">"label"</span><span class="j-punc">:</span>        <span class="j-str">"波段贏家"</span><span class="j-punc">,</span>
+      <span class="j-key">"buy_volume"</span><span class="j-punc">:</span>   <span class="j-num">1250000</span>
+    <span class="j-punc">},</span>
+    <span class="j-punc">{</span>
+      <span class="j-key">"branch_code"</span><span class="j-punc">:</span>  <span class="j-str">"9600"</span><span class="j-punc">,</span>
+      <span class="j-key">"branch_name"</span><span class="j-punc">:</span>  <span class="j-str">"凱基-台北"</span><span class="j-punc">,</span>
+      <span class="j-key">"label"</span><span class="j-punc">:</span>        <span class="j-str">"隔日沖"</span><span class="j-punc">,</span>
+      <span class="j-key">"buy_volume"</span><span class="j-punc">:</span>   <span class="j-num">840000</span>
+    <span class="j-punc">}</span>
+  <span class="j-punc">],</span>
+  <span class="j-key">"risk_flags"</span><span class="j-punc">:</span>   <span class="j-punc">[]</span>
+<span class="j-punc">}</span></pre>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- =====================================================================
+       Label taxonomy
+  ===================================================================== -->
+  <section id="taxonomy">
+    <div class="container">
+      <div class="taxonomy-header reveal">
+        <p class="eyebrow">分點行為分類</p>
+        <h2 class="section-title">四種分點行為，<br>一眼看穿籌碼意圖</h2>
+        <p class="section-sub">每個分點代碼背後，都有一套可量化的歷史行為模式。我們的分類器將歷史數據轉化為可直接使用的標籤。</p>
+      </div>
+      <div class="label-grid">
+
+        <div class="label-card reveal" style="transition-delay: 0ms;">
+          <span class="label-badge badge-daytrade">隔日沖</span>
+          <div class="label-card-title">隔日沖型主力</div>
+          <p class="label-card-desc">買超後隔日高機率反手賣出，識別短線籌碼。D+2 反轉率超過 74%，是籌碼最危險的警示信號。看到這個標籤出現在前三名，立刻提高警覺。</p>
+        </div>
+
+        <div class="label-card reveal" style="transition-delay: 50ms;">
+          <span class="label-badge badge-wave">波段贏家</span>
+          <div class="label-card-title">波段主力</div>
+          <p class="label-card-desc">持股周期 3–15 日，識別具方向性的波段主力。歷史上，這類分點出現在前三名時，後續三日正報酬機率顯著高於基準。</p>
+        </div>
+
+        <div class="label-card reveal" style="transition-delay: 100ms;">
+          <span class="label-badge badge-geo">地緣券商</span>
+          <div class="label-card-title">地方性主力</div>
+          <p class="label-card-desc">特定區域集中交易，常見於地方性主力佈局。這類分點的交易行為往往與上市公司所在地的產業動態高度相關。</p>
+        </div>
+
+        <div class="label-card reveal" style="transition-delay: 150ms;">
+          <span class="label-badge badge-managed">代操官股</span>
+          <div class="label-card-title">機構投資人</div>
+          <p class="label-card-desc">低調持續買超，識別機構投資人底部吸籌。這類分點通常不追高，出現連續三日以上的買超行為具有重要意義。</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- =====================================================================
+       Data proof
+  ===================================================================== -->
+  <section id="data-proof">
+    <div class="container">
+      <div class="data-proof-header reveal">
+        <p class="eyebrow">實證數據</p>
+        <h2 class="section-title">數據說話，不是故事</h2>
+        <p class="section-sub">所有標籤基於歷史實際成交紀錄，最少 50 筆樣本才會賦予分類。沒有猜測，沒有黑盒子。</p>
+      </div>
+
+      <div class="stats-row reveal">
+        <div class="stat-block">
+          <div class="stat-big-label">D+2 隔日沖反轉率</div>
+          <div class="stat-big">74%</div>
+          <div class="stat-big-desc">無條件基準約 35%，信號強度 2.1×</div>
+        </div>
+        <div class="stat-block">
+          <div class="stat-big-label">已標籤分點數量</div>
+          <div class="stat-big" style="color: var(--teal);">234</div>
+          <div class="stat-big-desc">持續更新，每日 T+1 資料回補</div>
+        </div>
+        <div class="stat-block">
+          <div class="stat-big-label">歷史資料筆數</div>
+          <div class="stat-big">3.2M</div>
+          <div class="stat-big-desc">涵蓋 2022–2024 全市場分點成交</div>
+        </div>
+      </div>
+
+      <div class="data-callout reveal">
+        <span class="callout-marker">實例</span>
+        <p class="callout-text">
+          <strong>2024-08-05 台股大跌日</strong>，系統提前偵測到
+          <strong>凱基-台北（9600）</strong> 在 <strong>台積電（2330）</strong>
+          連續三日加碼。T+1 資料發布後，D+2 開盤信號確認反彈。
+          分點情報在市場恐慌時提供了量化依據，而非主觀判斷。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- =====================================================================
+       API docs
+  ===================================================================== -->
+  <section id="api-docs">
+    <div class="container">
+      <div class="api-docs-layout">
+
+        <div class="api-docs-copy reveal">
+          <p class="eyebrow">開發者文件</p>
+          <h2 class="section-title">一行程式碼，<br>接入分點智慧</h2>
+          <p class="section-sub">RESTful JSON API，標準 HTTP 驗證。從申請到第一個請求，不超過三分鐘。</p>
+          <ul class="api-features">
+            <li class="api-feature-item">標準 X-API-Key 標頭驗證</li>
+            <li class="api-feature-item">JSON 回應，Pydantic schema 定義</li>
+            <li class="api-feature-item">Free 方案每月 10,000 次請求，無信用卡</li>
+            <li class="api-feature-item">分點標籤 + 信心分數 + Triple Confirmation</li>
+            <li class="api-feature-item">支援 curl、Python requests、任何 HTTP 客戶端</li>
+          </ul>
+        </div>
+
+        <div class="api-code-stack reveal" style="transition-delay: 60ms;">
+          <div class="tab-header">
+            <div class="tab-switcher" id="tabSwitcher">
+              <button class="tab-btn active" data-tab="curl">curl</button>
+              <button class="tab-btn" data-tab="python">Python</button>
+              <button class="tab-btn" data-tab="js">JavaScript</button>
+            </div>
+          </div>
+
+          <!-- curl -->
+          <div class="code-panel active" id="panel-curl">
+            <div class="code-window">
+              <div class="code-window-bar">
+                <div class="traffic-lights">
+                  <span class="traffic-light tl-red"></span>
+                  <span class="traffic-light tl-yellow"></span>
+                  <span class="traffic-light tl-green"></span>
+                </div>
+                <span class="code-window-label">broker-label lookup</span>
+              </div>
+              <div class="code-window-body">
+<pre><span style="color:var(--text-faint)"># 查詢分點標籤</span>
+<span style="color:var(--teal)">curl</span> -H <span style="color:var(--accent)">"X-API-Key: YOUR_KEY"</span> \
+  https://api.fenzhi.tw/v1/broker-label/<span style="color:var(--accent)">9600</span>
+
+<span style="color:var(--text-faint)"># 查詢股票信號</span>
+<span style="color:var(--teal)">curl</span> -H <span style="color:var(--accent)">"X-API-Key: YOUR_KEY"</span> \
+  https://api.fenzhi.tw/v1/signal/<span style="color:var(--accent)">2330</span></pre>
+              </div>
+            </div>
+          </div>
+
+          <!-- Python -->
+          <div class="code-panel" id="panel-python">
+            <div class="code-window">
+              <div class="code-window-bar">
+                <div class="traffic-lights">
+                  <span class="traffic-light tl-red"></span>
+                  <span class="traffic-light tl-yellow"></span>
+                  <span class="traffic-light tl-green"></span>
+                </div>
+                <span class="code-window-label">python</span>
+              </div>
+              <div class="code-window-body">
+<pre><span style="color:var(--text-faint)">import</span> <span style="color:var(--teal)">requests</span>
+
+<span style="color:var(--text-muted)">BASE</span> = <span style="color:var(--teal)">"https://api.fenzhi.tw"</span>
+<span style="color:var(--text-muted)">headers</span> = <span style="color:var(--text-faint)">{</span><span style="color:var(--teal)">"X-API-Key"</span>: <span style="color:var(--accent)">"YOUR_KEY"</span><span style="color:var(--text-faint)">}</span>
+
+<span style="color:var(--text-faint)"># 查詢 凱基-台北 分點標籤</span>
+r = requests.get(
+    f<span style="color:var(--teal)">"{BASE}/v1/broker-label/9600"</span>,
+    headers=headers
+)
+data = r.json()
+<span style="color:var(--text-faint)">print</span>(data[<span style="color:var(--teal)">"label"</span>])          <span style="color:var(--text-faint)"># 隔日沖</span>
+<span style="color:var(--text-faint)">print</span>(data[<span style="color:var(--teal)">"reversal_rate"</span>]) <span style="color:var(--text-faint)"># 0.74</span>
+
+<span style="color:var(--text-faint)"># 查詢 2330 信號</span>
+sig = requests.get(
+    f<span style="color:var(--teal)">"{BASE}/v1/signal/2330"</span>,
+    headers=headers
+).json()
+<span style="color:var(--text-faint)">print</span>(sig[<span style="color:var(--teal)">"signal"</span>])      <span style="color:var(--text-faint)"># LONG</span>
+<span style="color:var(--text-faint)">print</span>(sig[<span style="color:var(--teal)">"confidence"</span>]) <span style="color:var(--text-faint)"># 88</span></pre>
+              </div>
+            </div>
+          </div>
+
+          <!-- JavaScript -->
+          <div class="code-panel" id="panel-js">
+            <div class="code-window">
+              <div class="code-window-bar">
+                <div class="traffic-lights">
+                  <span class="traffic-light tl-red"></span>
+                  <span class="traffic-light tl-yellow"></span>
+                  <span class="traffic-light tl-green"></span>
+                </div>
+                <span class="code-window-label">javascript</span>
+              </div>
+              <div class="code-window-body">
+<pre><span style="color:var(--text-faint)">const</span> <span style="color:var(--text-muted)">BASE</span> = <span style="color:var(--teal)">"https://api.fenzhi.tw"</span><span style="color:var(--text-faint)">;</span>
+<span style="color:var(--text-faint)">const</span> <span style="color:var(--text-muted)">KEY</span>  = <span style="color:var(--accent)">"YOUR_KEY"</span><span style="color:var(--text-faint)">;</span>
+
+<span style="color:var(--text-faint)">async function</span> <span style="color:var(--teal)">getBrokerLabel</span>(code) <span style="color:var(--text-faint)">{</span>
+  <span style="color:var(--text-faint)">const</span> res = <span style="color:var(--text-faint)">await</span> fetch(
+    `<span style="color:var(--teal)">${BASE}/v1/broker-label/${code}</span>`,
+    <span style="color:var(--text-faint)">{</span> headers: <span style="color:var(--text-faint)">{</span> <span style="color:var(--teal)">"X-API-Key"</span>: KEY <span style="color:var(--text-faint)">} }</span>
+  )<span style="color:var(--text-faint)">;</span>
+  <span style="color:var(--text-faint)">return</span> res.json()<span style="color:var(--text-faint)">;</span>
+<span style="color:var(--text-faint)">}</span>
+
+<span style="color:var(--text-faint)">const</span> label = <span style="color:var(--text-faint)">await</span> getBrokerLabel(<span style="color:var(--accent)">"9600"</span>)<span style="color:var(--text-faint)">;</span>
+console.log(label.branch_name)<span style="color:var(--text-faint)">;</span>  <span style="color:var(--text-faint)">// 凱基-台北</span>
+console.log(label.label)<span style="color:var(--text-faint)">;</span>       <span style="color:var(--text-faint)">// 隔日沖</span></pre>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =====================================================================
+       Pricing
+  ===================================================================== -->
+  <section id="pricing">
+    <div class="container">
+      <div class="pricing-header reveal">
+        <p class="eyebrow">方案</p>
+        <h2 class="section-title">選擇適合你的方案</h2>
+        <p class="section-sub">從個人開發者到機構量化團隊，依需求選擇。Free 方案永久有效，無信用卡。</p>
+      </div>
+      <div class="pricing-grid">
+
+        <div class="pricing-card reveal" style="transition-delay: 0ms;">
+          <div class="pricing-tier-label">Free</div>
+          <div class="pricing-price">NT$0</div>
+          <div class="pricing-period">/ 月，永久有效</div>
+          <div class="pricing-divider"></div>
+          <ul class="pricing-features">
+            <li class="pricing-feature"><span class="check">✓</span> 10,000 requests / 月</li>
+            <li class="pricing-feature"><span class="check">✓</span> 分點標籤查詢</li>
+            <li class="pricing-feature"><span class="check">✓</span> 基本 reversal_rate</li>
+            <li class="pricing-feature"><span class="check">✓</span> 無需信用卡</li>
+          </ul>
+          <a href="#signup" class="btn btn-ghost" style="width:100%; justify-content:center;">免費開始</a>
+        </div>
+
+        <div class="pricing-card featured reveal" style="transition-delay: 50ms;">
+          <div class="pricing-tier-label">Pro</div>
+          <div class="pricing-price">NT$500</div>
+          <div class="pricing-period">/ 月</div>
+          <div class="pricing-divider"></div>
+          <ul class="pricing-features">
+            <li class="pricing-feature"><span class="check">✓</span> 50,000 requests / 月</li>
+            <li class="pricing-feature"><span class="check">✓</span> 全部四種標籤 + 信心分數</li>
+            <li class="pricing-feature"><span class="check">✓</span> /v1/signal 端點</li>
+            <li class="pricing-feature"><span class="check">✓</span> Triple Confirmation 詳情</li>
+            <li class="pricing-feature"><span class="check">✓</span> 風險旗標</li>
+          </ul>
+          <a href="#signup" class="btn btn-primary" style="width:100%; justify-content:center;">升級 Pro</a>
+        </div>
+
+        <div class="pricing-card reveal" style="transition-delay: 100ms;">
+          <div class="pricing-tier-label">Enterprise</div>
+          <div class="pricing-price">NT$2,000</div>
+          <div class="pricing-period">/ 月起</div>
+          <div class="pricing-divider"></div>
+          <ul class="pricing-features">
+            <li class="pricing-feature"><span class="check">✓</span> 500,000 requests / 月</li>
+            <li class="pricing-feature"><span class="check">✓</span> Pro 全部功能</li>
+            <li class="pricing-feature"><span class="check">✓</span> 專屬技術支援</li>
+            <li class="pricing-feature"><span class="check">✓</span> 99.9% SLA 保證</li>
+            <li class="pricing-feature"><span class="check">✓</span> 客製化整合協助</li>
+          </ul>
+          <a href="mailto:enterprise@fenzhi.tw" class="btn btn-ghost" style="width:100%; justify-content:center;">聯絡我們</a>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- =====================================================================
+       Signup CTA
+  ===================================================================== -->
+  <section id="signup">
+    <div class="container">
+      <div class="signup-inner reveal">
+        <p class="eyebrow">立即開始</p>
+        <h2 class="signup-title">今天就開始分析籌碼</h2>
+        <p class="signup-sub">輸入 email，30 秒取得 API Key。Free 方案永久有效，不需要信用卡。</p>
+        <form class="signup-form" onsubmit="handleSignup(event)">
+          <input
+            type="email"
+            class="signup-input"
+            placeholder="your@email.com"
+            required
+            aria-label="Email address"
+          />
+          <button type="submit" class="btn btn-primary btn-lg">取得 API Key →</button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <!-- =====================================================================
+       Footer
+  ===================================================================== -->
+  <footer>
+    <div class="container">
+      <div class="footer-inner">
+        <span class="footer-logo">分點情報</span>
+        <span class="footer-note">Taiwan Broker Intelligence API · T+1 資料，每日更新</span>
+      </div>
+    </div>
+  </footer>
+
+  <!-- =====================================================================
+       JavaScript
+  ===================================================================== -->
+  <script>
+    // ------------------------------------------------------------------
+    // Theme toggle
+    // ------------------------------------------------------------------
+    const html = document.documentElement;
+    const themeBtn = document.getElementById('themeToggle');
+
+    themeBtn.addEventListener('click', () => {
+      const current = html.getAttribute('data-theme');
+      html.setAttribute('data-theme', current === 'dark' ? 'light' : 'dark');
+    });
+
+    // ------------------------------------------------------------------
+    // IntersectionObserver — scroll-based entrance animations
+    // ------------------------------------------------------------------
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          // Once visible, stop observing — no re-animation on scroll back
+          observer.unobserve(entry.target);
+        }
+      });
+    }, {
+      threshold: 0.08,
+      rootMargin: '0px 0px -40px 0px',
+    });
+
+    document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+    // ------------------------------------------------------------------
+    // Tab switcher (API docs section)
+    // ------------------------------------------------------------------
+    const tabSwitcher = document.getElementById('tabSwitcher');
+
+    tabSwitcher.addEventListener('click', (e) => {
+      const btn = e.target.closest('.tab-btn');
+      if (!btn) return;
+
+      const tab = btn.dataset.tab;
+
+      // Update buttons
+      tabSwitcher.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      // Update panels
+      document.querySelectorAll('.code-panel').forEach(p => p.classList.remove('active'));
+      document.getElementById(`panel-${tab}`).classList.add('active');
+    });
+
+    // ------------------------------------------------------------------
+    // Signup form — placeholder handler
+    // ------------------------------------------------------------------
+    function handleSignup(e) {
+      e.preventDefault();
+      const input = e.target.querySelector('input[type="email"]');
+      const btn = e.target.querySelector('button[type="submit"]');
+      const email = input.value.trim();
+
+      // Visual confirmation
+      btn.textContent = '已收到，稍後發送 →';
+      btn.disabled = true;
+      btn.style.opacity = '0.7';
+      input.value = '';
+    }
+  </script>
+
+</body>
+</html>

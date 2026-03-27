@@ -175,27 +175,41 @@ Presentation Layer:
    ```
    score = 0
 
-   # Pillar 1: Momentum (0-40 pts)
+   # Pillar 1: Momentum (0-50 pts)
    # Phase 1-3 (T+1 daily data):
    # vwap_5d = sum(close_i * volume_i for last 5 days) / sum(volume_i for last 5 days)
    # Note: daily VWAP = close (tautology with single bar), so 5d VWAP proxy used instead.
-   if close > vwap_5d:                             score += 20  # price above 5-day volume-weighted avg
-   if daily_volume > daily_20ma_volume * 1.5:      score += 20  # daily vol surge fallback
+   if close > vwap_5d:                                          score += 20  # price above 5-day volume-weighted avg
+   if daily_volume > daily_20ma_volume * 1.5:                   score += 20  # daily vol surge fallback
+   if (close - low) / (high - low) > 0.7:                       score += 5   # K線收盤強弱比: close near top of range
+   if consecutive_up_days >= 3:                                  score += 5   # 連漲天數: momentum continuation
    # Phase 4+ (real-time, requires broker WebSocket):
    # if volume_1min > volume_20min_avg * 3.0:      score += 20  # 1-min surge (replaces daily fallback)
 
-   # Pillar 2: Chip (0-40 pts)
+   # Pillar 2: Chip (0-40 pts paid | 0-50 pts free-tier)
+   # --- Paid (FinMind plan, chip_data_available=True) ---
    if net_buyer_count_diff > 0:                    score += 15  # chips concentrating: more buyer branches than seller branches
    if concentration_top15 > 0.35:                  score += 15  # top-15 branches >35% of total buy vol
    no_daytrade_in_top3 = all(b.label != '隔日沖' for b in top_3_buyers)
    if no_daytrade_in_top3:                         score += 10  # quality confirmation
+   # --- Free-tier (TWSE opendata, chip_data_available=False) ---
+   if foreign_net_buy > 0:                         score += 15  # 外資買賣超 > 0
+   if trust_net_buy > 0:                           score += 10  # 投信買賣超 > 0
+   if dealer_net_buy > 0:                          score += 5   # 自營商買賣超 > 0
+   if margin_balance_change <= 0:                  score += 10  # 融資餘額未增加
+   if foreign_net_buy > 0 and trust_net_buy > 0 and dealer_net_buy > 0:  score += 5  # 三大法人同向
+   if foreign_consecutive_buy_days >= 3:           score += 5   # 外資連買天數 ≥ 3 (multi-day T86 data required)
+   #   Note: paid and free-tier are mutually exclusive. Paid takes precedence.
 
-   # Pillar 3: Space (0-20 pts)
+   # Pillar 3: Space (0-35 pts)
    # Phase 1-3 proxy (daily OHLCV only — real VolumeProfile requires intraday data, deferred to Phase 4):
    # Use 20-day high as price-space confirmation proxy.
    # poc_price proxy = 20-day high. target_price = poc_price * 1.05 (5% above).
    if close > twenty_day_high * 0.99:              score += 20  # within 1% of or above 20-day high
-   # Phase 4+: replace with real VolumeProfile (intraday tick data → POC + resistance nodes)
+   if MA5 > MA10 > MA20:                           score += 5   # 均線多頭排列
+   if MA20_slope > 0:                              score += 5   # MA20 rising (requires ≥24 sessions)
+   if return_5d > taiex_return_5d * 1.2:           score += 5   # RS vs 大盤: stock outperforms index by 20%
+   # Phase 4+: replace space_pts with real VolumeProfile (intraday tick data → POC + resistance nodes)
 
    # Risk deductions
    if not no_daytrade_in_top3:                     score -= 25  # 隔日沖 in top-3 flag
@@ -203,13 +217,33 @@ Presentation Layer:
    # external_buy_ratio = volume transacted at ask / total volume (外盤比); requires intraday data
    # Phase 1-3 fallback: skip divergence deduction (external_buy_ratio unavailable from FinMind T+1 data)
    if momentum_divergence_detected:                score -= 15  # price new high, external buy ratio declining
+   if short_balance_spike and short_margin_ratio > 0.15:  score -= 10  # 融券餘額暴增且券資比 > 15%
 
    confidence = max(0, min(100, score))
    ```
 
+   **Pillar max scores:**
+   | Pillar | Max | Factors |
+   |--------|-----|---------|
+   | 1 Momentum | 50 pts | VWAP+20, Vol surge+20, Close strength+5, Consec up+5 |
+   | 2 Chip (paid) | 40 pts | Net buyer diff+15, Concentration+15, No daytrade+10 |
+   | 2 Chip (free) | 50 pts | Foreign+15, Trust+10, Dealer+5, Margin+10, All-inst+5, Consec foreign+5 |
+   | 3 Space | 35 pts | 20d high+20, MA alignment+5, MA20 slope+5, RS vs TAIEX+5 |
+
    **Action mapping:** `confidence >= 70 → LONG` | `confidence <= 30 → CAUTION` (avoid entry; note: short-selling requires margin eligibility not assumed here) | else → `WATCH`
 
+   **Free-tier thresholds:** `confidence >= 55 → LONG` (lowered from 70 because chip pillar max is 50 pts free vs 40 pts paid, but data quality is lower). LONG guard: blocked when chip_pts == 0 (TWSE API unavailable).
+
    **Stop-loss note:** `stop_loss = T+0 closing price` (daily close — NOT intraday VWAP, which requires tick data unavailable from FinMind in Phase 1-3). This is an order-entry reference computed at post-market time. It does not account for gap-open scenarios. Traders must manually verify stop validity at market open next day.
+
+   **New factor implementation notes:**
+   - **K線收盤強弱比** `(close - low) / (high - low)`: guards against zero range (high == low → skip, score 0)
+   - **連漲天數**: requires sorted ohlcv_history; counts consecutive sessions where close > prev_close
+   - **均線多頭排列 (MA5 > MA10 > MA20)**: requires ≥ 20 sessions; earlier history is all available OHLCV
+   - **三大法人同向**: only scored when all three 三大法人 > 0; bonus on top of individual signals
+   - **外資連買天數**: requires fetching T86 for past N days; ChipProxyFetcher caches per (ticker, date)
+   - **RS vs 大盤**: requires TAIEX (^TWII) daily OHLCV from FinMind `TaiwanStockPrice` for index "TAIEX"
+   - **融券餘額 + 券資比**: TWSE MI_MARGNS endpoint; deduction only when `short_balance_increase > 20%` AND `short_margin_ratio > 0.15`
 
 3. **JSON output schema (field source annotated):**
    ```json
@@ -357,6 +391,87 @@ This one query tells you whether the system is worth building.
 - Your domain knowledge is the real asset. "If today's top-3 buying branches are 凱基台北 and 摩根大通, flag 隔日開高走低 risk" — this is institutional-grade knowledge that takes years to accumulate. The architecture wrapping it matters less than preserving this logic clearly.
 - You front-loaded architecture instead of validation. The spec is technically impressive and architecturally sound. But the first question should be "does broker labeling predict next-day price behavior?" — not "how many Kafka partitions do I need?"
 - You chose the hardest infrastructure first. Kafka + Redis + TimescaleDB + ChromaDB before validating core alpha is the engineering equivalent of buying a racing harness before proving the car runs.
+
+## Implementation Status (as of 2026-03-26)
+
+### Phase Gate: Pre-Spike → In Progress
+
+All 7 new analysis factors have been implemented in `triple_confirmation_engine.py` and covered with unit tests. The TWSE free-tier chip client has been extended with Factor 5 and Factor 7 data fetching.
+
+### Factor Implementation Checklist
+
+| # | Factor | Pillar | File | Status | Tests |
+|---|--------|--------|------|--------|-------|
+| 1 | K線收盤強弱比 `(close-low)/(high-low) > 0.7` | Momentum | `triple_confirmation_engine.py` | ✅ Done | `TestCloseStrengthScore` (4 tests) |
+| 2 | 連漲天數 ≥ 3 consecutive up sessions | Momentum | `triple_confirmation_engine.py` | ✅ Done | `TestConsecUpScore` (3 tests) |
+| 3 | 均線多頭排列 MA5 > MA10 > MA20 | Space | `triple_confirmation_engine.py` | ✅ Done | `TestMAAlignmentScore` (3 tests) |
+| 4 | 三大法人同向 (all foreign+trust+dealer > 0) | Chip | `triple_confirmation_engine.py` | ✅ Done | `TestAllInstScore` (3 tests) |
+| 5 | 外資連買天數 ≥ 3 (multi-day T86 lookback) | Chip | `twse_client.py` + `triple_confirmation_engine.py` | ✅ Done | `TestForeignConsecScore` (4 tests) + `TestForeignConsecutiveDays` (4 tests) |
+| 6 | RS vs 大盤 outperforms TAIEX by ≥ 20% over 5d | Space | `triple_confirmation_engine.py` | ✅ Done | `TestRSScore` (4 tests) |
+| 7 | 融券餘額 + 券資比 risk deduction | Chip | `twse_client.py` + `triple_confirmation_engine.py` | ✅ Done | `TestShortSpikeDeduction` (4 tests) + `TestShortBalanceData` (3 tests) |
+
+**Total test count:** 139 passing, 0 failing (run: `PYTHONPATH=src python3 -m pytest tests/unit/ -q`)
+
+### TWSE Client Extensions (`infrastructure/twse_client.py`)
+
+New methods added to `ChipProxyFetcher`:
+
+| Method | Purpose | Cache key |
+|--------|---------|-----------|
+| `_fetch_foreign_consecutive_days()` | Looks back up to 14 calendar days (~7 trading days) of T86 data, counts consecutive days with `foreign_net_buy > 0` | Reuses `twse_t86_{ticker}_{date}.parquet` per day |
+| `_fetch_short_balance_one_day()` | Fetches 融券餘額 from MI_MARGN for one day | `twse_short_{ticker}_{date}.parquet` |
+| `_fetch_short_data()` | Computes `short_balance_increased` (today > yesterday × 1.20) and `short_margin_ratio` (融券/融資) | Derived from above |
+
+**`TWSEChipProxy` model additions** (`domain/models.py`):
+- `foreign_consecutive_buy_days: int = 0` — populated by `_fetch_foreign_consecutive_days()`
+- `short_balance_increased: bool = False` — True when 融券餘額 spikes > 20%
+- `short_margin_ratio: float = 0.0` — 券資比; deduction triggered when > 0.15
+
+### Pending: Factor 6 End-to-End Wiring
+
+Factor 6 (RS vs 大盤) requires `taiex_history: list[DailyOHLCV]` passed to `StrategistAgent.run()`. This needs:
+1. `FinMindClient.fetch_taiex_history(date)` — fetches `TaiwanStockPrice` for ticker `"TAIEX"` (index code in FinMind)
+2. Wire `taiex_history` through `strategist_agent.py` → `engine.score_with_breakdown(..., taiex_history=...)`
+
+Currently returns 0 pts in production when `taiex_history=None` (graceful degradation, flagged as `RS_NO_TAIEX_DATA`).
+
+### `_ScoreBreakdown` Fields Summary
+
+```python
+@dataclass
+class _ScoreBreakdown:
+    # Pillar 1: Momentum (max 50 pts)
+    vwap_5d_pts: int = 0           # +20: close > 5d VWAP
+    volume_surge_pts: int = 0      # +20: vol > 20d avg × 1.5
+    close_strength_pts: int = 0    # +5:  (close-low)/(high-low) > 0.7  [NEW Factor 1]
+    consec_up_pts: int = 0         # +5:  3+ consecutive up sessions     [NEW Factor 2]
+
+    # Pillar 2: Chip — paid tier (max 40 pts)
+    net_buyer_diff_pts: int = 0    # +15: net_buyer_count_diff > 0
+    concentration_pts: int = 0     # +15: concentration_top15 > 0.35
+    quality_pts: int = 0           # +10: no 隔日沖 in top-3
+
+    # Pillar 2: Chip — free tier (max 50 pts)
+    foreign_pts: int = 0           # +15: foreign_net_buy > 0
+    trust_pts: int = 0             # +10: trust_net_buy > 0
+    dealer_pts: int = 0            # +5:  dealer_net_buy > 0
+    margin_pts: int = 0            # +10: margin_balance_change <= 0
+    all_inst_pts: int = 0          # +5:  all 3 inst positive            [NEW Factor 4]
+    foreign_consec_pts: int = 0    # +5:  foreign_consecutive_buy_days ≥ 3 [NEW Factor 5]
+
+    # Pillar 3: Space (max 35 pts)
+    space_pts: int = 0             # +20: close within 1% of 20d high
+    ma_alignment_pts: int = 0      # +5:  MA5 > MA10 > MA20             [NEW Factor 3]
+    ma20_slope_pts: int = 0        # +5:  MA20 slope > 0
+    rs_pts: int = 0                # +5:  stock outperforms TAIEX ×1.2  [NEW Factor 6]
+
+    # Risk deductions
+    daytrade_deduction: int = 0    # -25: 隔日沖 in top-3
+    divergence_deduction: int = 0  # -15: price new high + weakening external buy ratio
+    short_spike_deduction: int = 0 # -10: 融券餘額 spike + 券資比 > 0.15 [NEW Factor 7]
+
+    flags: list[str] = field(default_factory=list)
+```
 
 ## Reviewer Concerns (Unresolved after 3 iterations)
 

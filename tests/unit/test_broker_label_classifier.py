@@ -62,19 +62,28 @@ def _make_historical_data(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Generate n_days of top-3 buyer events with given reversal_rate at D+2.
 
-    For each day D+0:
-    - Branch is top-3 buyer
-    - D+2 close < D+0 close with probability = reversal_rate
+    Uses step-3 OHLCV dates per broker event so D+2 (by OHLCV index lookup,
+    i.e. sorted_dates[idx+2]) never lands on another broker event date.
+
+    Layout per event i:
+        all_dates[i*3]   = D+0  (broker event + OHLCV close = 100.0)
+        all_dates[i*3+1] = D+1  (OHLCV filler = 100.0)
+        all_dates[i*3+2] = D+2  (OHLCV close = 95.0 reversal or 105.0 no-reversal)
     """
-    # Build trading dates: n_days + 4 extra for D+2 lookups
-    all_dates = [base_date + timedelta(days=i) for i in range(n_days + 4)]
+    # n_days events × 3 slots, plus 2 extra so the last event has a D+2
+    total_dates = n_days * 3 + 2
+    all_dates = [base_date + timedelta(days=i) for i in range(total_dates)]
 
     broker_rows = []
     ohlcv_map = {}
 
     reversals = int(n_days * reversal_rate)
 
-    for i, d0 in enumerate(all_dates[:n_days]):
+    for i in range(n_days):
+        d0 = all_dates[i * 3]        # broker event date
+        d1 = all_dates[i * 3 + 1]    # D+1 filler
+        d2 = all_dates[i * 3 + 2]    # D+2 by OHLCV index (never coincides with a D+0)
+
         broker_rows.append(
             {
                 "trade_date": d0,
@@ -85,21 +94,13 @@ def _make_historical_data(
                 "sell_volume": 5_000,
             }
         )
-        ohlcv_map[(ticker, d0)] = 100.0  # D+0 close
+        ohlcv_map[(ticker, d0)] = 100.0  # D+0 close (never overwritten)
+        ohlcv_map[(ticker, d1)] = 100.0  # D+1 filler
 
-    # Set D+2 closes: reversal (< 100) for first `reversals` days, no reversal otherwise
-    for i, d0 in enumerate(all_dates[:n_days]):
-        if i + 2 < len(all_dates):
-            d2 = all_dates[i + 2]
-            if i < reversals:
-                ohlcv_map[(ticker, d2)] = 95.0  # reversal
-            else:
-                ohlcv_map[(ticker, d2)] = 105.0  # no reversal
-
-    # Fill in all remaining dates with a neutral close
-    for d in all_dates:
-        if (ticker, d) not in ohlcv_map:
-            ohlcv_map[(ticker, d)] = 100.0
+        if i < reversals:
+            ohlcv_map[(ticker, d2)] = 95.0   # reversal: D+2 < D+0
+        else:
+            ohlcv_map[(ticker, d2)] = 105.0  # no reversal: D+2 > D+0
 
     return _make_broker_df(broker_rows), _make_ohlcv_df(ohlcv_map)
 

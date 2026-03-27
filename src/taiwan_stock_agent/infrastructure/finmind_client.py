@@ -100,12 +100,27 @@ class FinMindClient:
             if cached is not None:
                 return cached
 
-        df = self._fetch(
-            dataset="TaiwanStockBrokerTradingStatement",
-            stock_id=ticker,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        _BROKER_COLS = ["trade_date", "ticker", "branch_code", "branch_name", "buy_volume", "sell_volume"]
+        try:
+            df = self._fetch(
+                dataset="TaiwanStockBrokerTradingStatement",
+                stock_id=ticker,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception as exc:
+            # HTTP 422 = plan restriction (paid feature); return empty so caller
+            # can activate free_tier_mode gracefully.
+            err_str = str(exc)
+            if "422" in err_str or "Unprocessable Entity" in err_str:
+                logger.warning(
+                    "TaiwanStockBrokerTradingStatement unavailable (plan restriction) "
+                    "for %s; returning empty DataFrame — free_tier_mode will activate.",
+                    ticker,
+                )
+                return pd.DataFrame(columns=_BROKER_COLS)
+            raise
+
         df = df.rename(
             columns={
                 "date": "trade_date",
@@ -148,12 +163,28 @@ class FinMindClient:
             if cached is not None:
                 return cached
 
-        df = self._fetch(
-            dataset=dataset,
-            stock_id=ticker,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        try:
+            df = self._fetch(
+                dataset=dataset,
+                stock_id=ticker,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception as e:
+            # TaiwanStockPriceAdj requires a paid plan; fall back to raw price.
+            if adjusted and ("400" in str(e) or "register" in str(e).lower()):
+                logger.warning(
+                    "TaiwanStockPriceAdj unavailable (plan restriction); "
+                    "falling back to TaiwanStockPrice (unadjusted)."
+                )
+                df = self._fetch(
+                    dataset="TaiwanStockPrice",
+                    stock_id=ticker,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            else:
+                raise
         df = df.rename(
             columns={
                 "date": "trade_date",
@@ -167,6 +198,66 @@ class FinMindClient:
         )
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
         df = df[["trade_date", "ticker", "open", "high", "low", "close", "volume"]]
+
+        if use_cache:
+            self._save_cache(df, cache_key, ticker, start_date, end_date)
+        return df
+
+    def fetch_taiex_history(
+        self,
+        end_date: date,
+        lookback_days: int = 35,
+        *,
+        use_cache: bool = True,
+    ) -> pd.DataFrame:
+        """Fetch TAIEX (台灣加權指數) daily OHLCV for RS vs 大盤 scoring (Factor 6).
+
+        Uses FinMind dataset TaiwanStockPrice with data_id "TAIEX".
+        Returns columns: trade_date, ticker, open, high, low, close, volume.
+        Returns empty DataFrame if the index data is unavailable on this plan.
+        """
+        self._check_halt()
+        start_date = end_date - timedelta(days=lookback_days)
+        cache_key = "ohlcv_taiex"
+        ticker = "TAIEX"
+
+        if use_cache:
+            cached = self._load_cache(cache_key, ticker, start_date, end_date)
+            if cached is not None:
+                return cached
+
+        try:
+            df = self._fetch(
+                dataset="TaiwanStockPrice",
+                stock_id=ticker,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception as exc:
+            logger.warning(
+                "fetch_taiex_history failed for %s-%s: %s — RS factor will be skipped",
+                start_date,
+                end_date,
+                exc,
+            )
+            return pd.DataFrame()
+
+        if df.empty:
+            return pd.DataFrame()
+
+        df = df.rename(
+            columns={
+                "date": "trade_date",
+                "stock_id": "ticker",
+                "Trading_Volume": "volume",
+                "max": "high",
+                "min": "low",
+            }
+        )
+        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+        # Keep only columns that exist in the response
+        cols = [c for c in ["trade_date", "ticker", "open", "high", "low", "close", "volume"] if c in df.columns]
+        df = df[cols]
 
         if use_cache:
             self._save_cache(df, cache_key, ticker, start_date, end_date)

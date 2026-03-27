@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field as dc_field
 from datetime import date
 from typing import Literal
 
@@ -48,6 +49,27 @@ class ChipReport(BaseModel):
     data_quality_flags: list[str] = Field(default_factory=list)
 
 
+class TWSEChipProxy(BaseModel):
+    """Free-tier chip proxy fetched from TWSE opendata (no auth token required).
+
+    Used when FinMind paid plan is unavailable (chip_data_available=False).
+    is_available=False means the API call failed or returned no data for this ticker.
+    """
+    ticker: str
+    trade_date: date
+    foreign_net_buy: int = 0            # 外資買賣超 (shares); positive = net buy
+    trust_net_buy: int = 0              # 投信買賣超 (shares); positive = net buy
+    dealer_net_buy: int = 0             # 自營商買賣超 (shares); positive = net buy
+    margin_balance_change: int = 0      # 融資餘額變化 vs previous day (shares); negative = decreasing
+    # Factor 5: 外資連買天數
+    foreign_consecutive_buy_days: int = 0   # consecutive days of foreign net buy (including today)
+    # Factor 7: 融券餘額 + 券資比
+    short_balance_increased: bool = False   # True when today's 融券餘額 > yesterday's by > 20%
+    short_margin_ratio: float = 0.0         # 融券餘額 / 融資餘額 (券資比); deduction when > 0.15
+    is_available: bool = False
+    data_quality_flags: list[str] = Field(default_factory=list)
+
+
 class VolumeProfile(BaseModel):
     """
     Phase 1–3 proxy: POC = 20-day high (real VolumeProfile requires intraday data, Phase 4+).
@@ -58,6 +80,8 @@ class VolumeProfile(BaseModel):
     poc_proxy: float          # 20-day high; used as resistance proxy
     twenty_day_high: float
     twenty_day_sessions: int  # actual sessions counted (may be <20 near listing or holidays)
+    sixty_day_high: float = 0.0
+    sixty_day_sessions: int = 0  # actual sessions in 60-day window
     data_quality_flags: list[str] = Field(default_factory=list)
 
 
@@ -83,3 +107,26 @@ class SignalOutput(BaseModel):
     execution_plan: ExecutionPlan
     halt_flag: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
+    free_tier_mode: bool | None = None   # None=legacy, True=free-tier signals, False=paid-tier
+
+
+@dataclass
+class AnomalySignal:
+    """Phase 2 market anomaly signal produced by ScoutAgent.
+
+    Feeds StrategistAgent with pre-filtered candidates, reducing daily scan
+    from O(market) to O(anomalies).
+
+    trigger_type values:
+      - "VOLUME_SURGE"       — daily volume exceeded 20-day avg × 2.0
+      - "PRICE_BREAKOUT"     — close is within 1% of or above 20-day high
+      - "SECTOR_CORRELATION" — >= 3 tickers in the same watchlist all had
+                               VOLUME_SURGE + PRICE_BREAKOUT on the same day
+    """
+
+    ticker: str
+    trade_date: date
+    trigger_type: str  # "VOLUME_SURGE" | "PRICE_BREAKOUT" | "SECTOR_CORRELATION"
+    magnitude: float   # volume_ratio or price_pct_above_high
+    description: str
+    data_quality_flags: list[str] = dc_field(default_factory=list)

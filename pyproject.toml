@@ -23,3 +23,11 @@ pytest-postgresql = "*"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+# pytest-postgresql v4+ auto-registers via entrypoints AND tests/conftest.py
+# also registers it via pytest_plugins = ["pytest_postgresql.plugin"].
+# Disable the entrypoint registration to prevent the double-registration
+# ValueError — conftest takes ownership of the plugin.
+addopts = "-p no:pytest_postgresql"
+testpaths = ["tests"]

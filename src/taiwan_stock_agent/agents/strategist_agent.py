@@ -23,7 +23,9 @@ from taiwan_stock_agent.domain.models import (
 from taiwan_stock_agent.domain.triple_confirmation_engine import (
     TripleConfirmationEngine,
     _ScoreBreakdown,
+    _AnalysisHints,
 )
+from taiwan_stock_agent.infrastructure.twse_client import ChipProxyFetcher
 from taiwan_stock_agent.agents.chip_detective_agent import ChipDetectiveAgent
 from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
 
@@ -47,13 +49,15 @@ class StrategistAgent:
         finmind: FinMindClient,
         label_repo: BrokerLabelRepository,
         anthropic_api_key: str | None = None,
+        chip_proxy_fetcher: ChipProxyFetcher | None = None,
     ) -> None:
         self._finmind = finmind
         self._chip_detective = ChipDetectiveAgent(label_repo)
+        self._chip_proxy_fetcher = chip_proxy_fetcher
+        self._anthropic_api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        # Engine is created per-run with the appropriate free_tier_mode
+        # (kept as instance attr for backward compat but overridden in run())
         self._engine = TripleConfirmationEngine()
-        self._anthropic_api_key = anthropic_api_key or os.environ.get(
-            "ANTHROPIC_API_KEY", ""
-        )
 
     def run(self, ticker: str, analysis_date: date) -> SignalOutput:
         """Run the full pipeline for one ticker on analysis_date.
@@ -62,7 +66,7 @@ class StrategistAgent:
         being analyzed). This should be a day where FinMind data is available.
         """
         # --- Fetch OHLCV (last 25 sessions for 20-day calculations + buffer) ---
-        ohlcv_start = analysis_date - timedelta(days=35)
+        ohlcv_start = analysis_date - timedelta(days=95)
         ohlcv_df = self._finmind.fetch_ohlcv(ticker, ohlcv_start, analysis_date)
 
         if ohlcv_df.empty:
@@ -93,20 +97,39 @@ class StrategistAgent:
             broker_trades_df=broker_df,
         )
 
+        # --- TWSE chip proxy (free-tier fallback when FinMind paid unavailable) ---
+        twse_proxy = None
+        free_tier_mode = False
+        if self._chip_proxy_fetcher is not None:
+            twse_proxy = self._chip_proxy_fetcher.fetch(ticker, analysis_date)
+            # Use free_tier_mode when paid chip data is unavailable
+            # (chip_data_available is signalled by non-empty broker_df)
+            free_tier_mode = broker_df.empty
+
+        engine = TripleConfirmationEngine(free_tier_mode=free_tier_mode)
+
+        # --- TAIEX history for RS vs 大盤 (Factor 6) ---
+        taiex_df = self._finmind.fetch_taiex_history(analysis_date, lookback_days=35)
+        taiex_history: list[DailyOHLCV] | None = None
+        if not taiex_df.empty:
+            taiex_history = self._df_to_ohlcv_list(taiex_df, "TAIEX")
+
         # --- Volume Profile proxy ---
         volume_profile = self._build_volume_profile(ticker, analysis_date, history)
 
         # --- Triple Confirmation (deterministic) ---
-        signal, breakdown = self._engine.score_with_breakdown(
+        signal, breakdown, hints = engine.score_full(
             ohlcv=today_ohlcv,
             ohlcv_history=history,
             chip_report=chip_report,
             volume_profile=volume_profile,
+            twse_proxy=twse_proxy,
+            taiex_history=taiex_history,
         )
 
         # --- LLM reasoning (Phase 3) ---
         if self._anthropic_api_key:
-            reasoning = self._generate_reasoning(signal, chip_report, breakdown)
+            reasoning = self._generate_reasoning(signal, chip_report, breakdown, hints)
             signal = signal.model_copy(update={"reasoning": reasoning})
         else:
             logger.info(
@@ -145,28 +168,35 @@ class StrategistAgent:
         poc_proxy = 20-day high (real POC requires intraday tick data, Phase 4+).
         target_price = poc_proxy * 1.05 (5% above 20-day high).
         """
-        recent = sorted(history, key=lambda x: x.trade_date)[-20:]
-        if not recent:
+        sorted_hist = sorted(history, key=lambda x: x.trade_date)
+        recent_20 = sorted_hist[-20:]
+        recent_60 = sorted_hist[-60:]
+        if not recent_20:
             return VolumeProfile(
                 ticker=ticker,
                 period_end=period_end,
                 poc_proxy=0.0,
                 twenty_day_high=0.0,
                 twenty_day_sessions=0,
+                sixty_day_high=0.0,
+                sixty_day_sessions=0,
                 data_quality_flags=["NO_HISTORY"],
             )
 
-        twenty_day_high = max(d.high for d in recent)
+        twenty_day_high = max(d.high for d in recent_20)
+        sixty_day_high = max(d.high for d in recent_60) if recent_60 else 0.0
         flags = []
-        if len(recent) < 20:
-            flags.append(f"PARTIAL_PROFILE: only {len(recent)} sessions")
+        if len(recent_20) < 20:
+            flags.append(f"PARTIAL_PROFILE: only {len(recent_20)} sessions")
 
         return VolumeProfile(
             ticker=ticker,
             period_end=period_end,
             poc_proxy=twenty_day_high,
             twenty_day_high=twenty_day_high,
-            twenty_day_sessions=len(recent),
+            twenty_day_sessions=len(recent_20),
+            sixty_day_high=sixty_day_high,
+            sixty_day_sessions=len(recent_60),
             data_quality_flags=flags,
         )
 
@@ -175,6 +205,7 @@ class StrategistAgent:
         signal: SignalOutput,
         chip_report,
         breakdown: _ScoreBreakdown,
+        hints: _AnalysisHints | None = None,
     ) -> Reasoning:
         """Call Claude API to generate natural language reasoning fields."""
         try:
@@ -184,6 +215,8 @@ class StrategistAgent:
             return Reasoning()
 
         client = anthropic.Anthropic(api_key=self._anthropic_api_key)
+
+        hints_section = self._format_hints_for_prompt(hints) if hints else ""
 
         prompt = f"""你是一位台股交易分析師。根據以下量化數據，用繁體中文撰寫簡短的分析摘要。
 
@@ -201,9 +234,12 @@ class StrategistAgent:
   - 買賣家數差: {'+15' if breakdown.net_buyer_diff_pts else '0'} 分 (net_buyer_count_diff={chip_report.net_buyer_count_diff})
   - 集中度 Top15: {'+15' if breakdown.concentration_pts else '0'} 分 ({chip_report.concentration_top15:.1%})
   - 無隔日沖在前三: {'+10' if breakdown.no_daytrade_pts else '0'} 分
+  - 外資買賣超 (TWSE): {'+15' if breakdown.twse_foreign_pts else '0'} 分
+  - 融資餘額變化 (TWSE): {'+10' if breakdown.twse_margin_pts else '0'} 分
 
 空間指標:
   - 接近/突破20日高點: {'+20' if breakdown.space_pts else '0'} 分
+  - MA20趨勢向上: {'+5' if breakdown.ma20_slope_pts else '0'} 分
 
 風險扣分:
   - 隔日沖扣分: {'-' + str(breakdown.daytrade_deduction) if breakdown.daytrade_deduction else '無'}
@@ -212,6 +248,8 @@ class StrategistAgent:
 {self._format_top3(chip_report.top_buyers[:3])}
 
 風險標記: {', '.join(chip_report.risk_flags) if chip_report.risk_flags else '無'}
+
+{hints_section}
 
 === 執行計畫 ===
 進場區間: {signal.execution_plan.entry_bid_limit} - {signal.execution_plan.entry_max_chase}
@@ -225,11 +263,18 @@ class StrategistAgent:
 
 回傳 JSON 格式，欄位: momentum, chip_analysis, risk_factors"""
 
-        message = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        try:
+            message = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except anthropic.APIStatusError as e:
+            logger.warning("Anthropic API error (skipping LLM reasoning): %s", e)
+            return Reasoning()
+        except anthropic.APIConnectionError as e:
+            logger.warning("Anthropic connection error (skipping LLM reasoning): %s", e)
+            return Reasoning()
         raw = message.content[0].text.strip()
 
         # Extract JSON from response
@@ -248,6 +293,34 @@ class StrategistAgent:
         except (json.JSONDecodeError, KeyError, IndexError) as e:
             logger.warning("Failed to parse LLM reasoning JSON: %s", e)
             return Reasoning(momentum=raw, chip_analysis="", risk_factors="")
+
+    @staticmethod
+    def _format_hints_for_prompt(hints: _AnalysisHints | None) -> str:
+        """Format analysis hints for LLM prompt context.
+
+        Extensibility: when adding a new hint field to _AnalysisHints,
+        add a corresponding line here.
+        """
+        if hints is None:
+            return ""
+        lines = ["=== 技術輔助指標 (僅供參考，不計入評分) ==="]
+        if hints.rsi_14 is not None:
+            status = "超買" if hints.rsi_14 > 70 else ("超賣" if hints.rsi_14 < 30 else "中性")
+            lines.append(f"RSI(14): {hints.rsi_14:.1f} ({status})")
+        if hints.macd_line is not None and hints.macd_signal is not None:
+            cross = f" [{hints.macd_cross}交叉]" if hints.macd_cross else ""
+            lines.append(f"MACD: 線={hints.macd_line:.4f} 訊號={hints.macd_signal:.4f}{cross}")
+        if hints.ma20_slope_pct is not None:
+            direction = "上升" if hints.ma20_slope_pct > 0 else "下降"
+            lines.append(f"MA20趨勢: {direction} ({hints.ma20_slope_pct:+.2f}%/5日)")
+        if hints.ma20_streak is not None and hints.ma20_streak != 0:
+            direction = "站上" if hints.ma20_streak > 0 else "跌破"
+            lines.append(f"MA20連續{direction}MA20: {abs(hints.ma20_streak)}日")
+        if hints.gap_down_pct is not None and hints.gap_down_pct < -1.0:
+            lines.append(f"跳空: {hints.gap_down_pct:+.2f}%")
+        if hints.high52w_pct is not None:
+            lines.append(f"距近期高點: {hints.high52w_pct:+.2f}%")
+        return "\n".join(lines) if len(lines) > 1 else ""
 
     @staticmethod
     def _format_top3(top3) -> str:
