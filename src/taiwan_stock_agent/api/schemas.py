@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -96,6 +96,23 @@ class RegisterRequest(BaseModel):
 
 
 class RegisterResponse(BaseModel):
-    api_key: str
+    api_key: str | None  # None when payment is pending (pro-tier stub)
     tier: str
     message: str
+    checkout_url: str | None = None    # populated only for pro-tier stub
+    payment_status: str | None = None  # 'pending' for pro stub
+
+
+# ---------------------------------------------------------------------------
+# Community outcome submission (Phase 4)
+# ---------------------------------------------------------------------------
+
+class OutcomeRequest(BaseModel):
+    did_buy: bool
+    outcome: Literal["win", "lose", "break_even"] | None = None
+
+
+class OutcomeResponse(BaseModel):
+    message: str
+    signal_id: str
+    community_count: int

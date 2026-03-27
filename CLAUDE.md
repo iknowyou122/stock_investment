@@ -23,11 +23,12 @@ you will create drift that is expensive to fix.
 | Phase 2 | ✅ Done | Triple Confirmation Engine ✅ · ScoutAgent ✅ · Round 2 deepening ✅ · Signal track record ✅ · Sector heat map ✅ |
 | Phase 3a | ✅ Done | StrategistAgent CLI + LLM reasoning (Claude API) + TWSE free-tier proxy |
 | Phase 3b | ✅ Done | FastAPI + auth + rate limiting ✅ · Real DB routes ✅ · /track-record ✅ · signal_outcomes table ✅ · /register endpoint ✅ |
-| Phase 4 | ⏳ Not started | Collective label curation (outcome submission + Bayesian update) |
+| Phase 4 | ✅ Done | `POST /v1/signals/{signal_id}/outcome` ✅ · `BayesianLabelUpdater` ✅ · migrations 004-006 ✅ · pro-tier payment stub ✅ · 211 tests passing ✅ |
 
-**Phase 4 remaining work (next):**
-- Collective label curation: outcome submission + Bayesian update of reversal_rate
-- Payment integration: Stripe/台灣Pay before issuing pro keys (stub in /v1/register)
+**Phase 5 (next):**
+- Real Stripe webhook handling (requires production Stripe account + deployment)
+- Community reputation scoring and spam/bot filtering
+- 台灣Pay integration
 
 Do not implement Phase N+1 without the Phase N gate condition being met.
 

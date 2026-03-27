@@ -24,6 +24,7 @@ swap for Redis calls when moving to production.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import secrets
@@ -41,6 +42,8 @@ from .schemas import (
     ConfidenceTierStats,
     ErrorResponse,
     HealthResponse,
+    OutcomeRequest,
+    OutcomeResponse,
     RegisterRequest,
     RegisterResponse,
     SignalResponse,
@@ -82,6 +85,62 @@ def _check_rate_limit(api_key: str) -> None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Rate limit exceeded. {tier.capitalize()} tier allows {limit:,} requests/month.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Outcome submission rate-limit (daily, separate from monthly scan limiter)
+# ---------------------------------------------------------------------------
+
+# Daily outcome submission counters — key is "{api_key}:{YYYY-MM-DD}"
+_outcome_counts: dict[str, int] = defaultdict(int)
+
+OUTCOME_DAILY_LIMITS: dict[str, int] = {
+    "free": 10,
+    "pro": 100,
+}
+
+
+def _get_tier(api_key: str) -> str:
+    """Look up the tier for an API key from the DB.
+
+    Falls back to 'free' on any error or when the key is not found.
+    The special '__dev__' key used in development always returns 'pro'.
+    """
+    if api_key == "__dev__":
+        return "pro"
+    try:
+        from taiwan_stock_agent.infrastructure.db import get_connection
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT tier FROM api_keys WHERE api_key = %s AND is_active = TRUE",
+                    (api_key,),
+                )
+                row = cur.fetchone()
+        return row[0] if row else "free"
+    except Exception:
+        return "free"
+
+
+def _check_outcome_rate_limit(api_key: str) -> None:
+    """Increment the daily outcome submission counter and raise 429 if exceeded.
+
+    Counters are keyed by "{api_key}:{YYYY-MM-DD}" so they roll over
+    automatically at midnight without any explicit reset logic.
+    """
+    tier = _get_tier(api_key)
+    limit = OUTCOME_DAILY_LIMITS.get(tier, OUTCOME_DAILY_LIMITS["free"])
+    today_key = f"{api_key}:{date.today().isoformat()}"
+    _outcome_counts[today_key] += 1
+    if _outcome_counts[today_key] > limit:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Daily outcome submission limit exceeded. "
+                f"{tier.capitalize()} tier allows {limit} submissions/day."
+            ),
         )
 
 
@@ -364,6 +423,112 @@ async def get_track_record(
 
 
 @app.post(
+    "/v1/signals/{signal_id}/outcome",
+    status_code=status.HTTP_201_CREATED,
+    response_model=OutcomeResponse,
+    responses={
+        401: {"model": ErrorResponse, "description": "Missing or invalid API key"},
+        404: {"model": ErrorResponse, "description": "Signal not found"},
+        409: {"model": ErrorResponse, "description": "Outcome already submitted for this signal"},
+        422: {"model": ErrorResponse, "description": "Invalid outcome value"},
+        429: {"model": ErrorResponse, "description": "Rate limit exceeded"},
+    },
+    tags=["signals"],
+    summary="Submit outcome for a signal (community label curation)",
+)
+async def submit_outcome(
+    signal_id: str,
+    body: OutcomeRequest,
+    api_key: str = Depends(require_api_key),
+) -> OutcomeResponse:
+    _check_outcome_rate_limit(api_key)
+
+    api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+
+    from taiwan_stock_agent.infrastructure.db import get_connection
+
+    # Look up signal — separate connection from the insert to match codebase pattern
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ticker, signal_date, branch_codes FROM signal_outcomes WHERE signal_id = %s",
+                (signal_id,),
+            )
+            row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Signal '{signal_id}' not found.",
+        )
+
+    ticker, signal_date, branch_codes = row[0], row[1], row[2] or []
+
+    # Insert community outcome and count total submissions in a single connection
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO community_outcomes
+                        (signal_id, api_key_hash, did_buy, outcome, branch_codes, ticker, signal_date)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        signal_id,
+                        api_key_hash,
+                        body.did_buy,
+                        body.outcome,
+                        branch_codes,
+                        ticker,
+                        signal_date,
+                    ),
+                )
+            except Exception as exc:
+                # Detect unique constraint violation — catch both psycopg2-specific
+                # and generic exception by inspecting the message.
+                err = str(exc)
+                _is_unique_violation = (
+                    "unique" in err.lower()
+                    or "duplicate" in err.lower()
+                    or "idx_community_outcomes_dedup" in err
+                )
+                try:
+                    import psycopg2.errors  # noqa: F401
+
+                    if isinstance(exc, psycopg2.errors.UniqueViolation):
+                        _is_unique_violation = True
+                except ImportError:
+                    pass
+
+                if _is_unique_violation:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="You have already submitted an outcome for this signal.",
+                    )
+                logger.exception(
+                    "Failed to insert community outcome for signal %s", signal_id
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Failed to record outcome: {exc}",
+                )
+
+            # Count total community submissions for this signal (within same connection)
+            cur.execute(
+                "SELECT COUNT(*) FROM community_outcomes WHERE signal_id = %s",
+                (signal_id,),
+            )
+            community_count: int = cur.fetchone()[0]
+
+    return OutcomeResponse(
+        message="Outcome recorded. Thank you for contributing.",
+        signal_id=signal_id,
+        community_count=community_count,
+    )
+
+
+@app.post(
     "/v1/register",
     response_model=RegisterResponse,
     responses={
@@ -373,19 +538,24 @@ async def get_track_record(
     summary="Register for an API key",
 )
 async def register(body: RegisterRequest) -> RegisterResponse:
-    # TODO: integrate Stripe/台灣Pay payment verification before issuing pro keys
-    new_key = secrets.token_hex(16)
+    # Pro tier: payment gate stub (real Stripe/台灣Pay integration deferred to Phase 5)
+    if body.tier == "pro":
+        return RegisterResponse(
+            api_key=None,
+            tier="pro",
+            message="Payment required. Complete checkout to activate your pro key.",
+            checkout_url="https://checkout.example.com/stub?session=TODO_STRIPE_PHASE5",
+            payment_status="pending",
+        )
 
+    new_key = secrets.token_hex(16)
     try:
         from taiwan_stock_agent.infrastructure.db import get_connection
 
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    INSERT INTO api_keys (api_key, tier, email)
-                    VALUES (%s, %s, %s)
-                    """,
+                    "INSERT INTO api_keys (api_key, tier, email) VALUES (%s, %s, %s)",
                     (new_key, body.tier, body.email),
                 )
     except Exception as exc:
@@ -398,8 +568,5 @@ async def register(body: RegisterRequest) -> RegisterResponse:
     return RegisterResponse(
         api_key=new_key,
         tier=body.tier,
-        message=(
-            "API key created successfully. "
-            "Include it as the X-API-Key header in all requests."
-        ),
+        message="API key created successfully. Include it as the X-API-Key header in all requests.",
     )

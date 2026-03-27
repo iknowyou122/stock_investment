@@ -28,21 +28,31 @@ class SignalOutcomeRepository:
     they share the global psycopg2 connection pool.
     """
 
-    def record(self, signal: SignalOutput) -> str:
+    def record(self, signal: SignalOutput, branch_codes: list[str] | None = None) -> str:
         """Insert a new signal row.
 
         Returns the UUID string of the newly created signal_id.
         entry_price is taken from signal.execution_plan.entry_bid_limit.
+
+        Parameters
+        ----------
+        signal:
+            The SignalOutput to persist.
+        branch_codes:
+            Optional list of broker branch codes associated with this signal.
+            Stored in the branch_codes TEXT[] column (migration 004).
+            Defaults to an empty array when None.
         """
         entry_price = signal.execution_plan.entry_bid_limit
+        codes = branch_codes if branch_codes is not None else []
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO signal_outcomes
                         (ticker, signal_date, confidence_score, action, entry_price,
-                         halt_flag)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                         halt_flag, branch_codes)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING signal_id
                     """,
                     (
@@ -52,6 +62,7 @@ class SignalOutcomeRepository:
                         signal.action,
                         entry_price,
                         signal.halt_flag,
+                        codes,
                     ),
                 )
                 row = cur.fetchone()
