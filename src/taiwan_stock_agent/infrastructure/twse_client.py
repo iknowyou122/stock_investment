@@ -30,6 +30,17 @@ logger = logging.getLogger(__name__)
 TWSE_T86_URL = "https://www.twse.com.tw/rwd/zh/fund/T86"
 TWSE_MARGIN_URL = "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
 
+_TWSE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://www.twse.com.tw/",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+}
+
 CACHE_DIR = Path(__file__).resolve().parents[4] / "data" / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -132,6 +143,7 @@ class ChipProxyFetcher:
                     "selectType": "ALL",
                     "response": "json",
                 },
+                headers=_TWSE_HEADERS,
                 timeout=10,
                 verify=False,  # TWSE CA cert missing Subject Key Identifier (OpenSSL 3.x strict)
             )
@@ -235,6 +247,7 @@ class ChipProxyFetcher:
                     "selectType": "ALL",
                     "response": "json",
                 },
+                headers=_TWSE_HEADERS,
                 timeout=10,
                 verify=False,  # TWSE CA cert missing Subject Key Identifier (OpenSSL 3.x strict)
             )
@@ -292,6 +305,7 @@ class ChipProxyFetcher:
                     "selectType": "ALL",
                     "response": "json",
                 },
+                headers=_TWSE_HEADERS,
                 timeout=10,
                 verify=False,  # TWSE CA cert missing Subject Key Identifier (OpenSSL 3.x strict)
             )

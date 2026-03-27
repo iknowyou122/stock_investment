@@ -25,6 +25,62 @@ logger = logging.getLogger(__name__)
 DEFAULT_WATCHLIST = ["2330", "2317", "2454", "2382", "3008"]
 
 
+def _patch_agent_for_demo(agent: object, analysis_date: "date") -> None:
+    """Monkey-patch ChipDetectiveAgent and ChipProxyFetcher with realistic mock data.
+
+    Scenario: 波段贏家 accumulation — strong chip concentration, net buyers rising,
+    foreign net buy positive, margin decreasing (healthy).
+    OHLCV stays real; only chip sources are replaced.
+    """
+    from datetime import date as _date
+    from taiwan_stock_agent.domain.models import (
+        BrokerWithLabel, ChipReport, TWSEChipProxy,
+    )
+
+    def _mock_chip_report(ticker: str, report_date: _date, broker_trades_df=None) -> ChipReport:
+        return ChipReport(
+            ticker=ticker,
+            report_date=report_date,
+            top_buyers=[
+                BrokerWithLabel(branch_code="9A00", branch_name="元大-竹北",
+                                label="波段贏家", reversal_rate=0.21,
+                                buy_volume=1_250_000, sell_volume=80_000),
+                BrokerWithLabel(branch_code="6460", branch_name="國泰-新竹",
+                                label="地緣券商", reversal_rate=0.38,
+                                buy_volume=620_000, sell_volume=50_000),
+                BrokerWithLabel(branch_code="1480", branch_name="摩根大通",
+                                label="代操官股", reversal_rate=0.18,
+                                buy_volume=480_000, sell_volume=120_000),
+            ],
+            concentration_top15=0.52,
+            net_buyer_count_diff=12,
+            risk_flags=[],
+            active_branch_count=48,
+        )
+
+    def _mock_twse_proxy(ticker: str, trade_date: _date) -> TWSEChipProxy:
+        return TWSEChipProxy(
+            ticker=ticker,
+            trade_date=trade_date,
+            foreign_net_buy=8_500_000,
+            trust_net_buy=1_200_000,
+            dealer_net_buy=-200_000,
+            margin_balance_change=-320_000,
+            foreign_consecutive_buy_days=3,
+            short_balance_increased=False,
+            short_margin_ratio=0.04,
+            is_available=True,
+        )
+
+    # Patch ChipDetectiveAgent.analyze
+    agent._chip_detective.analyze = _mock_chip_report  # type: ignore[attr-defined]
+    # Patch ChipProxyFetcher.fetch
+    agent._chip_proxy_fetcher.fetch = _mock_twse_proxy  # type: ignore[attr-defined]
+    logger.info(
+        "DEMO MODE: chip data replaced with synthetic 波段贏家 accumulation scenario"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Taiwan Stock AI Agent — post-market Triple Confirmation signal engine",
@@ -63,6 +119,14 @@ Examples:
         action="store_true",
         help="Skip T+1 data freshness verification (use for historical backfill)",
     )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help=(
+            "Demo mode: inject synthetic chip data (波段贏家 accumulation scenario). "
+            "OHLCV is real; chip/TWSE data is mock. Use to verify full pipeline."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -72,26 +136,51 @@ Examples:
         sys.exit(1)
 
     # Lazy imports so --help works without DB/env setup
+    import os
     from taiwan_stock_agent.infrastructure.finmind_client import (
         FinMindClient,
         DataNotYetAvailableError,
     )
-    from taiwan_stock_agent.infrastructure.db import init_pool
-    from taiwan_stock_agent.domain.broker_label_classifier import (
-        PostgresBrokerLabelRepository,
-    )
+    from taiwan_stock_agent.domain.models import BrokerLabel
     from taiwan_stock_agent.agents.strategist_agent import StrategistAgent
+    from taiwan_stock_agent.infrastructure.twse_client import ChipProxyFetcher
 
-    # Initialize infrastructure
-    init_pool()
+    # Initialize DB pool only if DATABASE_URL is configured
+    label_repo: object
+    if os.environ.get("DATABASE_URL"):
+        from taiwan_stock_agent.infrastructure.db import init_pool
+        from taiwan_stock_agent.domain.broker_label_classifier import (
+            PostgresBrokerLabelRepository,
+        )
+        init_pool()
+        label_repo = PostgresBrokerLabelRepository(conn_factory=None)
+        logger.info("Using PostgreSQL broker label repository")
+    else:
+        # No DB configured — use empty in-memory repo (broker labels = unknown)
+        # Chip scoring still works via TWSE free-tier proxy
+        class _EmptyLabelRepo:
+            def get(self, branch_code: str) -> BrokerLabel | None:
+                return None
+            def upsert(self, label: BrokerLabel) -> None:
+                pass
+            def list_all(self) -> list:
+                return []
+        label_repo = _EmptyLabelRepo()
+        logger.info("DATABASE_URL not set — using empty label repo (broker labels = unknown)")
+
     finmind = FinMindClient()
 
     if args.no_llm:
-        import os
         os.environ.pop("ANTHROPIC_API_KEY", None)
 
-    label_repo = PostgresBrokerLabelRepository(conn_factory=None)
-    agent = StrategistAgent(finmind=finmind, label_repo=label_repo)
+    agent = StrategistAgent(
+        finmind=finmind,
+        label_repo=label_repo,
+        chip_proxy_fetcher=ChipProxyFetcher(),
+    )
+
+    if args.demo:
+        _patch_agent_for_demo(agent, analysis_date)
 
     # T+1 data freshness check (uses first ticker as canary)
     if not args.skip_freshness_check:
