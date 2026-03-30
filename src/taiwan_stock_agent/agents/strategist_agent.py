@@ -114,6 +114,10 @@ class StrategistAgent:
         if not taiex_df.empty:
             taiex_history = self._df_to_ohlcv_list(taiex_df, "TAIEX")
 
+        # --- OHLCV institutional proxy (Option B: fills Factor 3 when T86 is blocked) ---
+        if twse_proxy is not None:
+            twse_proxy = self._apply_institutional_proxy(twse_proxy, history, taiex_history)
+
         # --- Volume Profile proxy ---
         volume_profile = self._build_volume_profile(ticker, analysis_date, history)
 
@@ -199,6 +203,52 @@ class StrategistAgent:
             sixty_day_sessions=len(recent_60),
             data_quality_flags=flags,
         )
+
+    @staticmethod
+    def _apply_institutional_proxy(
+        proxy: "TWSEChipProxy",
+        stock_history: list[DailyOHLCV],
+        taiex_history: list[DailyOHLCV] | None,
+    ) -> "TWSEChipProxy":
+        """Fill in Factor 3 (外資買賣超) proxy via OHLCV RS when T86 is blocked.
+
+        When TWSE T86 returns a security challenge (TWSE_T86_ERROR / TWSE_T86_NO_DATA),
+        estimate institutional direction from the stock's 5-day relative strength vs TAIEX:
+          - RS ≥ 3%: inject foreign_net_buy = 1  (+15 pts in engine)
+          - RS ≥ 6%: also inject trust_net_buy = 1
+        Flags: adds TWSE_T86_PROXY:RS=+X.X% to data_quality_flags.
+
+        If T86 succeeded, or insufficient history exists, returns proxy unchanged.
+        """
+        t86_failed = any(
+            "TWSE_T86_ERROR" in f or "TWSE_T86_NO_DATA" in f
+            for f in proxy.data_quality_flags
+        )
+        if not t86_failed:
+            return proxy
+
+        if taiex_history is None or len(taiex_history) < 5 or len(stock_history) < 5:
+            return proxy
+
+        stock_5d = sorted(stock_history, key=lambda x: x.trade_date)[-5:]
+        taiex_5d = sorted(taiex_history, key=lambda x: x.trade_date)[-5:]
+
+        if stock_5d[0].close <= 0 or taiex_5d[0].close <= 0:
+            return proxy
+
+        stock_return = (stock_5d[-1].close - stock_5d[0].close) / stock_5d[0].close
+        taiex_return = (taiex_5d[-1].close - taiex_5d[0].close) / taiex_5d[0].close
+        rs = stock_return - taiex_return
+
+        flags = proxy.data_quality_flags + [f"TWSE_T86_PROXY:RS={rs:+.1%}"]
+
+        if rs >= 0.03:
+            updates: dict = {"foreign_net_buy": 1, "data_quality_flags": flags}
+            if rs >= 0.06:
+                updates["trust_net_buy"] = 1
+            return proxy.model_copy(update=updates)
+
+        return proxy.model_copy(update={"data_quality_flags": flags})
 
     def _generate_reasoning(
         self,

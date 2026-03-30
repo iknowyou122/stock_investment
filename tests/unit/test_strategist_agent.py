@@ -340,3 +340,137 @@ class TestStrategistChipProxyInjection:
         hints = captured[0]
         assert hints is not None, "hints must not be None — score_full() should always return hints"
         assert isinstance(hints, _AnalysisHints)
+
+
+# ===========================================================================
+# TestApplyInstitutionalProxy
+# ===========================================================================
+
+def _make_proxy(flags: list[str], foreign_net_buy: int = 0) -> TWSEChipProxy:
+    return TWSEChipProxy(
+        ticker="9999",
+        trade_date=_ANALYSIS_DATE,
+        foreign_net_buy=foreign_net_buy,
+        is_available=False,
+        data_quality_flags=flags,
+    )
+
+
+def _make_ohlcv_seq(
+    n: int,
+    start_close: float,
+    end_close: float,
+    base_date: date = date(2025, 1, 20),
+) -> list[DailyOHLCV]:
+    """n rows linearly interpolated from start_close to end_close."""
+    result = []
+    for i in range(n):
+        frac = i / (n - 1) if n > 1 else 0
+        c = start_close + (end_close - start_close) * frac
+        result.append(
+            DailyOHLCV(
+                ticker="9999",
+                trade_date=base_date + timedelta(days=i),
+                open=c - 1,
+                high=c + 1,
+                low=c - 2,
+                close=c,
+                volume=10_000,
+            )
+        )
+    return result
+
+
+class TestApplyInstitutionalProxy:
+    def test_no_change_when_t86_succeeded(self):
+        """Proxy unchanged when no T86 error flags present."""
+        proxy = _make_proxy(flags=["OTHER_FLAG"])
+        stock = _make_ohlcv_seq(10, 100, 110)
+        taiex = _make_ohlcv_seq(10, 18000, 18000)
+
+        result = StrategistAgent._apply_institutional_proxy(proxy, stock, taiex)
+
+        assert result.foreign_net_buy == 0
+        assert result.data_quality_flags == ["OTHER_FLAG"]
+
+    def test_no_change_when_taiex_history_none(self):
+        """T86 failed but no TAIEX data → proxy unchanged."""
+        proxy = _make_proxy(flags=["TWSE_T86_ERROR:timeout"])
+
+        stock = _make_ohlcv_seq(10, 100, 103)
+        result = StrategistAgent._apply_institutional_proxy(proxy, stock, None)
+
+        assert result.foreign_net_buy == 0
+
+    def test_no_change_when_insufficient_history(self):
+        """Only 3 sessions of stock or TAIEX → proxy unchanged (need >= 5)."""
+        proxy = _make_proxy(flags=["TWSE_T86_NO_DATA:empty"])
+        stock = _make_ohlcv_seq(3, 100, 103)
+        taiex = _make_ohlcv_seq(3, 18000, 18054)
+
+        result = StrategistAgent._apply_institutional_proxy(proxy, stock, taiex)
+
+        assert result.foreign_net_buy == 0
+
+    def test_proxy_flag_added_even_below_threshold(self):
+        """RS computed but < 3% → no buy signal injected, but flag still added."""
+        proxy = _make_proxy(flags=["TWSE_T86_ERROR:blocked"])
+        # Stock +1%, TAIEX +0.5% → RS = +0.5%, below 3% threshold
+        stock = _make_ohlcv_seq(5, 100, 101.0)
+        taiex = _make_ohlcv_seq(5, 18000, 18090)
+
+        result = StrategistAgent._apply_institutional_proxy(proxy, stock, taiex)
+
+        assert result.foreign_net_buy == 0
+        assert any("TWSE_T86_PROXY:RS=" in f for f in result.data_quality_flags)
+
+    def test_injects_foreign_buy_when_rs_above_3pct(self):
+        """Stock +5%, TAIEX flat → RS = +5% ≥ 3% → foreign_net_buy = 1."""
+        proxy = _make_proxy(flags=["TWSE_T86_ERROR:blocked"])
+        # Stock from 100 → 105 (+5%), TAIEX flat
+        stock = _make_ohlcv_seq(5, 100, 105.0)
+        taiex = _make_ohlcv_seq(5, 18000, 18000)
+
+        result = StrategistAgent._apply_institutional_proxy(proxy, stock, taiex)
+
+        assert result.foreign_net_buy == 1
+        assert result.trust_net_buy == 0  # RS < 6%, trust not set
+        assert any("TWSE_T86_PROXY:RS=+5.0%" in f for f in result.data_quality_flags)
+
+    def test_injects_trust_buy_when_rs_above_6pct(self):
+        """Stock +8%, TAIEX flat → RS = +8% ≥ 6% → both foreign and trust set."""
+        proxy = _make_proxy(flags=["TWSE_T86_ERROR:blocked"])
+        stock = _make_ohlcv_seq(5, 100, 108.0)
+        taiex = _make_ohlcv_seq(5, 18000, 18000)
+
+        result = StrategistAgent._apply_institutional_proxy(proxy, stock, taiex)
+
+        assert result.foreign_net_buy == 1
+        assert result.trust_net_buy == 1
+
+    def test_uses_twse_t86_no_data_flag_variant(self):
+        """TWSE_T86_NO_DATA flag (not just TWSE_T86_ERROR) also triggers proxy."""
+        proxy = _make_proxy(flags=["TWSE_T86_NO_DATA:empty_response"])
+        stock = _make_ohlcv_seq(5, 100, 105.0)
+        taiex = _make_ohlcv_seq(5, 18000, 18000)
+
+        result = StrategistAgent._apply_institutional_proxy(proxy, stock, taiex)
+
+        assert result.foreign_net_buy == 1
+
+    def test_original_proxy_data_preserved(self):
+        """Model fields NOT related to T86 (e.g. margin_balance_change) are preserved."""
+        proxy = TWSEChipProxy(
+            ticker="9999",
+            trade_date=_ANALYSIS_DATE,
+            is_available=False,
+            margin_balance_change=-5000,
+            data_quality_flags=["TWSE_T86_ERROR:blocked"],
+        )
+        stock = _make_ohlcv_seq(5, 100, 105.0)
+        taiex = _make_ohlcv_seq(5, 18000, 18000)
+
+        result = StrategistAgent._apply_institutional_proxy(proxy, stock, taiex)
+
+        assert result.margin_balance_change == -5000
+        assert result.foreign_net_buy == 1
