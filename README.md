@@ -2,8 +2,8 @@
 
 台股籌碼面信號系統。每日收盤後分析指定股票，輸出 **LONG / WATCH / CAUTION** 三級信號，幫助判斷主力是否在進場。
 
-> **Last updated:** 2026-03-27
-> **Current focus:** Phase 4（Collective label curation — 等待用戶基礎）
+> **Last updated:** 2026-03-31
+> **Current focus:** Phase 5（Stripe 付款整合 + 社群信譽評分）
 
 ---
 
@@ -40,7 +40,9 @@
 | Flag | 意思 | 影響 |
 |------|------|------|
 | `NO_BROKER_DATA` | FinMind 分點資料需付費，未取得 | 切換免費模式評分，Pillar 2 用 TWSE 代替 |
+| `TWSE_T86_ERROR` | TWSE T86 端點被 WAF 擋（2026-03 起） | 自動切換 OHLCV RS proxy（見下方） |
 | `TWSE_T86_NO_DATA` | 當日無 T86 外資資料（假日/停牌） | Pillar 2 部分因子為 0 |
+| `TWSE_T86_PROXY:RS=+X.X%` | T86 被擋，以 RS vs 大盤估算外資方向 | RS ≥ 3% 自動注入外資買超訊號 |
 | `free_tier_mode: true` | 使用 TWSE opendata 替代分點資料 | 門檻自動調整（LONG ≥ 60，WATCH ≥ 35） |
 
 ---
@@ -51,7 +53,7 @@
 
 | | 免費模式 | 付費模式 |
 |--|---------|---------|
-| **資料** | TWSE T86（外資/投信/自營商）+ openapi MI_MARGN（融資） | + FinMind 分點明細 |
+| **資料** | TWSE openapi MI_MARGN（融資）+ OHLCV RS proxy（T86 被 WAF 擋，2026-03 起） | + FinMind 分點明細 |
 | **Pillar 2 滿分** | 63 pts | 45 pts |
 | **LONG 門檻** | ≥ 60 | ≥ 70 |
 | **優勢** | 免費，T86 當日可用 | 主力分點行為，更精確 |
@@ -98,7 +100,7 @@ FINMIND_API_KEY=<你的 FinMind JWT token>
 
 ```bash
 PYTHONPATH=src python3 -m pytest tests/unit/ -q
-# 預期：179 passed
+# 預期：219 passed
 ```
 
 ---
@@ -176,6 +178,26 @@ curl http://localhost:8000/v1/track-record?days=30
 
 ---
 
+## Phase 4 — 社群勝率回報（Collective Label Curation）
+
+用戶可以回報信號結果，驅動 Bayesian 更新分點標籤的 `community_signal_win_rate`。
+
+```bash
+# 回報信號結果（需要 API key）
+curl -X POST http://localhost:8000/v1/signals/{signal_id}/outcome \
+  -H "X-API-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"did_buy": true, "outcome": "win"}'
+
+# 每日 cron：更新所有分點的 community_signal_win_rate
+python3 scripts/run_bayesian_update.py
+```
+
+`outcome` 可填 `"win"` / `"lose"` / `"break_even"` / `null`（尚未出場）。
+每個 API key 每日上限：免費 10 次，Pro 100 次。
+
+---
+
 ## 已知資料限制
 
 | 資料源 | 狀態 | 說明 |
@@ -183,7 +205,7 @@ curl http://localhost:8000/v1/track-record?days=30
 | FinMind `TaiwanStockPrice` (OHLCV) | ✅ 免費 | 未除權息調整；Pillar 1+3 評分來源 |
 | FinMind `TaiwanStockPriceAdj` | ❌ 需付費 | 自動 fallback 到未調整價格 |
 | FinMind `TaiwanStockBrokerTradingStatement` | ❌ 需付費 | 分點明細；Pillar 2 付費版 |
-| TWSE T86（外資/投信/自營商買賣超） | ✅ 免費 | Pillar 2 免費版主要來源 |
+| TWSE T86（外資/投信/自營商買賣超） | ⚠ WAF 封鎖 | 2026-03 起 TWSE 啟用 WAF，自動 fallback 到 OHLCV RS proxy |
 | TWSE openapi MI_MARGN（融資/融券） | ✅ 免費 | 融資餘額、融資使用率、券資比 |
 | TWSE TWT93U（借券賣出） | ❌ 端點已下架 | 因子 graceful degrade 為 0 |
 
@@ -259,7 +281,8 @@ curl http://localhost:8000/v1/track-record?days=30
 | Phase 2 | ✅ 完成 | Triple Confirmation Engine + ScoutAgent + Sector heat map |
 | Phase 3a | ✅ 完成 | StrategistAgent CLI + LLM reasoning + TWSE free-tier proxy |
 | Phase 3b | ✅ 完成 | FastAPI + 真實 DB 路由 + /track-record + /register |
-| Phase 4 | ⏳ 未開始 | Collective label curation + Bayesian reversal_rate 更新 |
+| Phase 4 | ✅ 完成 | Collective label curation + BayesianLabelUpdater + 社群勝率回報 API + 付費 stub |
+| Phase 5 | ⏳ 規劃中 | Stripe 真實付款整合 + 社群信譽評分 + 台灣 Pay |
 
 ---
 
@@ -318,17 +341,18 @@ stock_investment/
 │   │   ├── finmind_client.py       # FinMind API（cache + retry + fallback）
 │   │   ├── twse_client.py          # TWSE opendata free-tier chip proxy
 │   │   ├── db.py                   # PostgreSQL connection pool
-│   │   └── signal_outcome_repo.py  # Signal 結果追蹤
+│   │   └── signal_outcome_repo.py  # Signal 結果追蹤（含 branch_codes）
 │   ├── domain/
 │   │   ├── triple_confirmation_engine.py  # 三柱確認評分核心
 │   │   ├── broker_label_classifier.py     # 隔日沖分類核心
+│   │   ├── bayesian_label_updater.py      # Phase 4：Beta-Bernoulli 社群勝率更新
 │   │   └── models.py                      # Pydantic schemas
 │   ├── agents/
 │   │   ├── scout_agent.py          # 全市場異常掃描 + 板塊熱力圖
 │   │   ├── chip_detective_agent.py # 籌碼偵探
-│   │   └── strategist_agent.py     # 決策主控 + LLM reasoning
+│   │   └── strategist_agent.py     # 決策主控 + LLM reasoning + OHLCV RS proxy
 │   └── api/
-│       ├── main.py                 # Phase 3b FastAPI app
+│       ├── main.py                 # FastAPI app（含 Phase 4 /outcome 端點）
 │       ├── schemas.py              # API request/response models
 │       └── auth.py                 # API key 驗證（DB + master key）
 ├── frontend/
@@ -344,6 +368,6 @@ stock_investment/
 ├── tests/
 │   ├── unit/                       # 179 tests，無需 DB/網路
 │   └── integration/                # 需要 PostgreSQL
-├── db/migrations/                  # SQL migrations（001–003）
+├── db/migrations/                  # SQL migrations（001–006）
 └── docs/design/                    # 設計文件
 ```
