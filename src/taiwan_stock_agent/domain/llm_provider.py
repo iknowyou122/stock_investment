@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODELS: dict[str, str] = {
     "claude": "claude-sonnet-4-6",
     "openai": "gpt-4o",
-    "gemini": "gemini-2.5-pro",
+    "gemini": "gemini-2.5-flash",
 }
 
 
