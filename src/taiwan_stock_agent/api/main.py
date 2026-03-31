@@ -321,10 +321,12 @@ async def get_signal(
     chip_proxy = ChipProxyFetcher()
     label_repo = PostgresBrokerLabelRepository(conn_factory=None)
 
+    from taiwan_stock_agent.domain.llm_provider import create_llm_provider
     agent = StrategistAgent(
         finmind=finmind,
         label_repo=label_repo,
         chip_proxy_fetcher=chip_proxy,
+        llm_provider=create_llm_provider(),
     )
 
     try:

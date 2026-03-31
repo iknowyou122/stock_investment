@@ -15,6 +15,13 @@ tenacity = "*"
 anthropic = "*"
 python-dotenv = "*"
 requests = "*"
+openai = { version = "*", optional = true }
+google-generativeai = { version = "*", optional = true }
+
+[tool.poetry.extras]
+llm-openai = ["openai"]
+llm-gemini = ["google-generativeai"]
+llm-all = ["openai", "google-generativeai"]
 
 [tool.poetry.dev-dependencies]
 pytest = "*"

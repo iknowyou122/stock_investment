@@ -14,6 +14,7 @@ import os
 from datetime import date, timedelta
 
 from taiwan_stock_agent.domain.broker_label_classifier import BrokerLabelRepository
+from taiwan_stock_agent.domain.llm_provider import LLMProvider, AnthropicProvider, create_llm_provider
 from taiwan_stock_agent.domain.models import (
     DailyOHLCV,
     Reasoning,
@@ -50,11 +51,24 @@ class StrategistAgent:
         label_repo: BrokerLabelRepository,
         anthropic_api_key: str | None = None,
         chip_proxy_fetcher: ChipProxyFetcher | None = None,
+        llm_provider: LLMProvider | None = None,
     ) -> None:
         self._finmind = finmind
         self._chip_detective = ChipDetectiveAgent(label_repo)
         self._chip_proxy_fetcher = chip_proxy_fetcher
-        self._anthropic_api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+
+        # LLM provider resolution order:
+        #   1. explicit llm_provider= argument
+        #   2. anthropic_api_key= argument (backward compat)
+        #   3. auto-detect from env (LLM_PROVIDER / ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY)
+        if llm_provider is not None:
+            self._llm_provider: LLMProvider | None = llm_provider
+        elif anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", ""):
+            key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+            self._llm_provider = AnthropicProvider(key)
+        else:
+            self._llm_provider = create_llm_provider()
+
         # Engine is created per-run with the appropriate free_tier_mode
         # (kept as instance attr for backward compat but overridden in run())
         self._engine = TripleConfirmationEngine()
@@ -132,12 +146,14 @@ class StrategistAgent:
         )
 
         # --- LLM reasoning (Phase 3) ---
-        if self._anthropic_api_key:
+        if self._llm_provider is not None:
             reasoning = self._generate_reasoning(signal, chip_report, breakdown, hints)
             signal = signal.model_copy(update={"reasoning": reasoning})
         else:
             logger.info(
-                "ANTHROPIC_API_KEY not set — skipping LLM reasoning for %s", ticker
+                "No LLM provider configured — skipping reasoning for %s "
+                "(set ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY or LLM_PROVIDER)",
+                ticker,
             )
 
         return signal
@@ -271,14 +287,9 @@ class StrategistAgent:
         breakdown: _ScoreBreakdown,
         hints: _AnalysisHints | None = None,
     ) -> Reasoning:
-        """Call Claude API to generate natural language reasoning fields."""
-        try:
-            import anthropic
-        except ImportError:
-            logger.warning("anthropic package not installed — skipping LLM reasoning")
+        """Call configured LLM provider to generate natural language reasoning fields."""
+        if self._llm_provider is None:
             return Reasoning()
-
-        client = anthropic.Anthropic(api_key=self._anthropic_api_key)
 
         hints_section = self._format_hints_for_prompt(hints) if hints else ""
 
@@ -328,18 +339,14 @@ class StrategistAgent:
 回傳 JSON 格式，欄位: momentum, chip_analysis, risk_factors"""
 
         try:
-            message = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=500,
-                messages=[{"role": "user", "content": prompt}],
+            raw = self._llm_provider.complete(prompt, max_tokens=500)
+        except RuntimeError as e:
+            logger.warning(
+                "LLM reasoning failed [%s] (skipping): %s",
+                getattr(self._llm_provider, "name", "unknown"),
+                e,
             )
-        except anthropic.APIStatusError as e:
-            logger.warning("Anthropic API error (skipping LLM reasoning): %s", e)
             return Reasoning()
-        except anthropic.APIConnectionError as e:
-            logger.warning("Anthropic connection error (skipping LLM reasoning): %s", e)
-            return Reasoning()
-        raw = message.content[0].text.strip()
 
         # Extract JSON from response
         try:
