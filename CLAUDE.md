@@ -21,9 +21,10 @@ you will create drift that is expensive to fix.
 | Pre-spike | ✅ Done | `data_alignment_check.py` + `spike_validate.py` written |
 | Phase 1 | ✅ Done | Broker label classifier + batch classifier + outcome recorder built |
 | Phase 2 | ✅ Done | Triple Confirmation Engine ✅ · ScoutAgent ✅ · Round 2 deepening ✅ · Signal track record ✅ · Sector heat map ✅ |
-| Phase 3a | ✅ Done | StrategistAgent CLI + LLM reasoning (Claude API) + TWSE free-tier proxy |
+| Phase 3a | ✅ Done | StrategistAgent CLI + multi-LLM support (Gemini/Claude/OpenAI) + TWSE free-tier proxy |
 | Phase 3b | ✅ Done | FastAPI + auth + rate limiting ✅ · Real DB routes ✅ · /track-record ✅ · signal_outcomes table ✅ · /register endpoint ✅ |
-| Phase 4 | ✅ Done | `POST /v1/signals/{signal_id}/outcome` ✅ · `BayesianLabelUpdater` ✅ · migrations 004-006 ✅ · pro-tier payment stub ✅ · 211 tests passing ✅ |
+| Phase 4 | ✅ Done | `POST /v1/signals/{signal_id}/outcome` ✅ · `BayesianLabelUpdater` ✅ · migrations 004-006 ✅ · pro-tier payment stub ✅ · 253 tests passing ✅ |
+| Phase 4.5 | ✅ Done | Makefile local dev ✅ · DB integration fix (json.dumps metadata) ✅ · Gemini 2.5 Flash wired end-to-end ✅ |
 
 **Phase 5 (next):**
 - Real Stripe webhook handling (requires production Stripe account + deployment)
