@@ -16,12 +16,12 @@ anthropic = "*"
 python-dotenv = "*"
 requests = "*"
 openai = { version = "*", optional = true }
-google-generativeai = { version = "*", optional = true }
+google-genai = { version = "*", optional = true }
 
 [tool.poetry.extras]
 llm-openai = ["openai"]
-llm-gemini = ["google-generativeai"]
-llm-all = ["openai", "google-generativeai"]
+llm-gemini = ["google-genai"]
+llm-all = ["openai", "google-genai"]
 
 [tool.poetry.dev-dependencies]
 pytest = "*"

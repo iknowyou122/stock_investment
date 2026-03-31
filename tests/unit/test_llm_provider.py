@@ -162,19 +162,21 @@ class TestGeminiProvider:
     def test_complete_returns_text(self):
         mock_resp = MagicMock()
         mock_resp.text = "  gemini response  "
-        mock_model_instance = MagicMock()
-        mock_model_instance.generate_content.return_value = mock_resp
-        mock_genai = MagicMock()
-        mock_genai.GenerativeModel.return_value = mock_model_instance
-        mock_genai.types.GenerationConfig = MagicMock(return_value={})
+        mock_client_instance = MagicMock()
+        mock_client_instance.models.generate_content.return_value = mock_resp
+        mock_genai_module = MagicMock()
+        mock_genai_module.Client.return_value = mock_client_instance
+        mock_types_module = MagicMock()
 
-        with patch.dict("sys.modules", {"google.generativeai": mock_genai, "google": MagicMock()}):
+        with patch.dict("sys.modules", {
+            "google": MagicMock(),
+            "google.genai": mock_genai_module,
+            "google.genai.types": mock_types_module,
+        }):
             p = GeminiProvider("key")
-            # Patch the import inside complete()
-            with patch("google.generativeai", mock_genai, create=True):
-                import google.generativeai as _genai_real
-                with patch.object(p, "complete", wraps=None) as _m:
-                    pass  # just verify instantiation works
+            with patch("google.genai", mock_genai_module, create=True), \
+                 patch("google.genai.types", mock_types_module, create=True):
+                pass  # instantiation verified
         assert p.name == "gemini"
 
     def test_uses_default_model(self):
@@ -183,9 +185,9 @@ class TestGeminiProvider:
         assert p._model == DEFAULT_MODELS["gemini"]
 
     def test_missing_package_raises_runtime_error(self):
-        with patch.dict("sys.modules", {"google": None, "google.generativeai": None}):
+        with patch.dict("sys.modules", {"google": None, "google.genai": None}):
             p = GeminiProvider("key")
-            with pytest.raises(RuntimeError, match="google-generativeai not installed"):
+            with pytest.raises(RuntimeError, match="google-genai not installed"):
                 p.complete("prompt")
 
 

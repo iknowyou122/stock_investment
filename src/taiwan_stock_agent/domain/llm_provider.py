@@ -108,19 +108,20 @@ class GeminiProvider:
 
     def complete(self, prompt: str, max_tokens: int = 500) -> str:
         try:
-            import google.generativeai as genai
+            from google import genai
+            from google.genai import types as genai_types
         except ImportError:
             raise RuntimeError(
-                "google-generativeai not installed. Run: pip install google-generativeai"
+                "google-genai not installed. Run: pip install google-genai"
             )
 
-        genai.configure(api_key=self._api_key)
-        model = genai.GenerativeModel(self._model)
+        client = genai.Client(api_key=self._api_key)
         try:
-            resp = model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    max_output_tokens=max_tokens
+            resp = client.models.generate_content(
+                model=self._model,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    max_output_tokens=max_tokens,
                 ),
             )
             return resp.text.strip()
