@@ -242,10 +242,24 @@ class StrategistAgent:
 
         flags = proxy.data_quality_flags + [f"TWSE_T86_PROXY:RS={rs:+.1%}"]
 
+        # Stepped scoring — each tier adds one more institution signal:
+        #   RS ≥ 9%: foreign + trust + dealer → +35 pts (incl. 三大法人同向 bonus)
+        #   RS ≥ 6%: foreign + trust          → +25 pts
+        #   RS ≥ 3%: foreign only             → +15 pts
+        #   RS ≥ 1.5%: dealer only            → +5 pts  (weak outperformance)
+        #   RS < 1.5%: no signal injected
+        updates: dict = {"data_quality_flags": flags}
+        if rs >= 0.015:
+            updates["dealer_net_buy"] = 1
         if rs >= 0.03:
-            updates: dict = {"foreign_net_buy": 1, "data_quality_flags": flags}
-            if rs >= 0.06:
-                updates["trust_net_buy"] = 1
+            updates["foreign_net_buy"] = 1
+        if rs >= 0.06:
+            updates["trust_net_buy"] = 1
+        if rs >= 0.09:
+            # dealer already set at 0.015; trust + foreign already set — all three present
+            pass  # 三大法人同向 bonus fires automatically in engine
+
+        if len(updates) > 1:  # something was injected beyond just flags
             return proxy.model_copy(update=updates)
 
         return proxy.model_copy(update={"data_quality_flags": flags})

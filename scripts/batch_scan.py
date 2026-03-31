@@ -96,11 +96,24 @@ def _default_date() -> date:
     return candidate
 
 
-def _scan_one(agent: StrategistAgent, ticker: str, analysis_date: date) -> dict:
+def _make_agent() -> StrategistAgent:
+    """Create a thread-local agent with its own FinMind + TWSE clients.
+
+    Each worker thread gets independent HTTP sessions and Parquet cache file
+    handles, avoiding lock contention and race conditions on shared state.
+    """
+    return StrategistAgent(
+        FinMindClient(),
+        _EmptyLabelRepo(),
+        chip_proxy_fetcher=ChipProxyFetcher(),
+    )
+
+
+def _scan_one(ticker: str, analysis_date: date) -> dict:
     """Run pipeline for one ticker; return result dict."""
     t0 = time.time()
     try:
-        signal = agent.run(ticker, analysis_date)
+        signal = _make_agent().run(ticker, analysis_date)
         elapsed = time.time() - t0
         return {
             "ticker": ticker,
@@ -235,19 +248,15 @@ def run_batch(
 ) -> None:
     print(f"\n掃描清單: {len(tickers)} 檔")
     print(f"分析日期: {analysis_date}")
-    print(f"並行執行: {workers} 個 worker\n")
-
-    finmind = FinMindClient()
-    chip_proxy_fetcher = ChipProxyFetcher()
-    label_repo = _EmptyLabelRepo()
-    agent = StrategistAgent(finmind, label_repo, chip_proxy_fetcher=chip_proxy_fetcher)
+    print(f"並行執行: {workers} 個 worker（每個 worker 獨立 HTTP session）\n")
 
     results: list[dict] = []
 
-    # Use threads to parallelize FinMind/TWSE HTTP calls
+    # Each worker creates its own StrategistAgent+FinMindClient to avoid
+    # shared-state race conditions on requests.Session and Parquet cache handles.
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(_scan_one, agent, ticker, analysis_date): ticker
+            pool.submit(_scan_one, ticker, analysis_date): ticker
             for ticker in tickers
         }
         for i, future in enumerate(as_completed(futures), 1):
@@ -274,7 +283,7 @@ def main() -> None:
     )
     parser.add_argument("--top", type=int, default=10, help="顯示前 N 名（預設: 10）")
     parser.add_argument("--min-confidence", type=int, default=0, help="最低信心分數門檻（預設: 0）")
-    parser.add_argument("--workers", type=int, default=4, help="並行 worker 數（預設: 4）")
+    parser.add_argument("--workers", type=int, default=5, help="並行 worker 數（預設: 5；建議 3-8，受 FinMind rate limit 限制）")
     parser.add_argument("--save-csv", action="store_true", help="儲存結果到 CSV 檔案")
     parser.add_argument(
         "--csv-path",

@@ -424,21 +424,34 @@ class TestApplyInstitutionalProxy:
         assert result.foreign_net_buy == 0
         assert any("TWSE_T86_PROXY:RS=" in f for f in result.data_quality_flags)
 
-    def test_injects_foreign_buy_when_rs_above_3pct(self):
-        """Stock +5%, TAIEX flat → RS = +5% ≥ 3% → foreign_net_buy = 1."""
+    def test_injects_dealer_only_when_rs_between_1p5_and_3pct(self):
+        """RS = +2% (≥1.5% but <3%) → dealer_net_buy=1 only (+5 pts)."""
         proxy = _make_proxy(flags=["TWSE_T86_ERROR:blocked"])
-        # Stock from 100 → 105 (+5%), TAIEX flat
+        # Stock +2.5%, TAIEX flat → RS = +2.5%
+        stock = _make_ohlcv_seq(5, 100, 102.5)
+        taiex = _make_ohlcv_seq(5, 18000, 18000)
+
+        result = StrategistAgent._apply_institutional_proxy(proxy, stock, taiex)
+
+        assert result.dealer_net_buy == 1
+        assert result.foreign_net_buy == 0
+        assert result.trust_net_buy == 0
+
+    def test_injects_foreign_buy_when_rs_above_3pct(self):
+        """RS = +5% (≥3% but <6%) → foreign_net_buy=1, dealer_net_buy=1."""
+        proxy = _make_proxy(flags=["TWSE_T86_ERROR:blocked"])
         stock = _make_ohlcv_seq(5, 100, 105.0)
         taiex = _make_ohlcv_seq(5, 18000, 18000)
 
         result = StrategistAgent._apply_institutional_proxy(proxy, stock, taiex)
 
         assert result.foreign_net_buy == 1
-        assert result.trust_net_buy == 0  # RS < 6%, trust not set
+        assert result.dealer_net_buy == 1   # also set at ≥1.5% tier
+        assert result.trust_net_buy == 0    # RS < 6%, trust not set
         assert any("TWSE_T86_PROXY:RS=+5.0%" in f for f in result.data_quality_flags)
 
     def test_injects_trust_buy_when_rs_above_6pct(self):
-        """Stock +8%, TAIEX flat → RS = +8% ≥ 6% → both foreign and trust set."""
+        """RS = +8% (≥6% but <9%) → foreign + trust + dealer set."""
         proxy = _make_proxy(flags=["TWSE_T86_ERROR:blocked"])
         stock = _make_ohlcv_seq(5, 100, 108.0)
         taiex = _make_ohlcv_seq(5, 18000, 18000)
@@ -447,6 +460,19 @@ class TestApplyInstitutionalProxy:
 
         assert result.foreign_net_buy == 1
         assert result.trust_net_buy == 1
+        assert result.dealer_net_buy == 1
+
+    def test_all_three_set_when_rs_above_9pct(self):
+        """RS = +10% (≥9%) → all three institutions set → 三大法人同向 bonus fires."""
+        proxy = _make_proxy(flags=["TWSE_T86_ERROR:blocked"])
+        stock = _make_ohlcv_seq(5, 100, 110.0)
+        taiex = _make_ohlcv_seq(5, 18000, 18000)
+
+        result = StrategistAgent._apply_institutional_proxy(proxy, stock, taiex)
+
+        assert result.foreign_net_buy == 1
+        assert result.trust_net_buy == 1
+        assert result.dealer_net_buy == 1
 
     def test_uses_twse_t86_no_data_flag_variant(self):
         """TWSE_T86_NO_DATA flag (not just TWSE_T86_ERROR) also triggers proxy."""
