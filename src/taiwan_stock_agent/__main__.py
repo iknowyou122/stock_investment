@@ -144,6 +144,7 @@ Examples:
     from taiwan_stock_agent.domain.models import BrokerLabel
     from taiwan_stock_agent.agents.strategist_agent import StrategistAgent
     from taiwan_stock_agent.infrastructure.twse_client import ChipProxyFetcher
+    from taiwan_stock_agent.domain.llm_provider import create_llm_provider
 
     # Initialize DB pool only if DATABASE_URL is configured
     label_repo: object
@@ -170,13 +171,15 @@ Examples:
 
     finmind = FinMindClient()
 
-    if args.no_llm:
-        os.environ.pop("ANTHROPIC_API_KEY", None)
+    llm_provider = None if args.no_llm else create_llm_provider()
+    if llm_provider:
+        logger.info("LLM provider: %s (%s)", llm_provider.name, llm_provider._model)
 
     agent = StrategistAgent(
         finmind=finmind,
         label_repo=label_repo,
         chip_proxy_fetcher=ChipProxyFetcher(),
+        llm_provider=llm_provider,
     )
 
     if args.demo:

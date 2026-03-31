@@ -339,7 +339,7 @@ class StrategistAgent:
 回傳 JSON 格式，欄位: momentum, chip_analysis, risk_factors"""
 
         try:
-            raw = self._llm_provider.complete(prompt, max_tokens=1000)
+            raw = self._llm_provider.complete(prompt, max_tokens=2000)
         except RuntimeError as e:
             logger.warning(
                 "LLM reasoning failed [%s] (skipping): %s",

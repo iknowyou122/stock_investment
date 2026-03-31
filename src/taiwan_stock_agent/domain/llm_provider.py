@@ -122,6 +122,7 @@ class GeminiProvider:
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(
                     max_output_tokens=max_tokens,
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                 ),
             )
             return resp.text.strip()
