@@ -4,12 +4,13 @@ export PYTHONPATH
 .PHONY: run scan api test test-unit test-integration
 
 # ── 分析股票 ─────────────────────────────────────────────────────────────────
-# 用法: make run DATE=2026-03-27
-#       make run DATE=2026-03-27 TICKERS="2330 2317 2454"
-DATE    ?= $(shell date +%Y-%m-%d)
-TICKERS ?= 2330 2317 2454 2382 3008
+# 用法: make run DATE=2026-03-27 TICKERS="2330 2317 2454"
+DATE ?= $(shell date +%Y-%m-%d)
 
 run:
+ifndef TICKERS
+	$(error 請指定 TICKERS，例如: make run TICKERS="2330 2317")
+endif
 	python3 -m taiwan_stock_agent --date $(DATE) --tickers $(TICKERS) --skip-freshness-check
 
 # ── 批次掃描 ─────────────────────────────────────────────────────────────────
