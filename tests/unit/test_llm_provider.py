@@ -95,7 +95,8 @@ class TestAnthropicProvider:
 
     def test_uses_default_model(self):
         from taiwan_stock_agent.domain.llm_provider import DEFAULT_MODELS
-        p = AnthropicProvider("key")
+        with _clear_env("LLM_MODEL"):
+            p = AnthropicProvider("key")
         assert p._model == DEFAULT_MODELS["claude"]
 
     def test_uses_custom_model(self):
@@ -144,7 +145,8 @@ class TestOpenAIProvider:
 
     def test_uses_default_model(self):
         from taiwan_stock_agent.domain.llm_provider import DEFAULT_MODELS
-        p = OpenAIProvider("key")
+        with _clear_env("LLM_MODEL"):
+            p = OpenAIProvider("key")
         assert p._model == DEFAULT_MODELS["openai"]
 
     def test_missing_package_raises_runtime_error(self):
