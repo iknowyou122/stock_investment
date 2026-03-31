@@ -15,6 +15,7 @@ additional feature engineering beyond reversal_rate — see TODOS.md for Phase 2
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
 from typing import Protocol
@@ -108,7 +109,7 @@ class PostgresBrokerLabelRepository:
                         label.reversal_rate,
                         label.sample_count,
                         label.last_updated,
-                        label.metadata,
+                        json.dumps(label.metadata),
                     ),
                 )
 
