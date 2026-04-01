@@ -168,82 +168,102 @@ Presentation Layer:
    # Output: SignalOutput (see JSON schema below)
    ```
 
-2. **Triple Confirmation formula (deterministic):**
+2. **Triple Confirmation formula (deterministic) — v2 architecture (Phase 4.6+):**
 
-   **Data availability note:** FinMind does not provide 1-minute intraday volume on free/standard plans. Phase 1-2 uses daily OHLCV only. The volume surge signal uses daily volume vs. 20-day average as a fallback.
+   > **v1 formula (Phases 1–4.5) is preserved in `tests/unit/test_triple_confirmation_engine_v1.py` for reference.**
+   > v2 replaces flat summation with a three-layer architecture: Gate → Score → Risk Adjust.
+
+   **Layer 0: Gate (2-of-4 required to enter scoring)**
+
+   If fewer than 2 conditions are met, signal is returned as `action="CAUTION"`, `confidence=0`, `data_quality_flags=["NO_SETUP"]`.
+
+   | # | Condition | Notes |
+   |---|-----------|-------|
+   | 1 | `close > 5d_avg_vwap` | 5-day volume-weighted average close |
+   | 2 | `volume > 20d_avg_volume * 1.3` | |
+   | 3 | `close >= twenty_day_high * 0.99` | Only evaluated when `twenty_day_high > 0` |
+   | 4 | `5d_stock_return > 5d_taiex_return` | Only evaluated when TAIEX history available |
+
+   **Layer 1: Three-Pillar Score**
 
    ```
-   score = 0
+   # Pillar 1: Momentum (max 35 pts)
+   volume_ratio = today_vol / avg20d_vol
+   volume_ratio_pts:    <1.2→0, 1.2–1.8→4, >1.8→8
+   price_direction_pts: close >= prev_close → 3
+   close_strength_pts:  (close-low)/(high-low); guard high==low→0; ≥0.7→4, 0.5–0.7→2, <0.5→0
+   vwap_advantage_pts:  close > 5d_avg_vwap → 6
+   trend_continuity_pts: 3 consec up→3, 4+ of last 5 up→5
+   volume_escalation_pts: T-3<T-2<T-1→3, plus today>T-1→5
 
-   # Pillar 1: Momentum (0-50 pts)
-   # Phase 1-3 (T+1 daily data):
-   # vwap_5d = sum(close_i * volume_i for last 5 days) / sum(volume_i for last 5 days)
-   # Note: daily VWAP = close (tautology with single bar), so 5d VWAP proxy used instead.
-   if close > vwap_5d:                                          score += 20  # price above 5-day volume-weighted avg
-   if daily_volume > daily_20ma_volume * 1.5:                   score += 20  # daily vol surge fallback
-   if (close - low) / (high - low) > 0.7:                       score += 5   # K線收盤強弱比: close near top of range
-   if consecutive_up_days >= 3:                                  score += 5   # 連漲天數: momentum continuation
-   # Phase 4+ (real-time, requires broker WebSocket):
-   # if volume_1min > volume_20min_avg * 3.0:      score += 20  # 1-min surge (replaces daily fallback)
+   # Pillar 2A: Chip paid (max 40 pts) — uses ChipReport (FinMind)
+   breadth_pts:         3-day (net_buy_branches - net_sell_branches): ≤0→0, 1-10→5, >10→10
+   concentration_pts:   top15_buy/total_buy; cap +5 if active_branches<10; <25%→0, 25-35%→5, >35%→10
+   continuity_pts:      top5 buyer overlap with prev day; 0→0, 1→3, ≥2→5; +3 if 3d avg≥2
+   daytrade_filter_pts: top3 all non-隔日沖 → 7, else 0 (also triggers daytrade_risk=-25)
+   foreign_broker_pts:  known foreign broker in buyers → 3; in top3 + strong concentration → 5
 
-   # Pillar 2: Chip (0-40 pts paid | 0-50 pts free-tier)
-   # --- Paid (FinMind plan, chip_data_available=True) ---
-   if net_buyer_count_diff > 0:                    score += 15  # chips concentrating: more buyer branches than seller branches
-   if concentration_top15 > 0.35:                  score += 15  # top-15 branches >35% of total buy vol
-   no_daytrade_in_top3 = all(b.label != '隔日沖' for b in top_3_buyers)
-   if no_daytrade_in_top3:                         score += 10  # quality confirmation
-   # --- Free-tier (TWSE opendata, chip_data_available=False) ---
-   if foreign_net_buy > 0:                         score += 15  # 外資買賣超 > 0
-   if trust_net_buy > 0:                           score += 10  # 投信買賣超 > 0
-   if dealer_net_buy > 0:                          score += 5   # 自營商買賣超 > 0
-   if margin_balance_change <= 0:                  score += 10  # 融資餘額未增加
-   if foreign_net_buy > 0 and trust_net_buy > 0 and dealer_net_buy > 0:  score += 5  # 三大法人同向
-   if foreign_consecutive_buy_days >= 3:           score += 5   # 外資連買天數 ≥ 3 (multi-day T86 data required)
-   #   Note: paid and free-tier are mutually exclusive. Paid takes precedence.
+   # Pillar 2B: Chip free (max 40 pts) — uses TWSEChipProxy (TWSE opendata)
+   foreign_strength_pts: foreign_net_buy/avg_20d_vol; ≤0→0, 0-3%→4, 3-8%→8, >8%→12
+   trust_strength_pts:   trust_net_buy/avg_20d_vol; ≤0→0, 0-3%→3, 3-8%→6, >8%→8
+   dealer_strength_pts:  dealer_net_buy/avg_20d_vol; ≤0→0, 0-3%→2, >3%→4
+   institution_continuity_pts: foreign≥3d→4, trust≥3d→3, dealer≥3d→1
+   institution_consensus_pts:  all three net buy + two at medium+ strength → 4
+   margin_structure_pts: 漲+融資減→8, 漲+小增(>2%)→3, 漲+大增(>5%)→-4, 跌+大減→2, 跌+不減→-3
+   margin_utilization_pts: <20%→+4, 20-80%→0, >80%→-4; skip if None
+   sbl_pressure_pts:     sbl_ratio <5%→0, 5-10%→-4, >10%→-8
 
-   # Pillar 3: Space (0-35 pts)
-   # Phase 1-3 proxy (daily OHLCV only — real VolumeProfile requires intraday data, deferred to Phase 4):
-   # Use 20-day high as price-space confirmation proxy.
-   # poc_price proxy = 20-day high. target_price = poc_price * 1.05 (5% above).
-   if close > twenty_day_high * 0.99:              score += 20  # within 1% of or above 20-day high
-   if MA5 > MA10 > MA20:                           score += 5   # 均線多頭排列
-   if MA20_slope > 0:                              score += 5   # MA20 rising (requires ≥24 sessions)
-   if return_5d > taiex_return_5d * 1.2:           score += 5   # RS vs 大盤: stock outperforms index by 20%
-   # Phase 4+: replace space_pts with real VolumeProfile (intraday tick data → POC + resistance nodes)
-
-   # Risk deductions
-   if not no_daytrade_in_top3:                     score -= 25  # 隔日沖 in top-3 flag
-   # momentum_divergence_detected: close >= 5-day high AND (external_buy_ratio today < external_buy_ratio 3 days ago - 0.10)
-   # external_buy_ratio = volume transacted at ask / total volume (外盤比); requires intraday data
-   # Phase 1-3 fallback: skip divergence deduction (external_buy_ratio unavailable from FinMind T+1 data)
-   if momentum_divergence_detected:                score -= 15  # price new high, external buy ratio declining
-   if short_balance_spike and short_margin_ratio > 0.15:  score -= 10  # 融券餘額暴增且券資比 > 15%
-
-   confidence = max(0, min(100, score))
+   # Pillar 3: Structure/Space (max 35 pts)
+   breakout_20d_pts:    close >= twenty_day_high*0.99 AND twenty_day_high>0 → 8
+   breakout_60d_pts:    close >= sixty_day_high*0.99 AND sixty_day_high>0 → 5
+   breakout_quality_pts: close above breakout level, not significantly below → 2
+   ma_alignment_pts:    MA5>MA10>MA20 → 5
+   ma20_slope_pts:      MA20_today > MA20_5d_ago → 5
+   relative_strength_pts: stock_5d vs taiex_5d; no outperform→0, 0-20%→3, >20%→5
+   upside_space_pts:    distance to nearest resistance (120d/52w high; falls back to 60d);
+                        >8%→5, 3-8%→2, <3%→0
    ```
 
-   **Pillar max scores:**
-   | Pillar | Max | Factors |
-   |--------|-----|---------|
-   | 1 Momentum | 50 pts | VWAP+20, Vol surge+20, Close strength+5, Consec up+5 |
-   | 2 Chip (paid) | 40 pts | Net buyer diff+15, Concentration+15, No daytrade+10 |
-   | 2 Chip (free) | 50 pts | Foreign+15, Trust+10, Dealer+5, Margin+10, All-inst+5, Consec foreign+5 |
-   | 3 Space | 35 pts | 20d high+20, MA alignment+5, MA20 slope+5, RS vs TAIEX+5 |
+   **Layer 2: Risk Adjust**
 
-   **Action mapping:** `confidence >= 70 → LONG` | `confidence <= 30 → CAUTION` (avoid entry; note: short-selling requires margin eligibility not assumed here) | else → `WATCH`
+   | Condition | Deduction |
+   |-----------|-----------|
+   | 隔日沖 in Top3 buyers | -25 |
+   | Long upper shadow: vol>1.5x avg AND close_strength<0.4 | -8 |
+   | Overheat vs MA20: close > MA20 * 1.10 | -5 |
+   | Overheat vs MA60: close > MA60 * 1.20 | -5 |
+   | Daytrade heat: daytrade_ratio>35% AND close_strength<0.5 | -5 |
+   | SBL + breakout fail: sbl_ratio>10% AND close < 20d high | -8 |
+   | Margin chase: 漲幅>3% AND margin增幅>5% AND utilization>60% | -5 |
 
-   **Free-tier thresholds:** `confidence >= 55 → LONG` (lowered from 70 because chip pillar max is 50 pts free vs 40 pts paid, but data quality is lower). LONG guard: blocked when chip_pts == 0 (TWSE API unavailable).
+   `confidence = max(0, min(100, pillar_sum + risk_deductions))`
 
-   **Stop-loss note:** `stop_loss = T+0 closing price` (daily close — NOT intraday VWAP, which requires tick data unavailable from FinMind in Phase 1-3). This is an order-entry reference computed at post-market time. It does not account for gap-open scenarios. Traders must manually verify stop validity at market open next day.
+   **TAIEX regime gate (new in v2):**
 
-   **New factor implementation notes:**
-   - **K線收盤強弱比** `(close - low) / (high - low)`: guards against zero range (high == low → skip, score 0)
-   - **連漲天數**: requires sorted ohlcv_history; counts consecutive sessions where close > prev_close
-   - **均線多頭排列 (MA5 > MA10 > MA20)**: requires ≥ 20 sessions; earlier history is all available OHLCV
-   - **三大法人同向**: only scored when all three 三大法人 > 0; bonus on top of individual signals
-   - **外資連買天數**: requires fetching T86 for past N days; ChipProxyFetcher caches per (ticker, date)
-   - **RS vs 大盤**: requires TAIEX (^TWII) daily OHLCV from FinMind `TaiwanStockPrice` for index "TAIEX"
-   - **融券餘額 + 券資比**: TWSE MI_MARGNS endpoint; deduction only when `short_balance_increase > 20%` AND `short_margin_ratio > 0.15`
+   TAIEX MA20 slope determines the LONG threshold:
+   - MA20 rising (uptrend): threshold = **63**
+   - MA20 flat/neutral: threshold = **68**
+   - MA20 falling (downtrend): threshold = **73**
+
+   **Pillar minimums for LONG:** Momentum ≥ 15, Chip ≥ 12, Structure ≥ 12 (all three must be met regardless of total score).
+
+   **Action mapping:**
+   - `score >= threshold AND pillar minimums met → LONG`
+   - `score >= 45 → WATCH`
+   - `score < 45 OR critical risk → CAUTION`
+   - Gate failed → `CAUTION` + `data_quality_flags=["NO_SETUP"]`
+
+   **Pillar max scores (v2):**
+   | Pillar | Max | Key changes from v1 |
+   |--------|-----|---------------------|
+   | 1 Momentum | 35 pts | Replaced binary 20+20 with graded 8+3+4+6+5+5 |
+   | 2 Chip paid | 40 pts | Added breadth, continuity, foreign broker factors |
+   | 2 Chip free | 40 pts | Ratio-based (needs avg_20d_volume); bidirectional 融資 |
+   | 3 Structure | 35 pts | Added 60d breakout, upside space; RS threshold lowered |
+
+   **scoring_version:** All v2 signals tagged `scoring_version="v2"` in `data_quality_flags` and `signal_outcomes.scoring_version` DB column (migration 007). BayesianLabelUpdater filters by version to prevent v1/v2 stat mixing.
+
+   **Stop-loss note:** `stop_loss = T+0 closing price` (daily close — NOT intraday VWAP, which requires tick data unavailable from FinMind in Phase 1-4). Traders must verify at market open next day.
 
 3. **JSON output schema (field source annotated):**
    ```json

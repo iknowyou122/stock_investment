@@ -25,6 +25,7 @@ you will create drift that is expensive to fix.
 | Phase 3b | ✅ Done | FastAPI + auth + rate limiting ✅ · Real DB routes ✅ · /track-record ✅ · signal_outcomes table ✅ · /register endpoint ✅ |
 | Phase 4 | ✅ Done | `POST /v1/signals/{signal_id}/outcome` ✅ · `BayesianLabelUpdater` ✅ · migrations 004-006 ✅ · pro-tier payment stub ✅ · 253 tests passing ✅ |
 | Phase 4.5 | ✅ Done | Makefile local dev ✅ · DB integration fix (json.dumps metadata) ✅ · Gemini 2.5 Flash wired end-to-end ✅ |
+| Phase 4.6 | ✅ Done | v2 Triple Confirmation Engine ✅ · Gate layer (2-of-4) ✅ · 3-Pillar + Risk Adjust ✅ · TAIEX regime gate (63/68/73) ✅ · migration 007 (scoring_version) ✅ · 185 unit tests passing ✅ |
 
 **Phase 5 (next):**
 - Real Stripe webhook handling (requires production Stripe account + deployment)
