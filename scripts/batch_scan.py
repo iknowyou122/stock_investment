@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -44,43 +46,88 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
-# 台股高流動性標的清單（可依需求擴充）
+# 目標產業別（對應 TWSE/OTC ISIN 頁面的「產業別」欄位）
 # -------------------------------------------------------------------
-DEFAULT_WATCHLIST = [
-    # 半導體
-    "2330",  # 台積電
-    "2454",  # 聯發科
-    "2303",  # 聯電
-    "2379",  # 瑞昱
-    "3711",  # 日月光投控
-    "2408",  # 南亞科
-    "2344",  # 華邦電
-    # 電子/組裝
-    "2317",  # 鴻海
-    "2382",  # 廣達
-    "2356",  # 英業達
-    "2324",  # 仁寶
-    "6669",  # 緯穎
-    "3231",  # 緯創
-    "2357",  # 華碩
-    "2353",  # 宏碁
-    "2308",  # 台達電
-    # 金融
-    "2881",  # 富邦金
-    "2882",  # 國泰金
-    "2884",  # 玉山金
-    "2891",  # 中信金
-    "2886",  # 兆豐金
-    # 傳產/航運
-    "2603",  # 長榮
-    "2609",  # 陽明
-    "1301",  # 台塑
-    "1303",  # 南亞
-    "2002",  # 中鋼
-    # 面板
-    "2409",  # 友達
-    "3481",  # 群創
-]
+_TARGET_INDUSTRIES = {
+    "半導體業",
+    "光電業",
+    "電腦及週邊設備業",
+    "電子零組件業",
+    "其他電子業",
+}
+
+_ISIN_URLS = {
+    "twse": "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2",  # 上市
+    "otc":  "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4",  # 上櫃
+}
+
+_CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "watchlist_cache"
+
+
+def _fetch_isin_tickers(url: str) -> list[str]:
+    """Parse TWSE/OTC ISIN page and return tickers in target industries."""
+    import requests
+    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20, verify=False)
+    resp.raise_for_status()
+    html = resp.content.decode("big5", errors="replace")
+    cells = re.findall(r"<td[^>]*>(.*?)</td>", html, re.DOTALL)
+    cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
+
+    tickers: list[str] = []
+    for i in range(len(cells) - 6):
+        industry = cells[i + 5]
+        code_name = cells[i + 1]
+        if industry in _TARGET_INDUSTRIES and re.match(r"^\d{4}", code_name):
+            code = code_name[:4]
+            # Skip preferred shares, warrants, etc. (usually have * or extra chars)
+            name = code_name[5:].strip()
+            if "*" not in name and "DR" not in name:
+                tickers.append(code)
+    return tickers
+
+
+def _build_watchlist() -> list[str]:
+    """Fetch all 上市+上櫃 tickers in target industries, cached daily.
+
+    Cache file: data/watchlist_cache/watchlist_YYYY-MM-DD.json
+    Falls back to a minimal hardcoded list if fetch fails.
+    """
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = _CACHE_DIR / f"watchlist_{date.today()}.json"
+
+    if cache_file.exists():
+        try:
+            tickers = json.loads(cache_file.read_text())
+            if tickers:
+                return tickers
+        except Exception:
+            pass
+
+    print("正在從 TWSE/OTC 抓取產業清單（半導體/光電/電子）...")
+    all_tickers: list[str] = []
+    for market, url in _ISIN_URLS.items():
+        try:
+            tickers = _fetch_isin_tickers(url)
+            print(f"  {market.upper()}: {len(tickers)} 檔")
+            all_tickers.extend(tickers)
+        except Exception as e:
+            logger.warning("Failed to fetch %s watchlist: %s", market, e)
+
+    # Deduplicate (some codes appear in both lists) and sort
+    all_tickers = sorted(set(all_tickers))
+
+    if all_tickers:
+        cache_file.write_text(json.dumps(all_tickers))
+        print(f"  合計: {len(all_tickers)} 檔（已快取至 {cache_file.name}）\n")
+        return all_tickers
+
+    # Fallback: core liquid names if fetch fails
+    logger.warning("TWSE/OTC fetch failed; using fallback watchlist")
+    return [
+        "2330", "2454", "2303", "2379", "3711", "2408", "2344",
+        "2317", "2382", "2356", "2324", "6669", "3231", "2357", "2353", "2308",
+        "2409", "3481",
+    ]
 
 
 class _EmptyLabelRepo:
@@ -301,7 +348,7 @@ def main() -> None:
             scan_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
             csv_path = scan_dir / f"scan_{args.date}.csv"
 
-    tickers = args.tickers or DEFAULT_WATCHLIST
+    tickers = args.tickers or _build_watchlist()
     run_batch(tickers, args.date, args.top, args.min_confidence, args.workers, csv_path)
 
 
