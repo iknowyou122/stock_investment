@@ -363,8 +363,11 @@ class ChipProxyFetcher:
         trust_vals: list[int] = []
         dealer_vals: list[int] = []
 
-        for offset in range(15):  # 0 = trade_date, 1 = yesterday, ...
+        for offset in range(21):  # scan up to 21 calendar days to collect 7 trading days
             check_date = trade_date - timedelta(days=offset)
+            # Skip weekends — TWSE returns empty body for non-trading days
+            if check_date.weekday() >= 5:
+                continue
             # Use throwaway flags so lookback days don't pollute the main flags
             _silent: list[str] = []
             foreign_val, trust_val, dealer_val = self._fetch_t86_data(ticker, check_date, _silent)
