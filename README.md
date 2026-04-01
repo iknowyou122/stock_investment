@@ -5,6 +5,7 @@
 > **Last updated:** 2026-04-01
 > **Current focus:** Phase 5（Stripe 付款整合 + 社群信譽評分）
 > **Tests:** 185 unit passed（214 integration skipped，需 DB）
+> **Scan watchlist:** 728 檔（上市+上櫃 半導體/光電/電子，每日自動更新）
 
 ---
 
@@ -141,12 +142,20 @@ PYTHONPATH=src python3 -m taiwan_stock_agent --date $(date +%F) --tickers 2330 -
 
 ### 批量掃描 — 找出當日強勢股
 
+預設掃描清單：**728 檔**（上市+上櫃 半導體業、光電業、電腦及週邊設備業、電子零組件業、其他電子業），每日從 TWSE/OTC 即時抓取，結果 cache 於 `data/watchlist_cache/`。
+
 ```bash
-# 掃描（DATE 預設今天）
-make scan DATE=$(date +%F)
+# 掃描全部 728 檔（盤後跑，DATE 預設前一交易日）
+make scan
+
+# 指定日期
+make scan DATE=2026-03-28
+
+# 只掃特定標的
+.venv/bin/python scripts/batch_scan.py --tickers 2330 2454 2317 --date $(date +%F)
 
 # 掃描並存 CSV
-PYTHONPATH=src python3 scripts/batch_scan.py --date $(date +%F) --tickers 2330 2454 2317 --save-csv
+.venv/bin/python scripts/batch_scan.py --date $(date +%F) --save-csv
 ```
 
 ### API Server
@@ -326,6 +335,7 @@ python3 scripts/run_bayesian_update.py
 | Phase 4 | ✅ 完成 | Collective label curation + BayesianLabelUpdater + 社群勝率回報 API + 付費 stub |
 | Phase 4.5 | ✅ 完成 | Makefile 本地開發環境 + DB integration 修復 + Gemini 2.5 Flash |
 | Phase 4.6 | ✅ 完成 | v2 引擎：Gate 層 + 三柱重構 + 風險修正 + TAIEX regime 門檻 + migration 007 |
+| Phase 4.7 | ✅ 完成 | `make scan` 路徑修正 + T86 週末跳過 + 動態 watchlist（728 檔，每日自動更新）|
 | Phase 5 | ⏳ 規劃中 | Stripe 真實付款整合 + 社群信譽評分 + 台灣 Pay |
 
 ---
@@ -404,10 +414,12 @@ stock_investment/
 │       ├── main.py                 # FastAPI app（含 Phase 4 /outcome 端點）
 │       ├── schemas.py              # API request/response models
 │       └── auth.py                 # API key 驗證（DB + master key）
+├── data/
+│   └── watchlist_cache/            # 動態 watchlist 每日 cache（watchlist_YYYY-MM-DD.json）
 ├── frontend/
 │   └── index.html                  # Phase 3b Landing page
 ├── scripts/
-│   ├── batch_scan.py               # 批量掃描
+│   ├── batch_scan.py               # 批量掃描（動態 watchlist 728 檔，每日 cache）
 │   ├── settle_outcomes.py          # 每日結果回填 cron
 │   ├── fetch_watchlist.py          # 觀察名單管理
 │   ├── validate_free_tier.py       # TWSE free-tier 驗證
