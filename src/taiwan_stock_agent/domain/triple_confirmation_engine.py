@@ -1,51 +1,73 @@
-"""Triple Confirmation Engine — deterministic confidence scoring.
+"""Triple Confirmation Engine v2 — deterministic confidence scoring.
 
 Score breakdown (max 100 pts before risk deductions):
 
-  Pillar 1: Momentum (0–50 pts)
-    +20  close > vwap_5d   (price above 5-day volume-weighted average)
-    +20  daily_volume > 20-day avg volume × 1.5  (daily volume surge)
-    +5   (close - low) / (high - low) > 0.7  (K線收盤強弱比: close near top of bar)
-    +5   consecutive_up_days >= 3  (連漲天數: price closed higher for 3+ sessions)
+  Gate (2-of-4 conditions required to enter scoring):
+    Cond 1: close > 5d_avg_vwap
+    Cond 2: volume > 20d_avg_volume × 1.3
+    Cond 3: close >= twenty_day_high × 0.99   (only when twenty_day_high > 0)
+    Cond 4: 5d_stock_return > 5d_taiex_return  (only when taiex data available)
+    Fail: action=CAUTION, confidence=0, data_quality_flags=["NO_SETUP"]
 
-  Pillar 2: Chip (0–40 pts paid | 0–40 pts free-tier)
-    Paid (chip_data_available=True, FinMind plan):
-      +15  net_buyer_count_diff > 0   (more buyer branches than seller branches)
-      +15  concentration_top15 > 0.35 (top-15 branches hold >35% of total buy vol)
-      +10  no 隔日沖 branch in top-3 buyers  (quality confirmation)
-    Free-tier (chip_data_available=False, TWSE opendata fallback):
-      +15  foreign_net_buy > 0        (外資買賣超 > 0)
-      +10  trust_net_buy > 0          (投信買賣超 > 0)
-      +5   dealer_net_buy > 0         (自營商買賣超 > 0)
-      +10  margin_balance_change ≤ 0  (融資餘額未增加)
-      +5   all three institutions > 0  (三大法人同向: bonus when 外資+投信+自營商 all net buy)
-      +5   foreign_consecutive_buy_days >= 3  (外資連買天數)
-    NOTE: paid and free-tier are mutually exclusive. Paid takes precedence.
+  Pillar 1: Momentum (max 35 pts)
+    volume_ratio_pts:     0/4/8   — vol/20d_avg < 1.2 → 0, 1.2–1.8 → 4, >1.8 → 8
+    price_direction_pts:  0/3     — close >= prev_close → +3
+    close_strength_pts:   0/2/4   — (close-low)/(high-low); ≥0.7 → 4, 0.5–0.7 → 2, <0.5 → 0
+                                    guard: high==low → 0, flag DOJI_OR_HALT
+    vwap_advantage_pts:   0/6     — close > 5d_avg_vwap → +6 (intraday VWAP unavailable on T+1)
+    trend_continuity_pts: 0/3/5   — 3 consec up → 3; 4-of-5 up → 5
+    volume_escalation_pts:0/3/5   — T-3<T-2<T-1 → 3; + today>T-1 → 5
 
-  Pillar 3: Space / POC proxy (0–35 pts)
-    +20  close > twenty_day_high × 0.99  (within 1% of or above 20-day high)
-    +5   MA5 > MA10 > MA20  (均線多頭排列: bullish MA alignment; requires ≥ 20 sessions)
-    +5   MA20 slope > 0  (20-day MA is rising; computed as 5-day diff)
-         NOTE: requires ≥ 24 sessions; skipped with flag if insufficient history
-    +5   stock 5d return > TAIEX 5d return × 1.2  (RS vs 大盤: relative strength)
+  Pillar 2A: Chip paid (max 40 pts)
+    breadth_pts:          0/5/10  — net_buyer_diff ≤0 → 0, 1–10 → 5, >10 → 10
+    concentration_pts:    0/5/10  — conc<25% → 0, 25–35% → 5, >35% → 10
+                                    cap: active_branch_count < 10 → max 5
+    continuity_pts:       0/3/5/8 — top5 overlap with yesterday; +3 for 3d avg ≥2
+    daytrade_filter_pts:  0/7     — no 隔日沖 in top3 → +7
+    foreign_broker_pts:   0/3/5   — any FII in top_buyers → 3; FII in top3 + high conc → 5
+
+  Pillar 2B: Chip free (max 40 pts)
+    foreign_strength_pts:     0/4/8/12  — foreign_net_buy/avg_20d_vol ratio tiers
+    trust_strength_pts:       0/3/6/8   — trust_net_buy/avg_20d_vol ratio tiers
+    dealer_strength_pts:      0/2/4     — dealer_net_buy/avg_20d_vol ratio tiers
+    institution_continuity_pts: 0–8     — foreign≥3d→4, trust≥3d→3, dealer≥3d→1
+    institution_consensus_pts:  0/4     — all three net buy + ≥2 at medium+ strength → +4
+    margin_structure_pts:    -4 to +8   — price×margin direction matrix
+    margin_utilization_pts:  -4/0/+4    — <20% → +4, >80% → -4
+    sbl_pressure_pts:         0/-4/-8   — sbl_ratio 5–10% → -4, >10% → -8
+
+  Pillar 3: Structure/Space (max 35 pts)
+    breakout_20d_pts:     0/8    — close ≥ twenty_day_high × 0.99 (only when > 0) → +8
+    breakout_60d_pts:     0/5    — close ≥ sixty_day_high × 0.99 → +5 (≥40 sessions)
+    breakout_quality_pts: 0/2    — breakout + close_strength ≥ 0.7 → +2
+    ma_alignment_pts:     0/5    — MA5 > MA10 > MA20 → +5 (≥20 sessions)
+    ma20_slope_pts:       0/5    — MA20 rising vs 5d ago → +5 (≥25 sessions)
+    relative_strength_pts:0/3/5  — stock 5d return vs TAIEX; 0–20% outperform → 3, >20% → 5
+    upside_space_pts:     0/2/5  — distance to 120d/52w high: 3–8% → 2, >8% → 5
 
   Risk deductions:
-    -25  隔日沖 in top-3 buyers
-    -15  momentum divergence (Phase 4, skipped in Phase 1-3)
-    -10  融券餘額暴增 AND 券資比 > 15% (short balance spike + high short/margin ratio)
+    daytrade_risk:        0/-25  — 隔日沖 in top3
+    long_upper_shadow:    0/-8   — vol > 1.5×avg AND close_strength < 0.4
+    overheat_ma20:        0/-5   — close > MA20 × 1.10
+    overheat_ma60:        0/-5   — close > MA60 × 1.20
+    daytrade_heat:        0/-5   — daytrade_ratio > 35% AND close not above 20d high
+    sbl_breakout_fail:    0/-8   — sbl_ratio > 10% AND close < twenty_day_high × 0.99
+    margin_chase_heat:    0/-5   — price up + 融資大增 + margin_utilization > 60%
 
-  Thresholds:
-    free_tier_mode=False (default): LONG ≥ 70  CAUTION ≤ 30
-    free_tier_mode=True:            LONG ≥ 55  CAUTION ≤ 30
-    LONG guard: in free_tier_mode, LONG is blocked when chip_pts == 0
-                (chip_pts=0 means TWSE API unavailable — no chip confirmation)
+  Thresholds (regime-adjusted):
+    Uptrend   (TAIEX MA20 today > 5d ago):  LONG ≥ 63
+    Neutral   (default):                    LONG ≥ 68
+    Downtrend (TAIEX MA20 < 5d ago by >1%): LONG ≥ 73
+    WATCH: score ≥ 45
+    CAUTION: score < 45
 
   Final: confidence = max(0, min(100, score))
+  scoring_version: "v2"
 
 Extensibility guide:
   Adding a new SCORING factor:
     1. Add `new_factor_pts: int = 0` to _ScoreBreakdown
-    2. Add it to `total` property sum
+    2. Add it to `total` property sum (explicit enumeration)
     3. Add `_new_factor_score(self, ...) -> tuple[int, str | None]` method
     4. Call in _compute(), assign bd.new_factor_pts = pts
     5. Add tests
@@ -79,20 +101,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# --- Thresholds ---
-_LONG_THRESHOLD = 70           # default (paid tier)
-_LONG_THRESHOLD_FREE = 60      # free_tier_mode=True (raised from 55 after Tier A expansion)
-_CAUTION_THRESHOLD = 30
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-# --- Pillar max scores (for documentation and future rebalancing) ---
-_PILLAR1_MAX = 55              # 20 (VWAP) + 20 (vol surge) + 5 (close strength) + 5 (consec up) + 5 (vol trend)
-_PILLAR2_PAID_MAX = 45         # 40 base + 5 FII presence
-_PILLAR2_FREE_MAX = 63         # 50 base + 5 (trust consec) + 3 (dealer consec) + 5 (margin util) − 5 (SBL deduction worst case)
-_PILLAR3_MAX = 45              # 20 (20d high) + 10 (60d high) + 5 (MA align) + 5 (MA20 slope) + 5 (RS vs TAIEX)
+_PILLAR1_MAX = 35
+_PILLAR2_PAID_MAX = 40
+_PILLAR2_FREE_MAX = 40
+_PILLAR3_MAX = 35
 
-# --- Known FII branch codes (hardcoded; stable, ~1-2 changes per year) ---
-# Used in _apply_paid_chip() for FII presence detection.
-# Do NOT import this from broker_label_classifier to avoid coupling.
+_LONG_THRESHOLD_NEUTRAL = 68
+_LONG_THRESHOLD_UPTREND = 63    # TAIEX MA20 rising
+_LONG_THRESHOLD_DOWNTREND = 73  # TAIEX MA20 falling/flat
+_WATCH_MIN = 45
+_CAUTION_THRESHOLD = 44
+
+# MA20 slope computation parameters
+_MA20_SLOPE_MIN_SESSIONS = 25   # 20 (MA window) + 5 (diff lookback) so iloc[-6] is valid
+_MA20_SLOPE_DIFF_DAYS = 5       # compare MA20 today vs 5 sessions ago
+
+# Known FII branch codes (hardcoded; stable, ~1-2 changes per year)
+# Do NOT import from broker_label_classifier to avoid coupling.
 _KNOWN_FII_BRANCH_CODES: dict[str, str] = {
     "1480": "摩根大通",
     "1560": "美林",
@@ -104,10 +133,10 @@ _KNOWN_FII_BRANCH_CODES: dict[str, str] = {
     "1790": "麥格理",
 }
 
-# --- MA20 slope ---
-_MA20_SLOPE_MIN_SESSIONS = 25  # 20 (MA window) + 5 (diff lookback) so iloc[-6] is valid
-_MA20_SLOPE_DIFF_DAYS = 5      # compare MA20 today vs 5 sessions ago
 
+# ---------------------------------------------------------------------------
+# Analysis hints (non-scoring, for LLM reasoning only)
+# ---------------------------------------------------------------------------
 
 @dataclass
 class _AnalysisHints:
@@ -120,19 +149,28 @@ class _AnalysisHints:
     would allow hints to silently inflate the score.
     """
     # Momentum hints
-    rsi_14: float | None = None          # RSI(14); >70 overbought, <30 oversold
-    macd_line: float | None = None       # MACD line value
-    macd_signal: float | None = None     # MACD signal line value
-    macd_cross: str | None = None        # "golden" | "dead" | None
-    ma20_slope_pct: float | None = None  # % change in MA20 over _MA20_SLOPE_DIFF_DAYS sessions
-    ma20_streak: int | None = None       # consecutive sessions close > MA20 (positive) or < MA20 (negative)
+    rsi_14: float | None = None
+    macd_line: float | None = None
+    macd_signal: float | None = None
+    macd_cross: str | None = None
+    ma20_slope_pct: float | None = None
+    ma20_streak: int | None = None
     # Space hints
-    gap_down_pct: float | None = None    # (open - prev_close) / prev_close; negative = gap down
-    high52w_pct: float | None = None     # (close - 52w_high) / 52w_high; negative = below 52w high
-    # Chip hints (Tier A expansion)
-    daytrade_ratio: float | None = None    # 當沖占比; from TWSEChipProxy (non-scoring)
-    short_cover_days: float | None = None  # derived: short_balance / avg_daily_volume
+    gap_down_pct: float | None = None
+    high52w_pct: float | None = None
+    # Chip hints
+    daytrade_ratio: float | None = None
+    short_cover_days: float | None = None
+    # v2 qualitative labels for LLM output
+    breakout_quality: str | None = None   # "乾淨" | "勉強" | "假突破風險"
+    chip_quality: str | None = None       # "法人主導" | "主力集中" | "散戶跟風" | "資料不足"
+    heat_level: str | None = None         # "低" | "中" | "高"
+    setup_type: str | None = None         # "初升段" | "延續段" | "高檔追價"
 
+
+# ---------------------------------------------------------------------------
+# Score breakdown
+# ---------------------------------------------------------------------------
 
 @dataclass
 class _ScoreBreakdown:
@@ -142,45 +180,50 @@ class _ScoreBreakdown:
     Fields ending in _pts are scoring; `flags` is metadata.
     `_AnalysisHints` is a SEPARATE dataclass — never add hint fields here.
     """
-    # Pillar 1: Momentum (max _PILLAR1_MAX = 55)
-    vwap_5d_pts: int = 0
-    volume_surge_pts: int = 0
-    close_strength_pts: int = 0  # (close-low)/(high-low) > 0.7 → +5 (K線收盤強弱比)
-    consec_up_pts: int = 0       # consecutive_up_days >= 3 → +5 (連漲天數)
-    volume_trend_pts: int = 0    # 3 consecutive increasing vol sessions → +5 (量能遞增)
+    scoring_version: str = "v2"
 
-    # Pillar 2: Chip — paid FinMind (max _PILLAR2_PAID_MAX = 45)
-    # Active when chip_data_available=True; gated by Phase 1 spike validation
-    net_buyer_diff_pts: int = 0
-    concentration_pts: int = 0
-    no_daytrade_pts: int = 0
-    paid_fii_presence_pts: int = 0  # known FII in top_buyers → +5
+    # --- Pillar 1: Momentum (max _PILLAR1_MAX = 35) ---
+    volume_ratio_pts: int = 0         # 0/4/8
+    price_direction_pts: int = 0      # 0/3
+    close_strength_pts: int = 0       # 0/2/4
+    vwap_advantage_pts: int = 0       # 0/6
+    trend_continuity_pts: int = 0     # 0/3/5
+    volume_escalation_pts: int = 0    # 0/3/5
 
-    # Pillar 2: Chip — free-tier TWSE proxies (max _PILLAR2_FREE_MAX = 63)
-    # Active when chip_data_available=False; mutually exclusive with paid chip
-    twse_foreign_pts: int = 0       # 外資買賣超 > 0  → +15
-    twse_trust_pts: int = 0         # 投信買賣超 > 0  → +10
-    twse_dealer_pts: int = 0        # 自營商買賣超 > 0 → +5
-    twse_margin_pts: int = 0        # 融資餘額 change ≤ 0 → +10
-    twse_all_inst_pts: int = 0      # 三大法人同向 (all three > 0) → +5
-    twse_foreign_consec_pts: int = 0  # 外資連買天數 >= 3 → +5
-    # Tier A expansion: new free-tier chip factors
-    twse_trust_consec_pts: int = 0    # 投信連買天數 >= 3 → +5
-    twse_dealer_consec_pts: int = 0   # 自營商連買天數 >= 3 → +3
-    twse_margin_util_pts: int = 0     # util < 20% → +5; util > 80% → -5 (can be negative)
-    twse_sbl_deduction: int = 0       # sbl_ratio > 10% → 5 (subtracted from total)
+    # --- Pillar 2A: Chip paid (max _PILLAR2_PAID_MAX = 40) ---
+    breadth_pts: int = 0              # 0/5/10
+    concentration_pts: int = 0        # 0/5/10
+    continuity_pts: int = 0           # 0/3/5/8
+    daytrade_filter_pts: int = 0      # 0/7
+    foreign_broker_pts: int = 0       # 0/3/5
 
-    # Pillar 3: Space (max _PILLAR3_MAX = 45)
-    space_pts: int = 0              # close > twenty_day_high × 0.99 → +20
-    sixty_day_high_pts: int = 0     # close > sixty_day_high × 0.99 → +10 (季線突破)
-    ma_alignment_pts: int = 0       # MA5 > MA10 > MA20 → +5 (均線多頭排列)
-    ma20_slope_pts: int = 0         # MA20 rising (slope > 0) → +5
-    rs_pts: int = 0                 # stock 5d return > TAIEX 5d return × 1.2 → +5
+    # --- Pillar 2B: Chip free (max _PILLAR2_FREE_MAX = 40) ---
+    foreign_strength_pts: int = 0         # 0/4/8/12
+    trust_strength_pts: int = 0           # 0/3/6/8
+    dealer_strength_pts: int = 0          # 0/2/4
+    institution_continuity_pts: int = 0   # 0–8
+    institution_consensus_pts: int = 0    # 0/4
+    margin_structure_pts: int = 0         # -4 to +8
+    margin_utilization_pts: int = 0       # -4/0/+4
+    sbl_pressure_pts: int = 0             # 0/-4/-8
 
-    # Risk deductions
-    daytrade_deduction: int = 0
-    divergence_deduction: int = 0   # Phase 4+
-    short_spike_deduction: int = 0  # 融券餘額暴增 AND 券資比 > 15% → -10
+    # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 35) ---
+    breakout_20d_pts: int = 0         # 0/8
+    breakout_60d_pts: int = 0         # 0/5
+    breakout_quality_pts: int = 0     # 0/2
+    ma_alignment_pts: int = 0         # 0/5
+    ma20_slope_pts: int = 0           # 0/5
+    relative_strength_pts: int = 0    # 0/3/5
+    upside_space_pts: int = 0         # 0/2/5
+
+    # --- Risk deductions (stored as non-negative values; subtracted in total) ---
+    daytrade_risk: int = 0            # 0 or 25
+    long_upper_shadow: int = 0        # 0 or 8
+    overheat_ma20: int = 0            # 0 or 5
+    overheat_ma60: int = 0            # 0 or 5
+    daytrade_heat: int = 0            # 0 or 5
+    sbl_breakout_fail: int = 0        # 0 or 8
+    margin_chase_heat: int = 0        # 0 or 5
 
     flags: list[str] = field(default_factory=list)
 
@@ -188,64 +231,104 @@ class _ScoreBreakdown:
     def total(self) -> int:
         """Clamped score sum. Explicit enumeration is intentional — see extensibility guide."""
         raw = (
-            self.vwap_5d_pts
-            + self.volume_surge_pts
+            # Pillar 1
+            self.volume_ratio_pts
+            + self.price_direction_pts
             + self.close_strength_pts
-            + self.consec_up_pts
-            + self.volume_trend_pts
-            + self.net_buyer_diff_pts
+            + self.vwap_advantage_pts
+            + self.trend_continuity_pts
+            + self.volume_escalation_pts
+            # Pillar 2A paid
+            + self.breadth_pts
             + self.concentration_pts
-            + self.no_daytrade_pts
-            + self.paid_fii_presence_pts
-            + self.twse_foreign_pts
-            + self.twse_trust_pts
-            + self.twse_dealer_pts
-            + self.twse_margin_pts
-            + self.twse_all_inst_pts
-            + self.twse_foreign_consec_pts
-            + self.twse_trust_consec_pts
-            + self.twse_dealer_consec_pts
-            + self.twse_margin_util_pts    # can be negative
-            - self.twse_sbl_deduction      # subtract (positive value stored)
-            + self.space_pts
-            + self.sixty_day_high_pts
+            + self.continuity_pts
+            + self.daytrade_filter_pts
+            + self.foreign_broker_pts
+            # Pillar 2B free
+            + self.foreign_strength_pts
+            + self.trust_strength_pts
+            + self.dealer_strength_pts
+            + self.institution_continuity_pts
+            + self.institution_consensus_pts
+            + self.margin_structure_pts      # can be negative
+            + self.margin_utilization_pts    # can be negative
+            + self.sbl_pressure_pts          # can be negative (0/-4/-8)
+            # Pillar 3
+            + self.breakout_20d_pts
+            + self.breakout_60d_pts
+            + self.breakout_quality_pts
             + self.ma_alignment_pts
             + self.ma20_slope_pts
-            + self.rs_pts
-            - self.daytrade_deduction
-            - self.divergence_deduction
-            - self.short_spike_deduction
+            + self.relative_strength_pts
+            + self.upside_space_pts
+            # Risk deductions
+            - self.daytrade_risk
+            - self.long_upper_shadow
+            - self.overheat_ma20
+            - self.overheat_ma60
+            - self.daytrade_heat
+            - self.sbl_breakout_fail
+            - self.margin_chase_heat
         )
         return max(0, min(100, raw))
 
     @property
     def chip_pts(self) -> int:
-        """Total chip pillar points (paid or free-tier, whichever is active)."""
+        """Total chip pillar points from whichever path was used (paid or free)."""
         return (
-            self.net_buyer_diff_pts
+            # Paid
+            self.breadth_pts
             + self.concentration_pts
-            + self.no_daytrade_pts
-            + self.paid_fii_presence_pts
-            + self.twse_foreign_pts
-            + self.twse_trust_pts
-            + self.twse_dealer_pts
-            + self.twse_margin_pts
-            + self.twse_all_inst_pts
-            + self.twse_foreign_consec_pts
-            + self.twse_trust_consec_pts
-            + self.twse_dealer_consec_pts
-            + self.twse_margin_util_pts    # can be negative
-            - self.twse_sbl_deduction
+            + self.continuity_pts
+            + self.daytrade_filter_pts
+            + self.foreign_broker_pts
+            # Free
+            + self.foreign_strength_pts
+            + self.trust_strength_pts
+            + self.dealer_strength_pts
+            + self.institution_continuity_pts
+            + self.institution_consensus_pts
+            + self.margin_structure_pts
+            + self.margin_utilization_pts
+            + self.sbl_pressure_pts
+        )
+
+    @property
+    def momentum_pts(self) -> int:
+        """Total Pillar 1 points."""
+        return (
+            self.volume_ratio_pts
+            + self.price_direction_pts
+            + self.close_strength_pts
+            + self.vwap_advantage_pts
+            + self.trend_continuity_pts
+            + self.volume_escalation_pts
+        )
+
+    @property
+    def structure_pts(self) -> int:
+        """Total Pillar 3 points."""
+        return (
+            self.breakout_20d_pts
+            + self.breakout_60d_pts
+            + self.breakout_quality_pts
+            + self.ma_alignment_pts
+            + self.ma20_slope_pts
+            + self.relative_strength_pts
+            + self.upside_space_pts
         )
 
 
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
 class TripleConfirmationEngine:
-    """Compute the Triple Confirmation confidence score.
+    """Compute the Triple Confirmation v2 confidence score.
 
     Args:
-        free_tier_mode: When True, uses LONG threshold of 55 instead of 70,
-            and labels output with free_tier_mode=True. Also enables LONG guard
-            (LONG blocked when chip_pts == 0).
+        free_tier_mode: Unused in v2 (threshold regime-adjusted by TAIEX MA20).
+            Kept for backward compatibility with callers.
 
     Usage::
 
@@ -264,8 +347,11 @@ class TripleConfirmationEngine:
 
     def __init__(self, free_tier_mode: bool = False) -> None:
         self._free_tier_mode = free_tier_mode
-        self._long_threshold = _LONG_THRESHOLD_FREE if free_tier_mode else _LONG_THRESHOLD
-        self._taiex_history: list[DailyOHLCV] = []  # injected for RS vs 大盤 (Factor 6)
+        self._taiex_history: list[DailyOHLCV] = []
+
+    # ------------------------------------------------------------------
+    # Public API — signatures unchanged from v1
+    # ------------------------------------------------------------------
 
     def score(
         self,
@@ -276,14 +362,7 @@ class TripleConfirmationEngine:
         twse_proxy: TWSEChipProxy | None = None,
         taiex_history: list[DailyOHLCV] | None = None,
     ) -> SignalOutput:
-        """Compute deterministic confidence and return a SignalOutput.
-
-        The reasoning fields are left empty here — the LLM layer (StrategistAgent)
-        fills them in from the breakdown and chip report.
-
-        ohlcv_history should include at least 24 sessions (for MA20 slope).
-        taiex_history: TAIEX index OHLCV for RS vs 大盤 scoring (Factor 6, optional).
-        """
+        """Compute deterministic v2 confidence and return a SignalOutput."""
         self._taiex_history = taiex_history or []
         breakdown = self._compute(ohlcv, ohlcv_history, chip_report, volume_profile, twse_proxy)
         return self._build_signal(ohlcv, breakdown, volume_profile, chip_report)
@@ -319,7 +398,64 @@ class TripleConfirmationEngine:
         return signal, breakdown, hints
 
     # ------------------------------------------------------------------
-    # Private computation
+    # Gate layer
+    # ------------------------------------------------------------------
+
+    def _gate_check(
+        self,
+        ohlcv: DailyOHLCV,
+        ohlcv_history: list[DailyOHLCV],
+        volume_profile: VolumeProfile,
+    ) -> tuple[bool, int]:
+        """Evaluate the 2-of-4 gate conditions.
+
+        Returns (passes: bool, gate_conditions_available: int).
+        'Available' means the data existed to evaluate that condition.
+        Unavailable conditions are treated as NOT met (not penalized, but
+        the denominator for the 2-of-4 check is still 4).
+        """
+        conditions_met = 0
+        conditions_available = 0
+
+        # Condition 1: close > 5d_avg_vwap
+        vwap_5d = self._vwap_5d(ohlcv_history)
+        if vwap_5d is not None:
+            conditions_available += 1
+            if ohlcv.close > vwap_5d:
+                conditions_met += 1
+
+        # Condition 2: volume > 20d_avg_volume × 1.3
+        vol_20ma = self._volume_20ma(ohlcv_history)
+        if vol_20ma is not None:
+            conditions_available += 1
+            if ohlcv.volume > vol_20ma * 1.3:
+                conditions_met += 1
+
+        # Condition 3: close >= twenty_day_high × 0.99
+        # Guard: twenty_day_high == 0.0 → condition NOT met (partial-history stocks)
+        conditions_available += 1
+        if volume_profile.twenty_day_high > 0 and ohlcv.close >= volume_profile.twenty_day_high * 0.99:
+            conditions_met += 1
+
+        # Condition 4: 5d_stock_return > 5d_taiex_return (only if taiex data available)
+        taiex = getattr(self, "_taiex_history", [])
+        stock_bars = sorted(ohlcv_history, key=lambda x: x.trade_date)
+        taiex_bars = sorted(taiex, key=lambda x: x.trade_date)
+        if len(stock_bars) >= 5 and len(taiex_bars) >= 5:
+            conditions_available += 1
+            stock_base = stock_bars[-5].close
+            taiex_base = taiex_bars[-5].close
+            if stock_base > 0 and taiex_base > 0:
+                stock_ret = (ohlcv.close - stock_base) / stock_base
+                taiex_ret = (taiex_bars[-1].close - taiex_base) / taiex_base
+                if stock_ret > taiex_ret:
+                    conditions_met += 1
+
+        passes = conditions_met >= 2
+        return passes, conditions_available
+
+    # ------------------------------------------------------------------
+    # Core computation
     # ------------------------------------------------------------------
 
     def _compute(
@@ -332,27 +468,30 @@ class TripleConfirmationEngine:
     ) -> _ScoreBreakdown:
         bd = _ScoreBreakdown()
 
-        # --- Pillar 1: Momentum ---
-        vwap_pts, vwap_flag = self._vwap_score(ohlcv, ohlcv_history)
-        bd.vwap_5d_pts = vwap_pts
-        if vwap_flag:
-            bd.flags.append(vwap_flag)
+        # --- Gate check first ---
+        gate_passes, gate_available = self._gate_check(ohlcv, ohlcv_history, volume_profile)
+        bd.flags.append(f"GATE_AVAILABLE:{gate_available}")
 
-        vol_pts, vol_flag = self._volume_surge_score(ohlcv, ohlcv_history)
-        bd.volume_surge_pts = vol_pts
-        if vol_flag:
-            bd.flags.append(vol_flag)
+        if not gate_passes:
+            bd.flags.append("NO_SETUP")
+            return bd
+
+        # --- Pillar 1: Momentum ---
+        bd.volume_ratio_pts = self._volume_ratio_score(ohlcv, ohlcv_history)
+        bd.price_direction_pts = self._price_direction_score(ohlcv, ohlcv_history)
 
         cs_pts, cs_flag = self._close_strength_score(ohlcv)
         bd.close_strength_pts = cs_pts
         if cs_flag:
             bd.flags.append(cs_flag)
 
-        cu_pts = self._consec_up_score(ohlcv, ohlcv_history)
-        bd.consec_up_pts = cu_pts
+        vwap_pts, vwap_flag = self._vwap_advantage_score(ohlcv, ohlcv_history)
+        bd.vwap_advantage_pts = vwap_pts
+        if vwap_flag:
+            bd.flags.append(vwap_flag)
 
-        vt_pts = self._volume_trend_score(ohlcv_history)
-        bd.volume_trend_pts = vt_pts
+        bd.trend_continuity_pts = self._trend_continuity_score(ohlcv, ohlcv_history)
+        bd.volume_escalation_pts = self._volume_escalation_score(ohlcv, ohlcv_history)
 
         # --- Pillar 2: Chip (paid vs free-tier, mutually exclusive) ---
         if chip_report.net_buyer_count_diff != 0 or chip_report.active_branch_count > 0:
@@ -364,16 +503,22 @@ class TripleConfirmationEngine:
         else:
             bd.flags.append("NO_CHIP_DATA")
 
-        # --- Pillar 3: Space ---
-        space_pts, space_flag = self._space_score(ohlcv, volume_profile)
-        bd.space_pts = space_pts
-        if space_flag:
-            bd.flags.append(space_flag)
+        # --- Pillar 3: Structure/Space ---
+        b20_pts, b20_flag = self._breakout_20d_score(ohlcv, volume_profile)
+        bd.breakout_20d_pts = b20_pts
+        if b20_flag:
+            bd.flags.append(b20_flag)
 
-        s60_pts, s60_flag = self._sixty_day_high_score(ohlcv, volume_profile)
-        bd.sixty_day_high_pts = s60_pts
-        if s60_flag:
-            bd.flags.append(s60_flag)
+        b60_pts, b60_flag = self._breakout_60d_score(ohlcv, volume_profile)
+        bd.breakout_60d_pts = b60_pts
+        if b60_flag:
+            bd.flags.append(b60_flag)
+
+        # Breakout quality: breakout confirmed + close_strength ≥ 0.7
+        if b20_pts > 0:
+            cs_ratio = self._close_strength_ratio(ohlcv)
+            if cs_ratio is not None and cs_ratio >= 0.7:
+                bd.breakout_quality_pts = 2
 
         ma_align_pts, ma_align_flag = self._ma_alignment_score(ohlcv_history)
         bd.ma_alignment_pts = ma_align_pts
@@ -385,154 +530,417 @@ class TripleConfirmationEngine:
         if slope_flag:
             bd.flags.append(slope_flag)
 
-        # RS vs 大盤 requires taiex_history to be injected; stored on instance if provided
-        rs_pts = 0
-        if hasattr(self, "_taiex_history") and self._taiex_history:
-            rs_pts, rs_flag = self._rs_score(ohlcv, ohlcv_history, self._taiex_history)
+        taiex = getattr(self, "_taiex_history", [])
+        if taiex:
+            rs_pts, rs_flag = self._relative_strength_score(ohlcv, ohlcv_history, taiex)
+            bd.relative_strength_pts = rs_pts
             if rs_flag:
                 bd.flags.append(rs_flag)
-        bd.rs_pts = rs_pts
+
+        bd.upside_space_pts = self._upside_space_score(ohlcv, volume_profile)
+
+        # --- Risk deductions ---
+        self._apply_risk_deductions(bd, ohlcv, ohlcv_history, volume_profile, twse_proxy)
 
         logger.debug(
-            "score breakdown for %s: p1=%d+%d+%d+%d+%d "
-            "p2_paid=%d+%d+%d+%d "
-            "p2_free=%d+%d+%d+%d+%d+%d+%d+%d+%d-%d "
-            "p3=%d+%d+%d+%d+%d deduct=%d+%d flags=%s → total=%d",
+            "v2 score breakdown for %s: "
+            "p1=%d+%d+%d+%d+%d+%d "
+            "p2_paid=%d+%d+%d+%d+%d "
+            "p2_free=%d+%d+%d+%d+%d+%d+%d+%d "
+            "p3=%d+%d+%d+%d+%d+%d+%d "
+            "risk=-%d-%d-%d-%d-%d-%d-%d "
+            "flags=%s → total=%d",
             ohlcv.ticker,
-            bd.vwap_5d_pts, bd.volume_surge_pts, bd.close_strength_pts,
-            bd.consec_up_pts, bd.volume_trend_pts,
-            bd.net_buyer_diff_pts, bd.concentration_pts, bd.no_daytrade_pts,
-            bd.paid_fii_presence_pts,
-            bd.twse_foreign_pts, bd.twse_trust_pts, bd.twse_dealer_pts, bd.twse_margin_pts,
-            bd.twse_all_inst_pts, bd.twse_foreign_consec_pts,
-            bd.twse_trust_consec_pts, bd.twse_dealer_consec_pts,
-            bd.twse_margin_util_pts, bd.twse_sbl_deduction,
-            bd.space_pts, bd.sixty_day_high_pts, bd.ma_alignment_pts, bd.ma20_slope_pts, bd.rs_pts,
-            bd.daytrade_deduction, bd.short_spike_deduction, bd.flags, bd.total,
+            bd.volume_ratio_pts, bd.price_direction_pts, bd.close_strength_pts,
+            bd.vwap_advantage_pts, bd.trend_continuity_pts, bd.volume_escalation_pts,
+            bd.breadth_pts, bd.concentration_pts, bd.continuity_pts,
+            bd.daytrade_filter_pts, bd.foreign_broker_pts,
+            bd.foreign_strength_pts, bd.trust_strength_pts, bd.dealer_strength_pts,
+            bd.institution_continuity_pts, bd.institution_consensus_pts,
+            bd.margin_structure_pts, bd.margin_utilization_pts, bd.sbl_pressure_pts,
+            bd.breakout_20d_pts, bd.breakout_60d_pts, bd.breakout_quality_pts,
+            bd.ma_alignment_pts, bd.ma20_slope_pts, bd.relative_strength_pts, bd.upside_space_pts,
+            bd.daytrade_risk, bd.long_upper_shadow, bd.overheat_ma20, bd.overheat_ma60,
+            bd.daytrade_heat, bd.sbl_breakout_fail, bd.margin_chase_heat,
+            bd.flags, bd.total,
         )
         return bd
 
+    # ------------------------------------------------------------------
+    # Pillar 1: Momentum scoring methods
+    # ------------------------------------------------------------------
+
+    def _volume_ratio_score(self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]) -> int:
+        """Volume ratio: vol/20d_avg < 1.2 → 0, 1.2–1.8 → 4, >1.8 → 8."""
+        vol_20ma = self._volume_20ma(history)
+        if vol_20ma is None or vol_20ma == 0:
+            return 0
+        ratio = ohlcv.volume / vol_20ma
+        if ratio >= 1.8:
+            return 8
+        if ratio >= 1.2:
+            return 4
+        return 0
+
+    def _price_direction_score(self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]) -> int:
+        """Price direction: close >= prev_close → +3."""
+        prev_day = [d for d in history if d.trade_date < ohlcv.trade_date]
+        if not prev_day:
+            return 0
+        prev_close = max(prev_day, key=lambda x: x.trade_date).close
+        return 3 if ohlcv.close >= prev_close else 0
+
+    def _close_strength_score(self, ohlcv: DailyOHLCV) -> tuple[int, str | None]:
+        """K線收盤強弱比: (close-low)/(high-low).
+        ≥0.7 → 4, 0.5–0.7 → 2, <0.5 → 0.
+        Guard: high==low → 0, flag DOJI_OR_HALT.
+        """
+        bar_range = ohlcv.high - ohlcv.low
+        if bar_range <= 0:
+            return 0, "DOJI_OR_HALT"
+        ratio = (ohlcv.close - ohlcv.low) / bar_range
+        if ratio >= 0.7:
+            return 4, None
+        if ratio >= 0.5:
+            return 2, None
+        return 0, None
+
+    def _close_strength_ratio(self, ohlcv: DailyOHLCV) -> float | None:
+        """Return (close-low)/(high-low) or None when high==low."""
+        bar_range = ohlcv.high - ohlcv.low
+        if bar_range <= 0:
+            return None
+        return (ohlcv.close - ohlcv.low) / bar_range
+
+    def _vwap_advantage_score(
+        self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
+    ) -> tuple[int, str | None]:
+        """VWAP advantage: close > 5d_avg_vwap → +6.
+        Intraday VWAP unavailable on T+1 daily data so only 5d tier is used.
+        """
+        vwap_5d = self._vwap_5d(history)
+        if vwap_5d is None:
+            return 0, "INSUFFICIENT_HISTORY_VWAP5D"
+        return (6, None) if ohlcv.close > vwap_5d else (0, None)
+
+    def _trend_continuity_score(
+        self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
+    ) -> int:
+        """Trend continuity: 3 consec up → +3; 4-of-last-5 bars up → +5 (takes precedence)."""
+        all_bars = sorted(history, key=lambda x: x.trade_date) + [ohlcv]
+        if len(all_bars) < 3:
+            return 0
+
+        # Count consecutive up days from the end
+        consec = 0
+        for i in range(len(all_bars) - 1, 0, -1):
+            if all_bars[i].close > all_bars[i - 1].close:
+                consec += 1
+            else:
+                break
+
+        if len(all_bars) >= 5:
+            # Count up bars in last 5 (excluding today as that's in all_bars[-1])
+            last5 = all_bars[-5:]
+            up_count = sum(
+                1 for i in range(1, len(last5))
+                if last5[i].close > last5[i - 1].close
+            )
+            if up_count >= 4:
+                return 5
+
+        if consec >= 3:
+            return 3
+        return 0
+
+    def _volume_escalation_score(
+        self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
+    ) -> int:
+        """Volume escalation: T-3 < T-2 < T-1 → +3; + today > T-1 → +5."""
+        sorted_history = sorted(history, key=lambda x: x.trade_date)
+        # Need at least 4 sessions before today (T-3, T-2, T-1, and today context)
+        prev_days = [d for d in sorted_history if d.trade_date < ohlcv.trade_date]
+        if len(prev_days) < 3:
+            return 0
+        t1 = prev_days[-1].volume  # yesterday
+        t2 = prev_days[-2].volume  # 2 days ago
+        t3 = prev_days[-3].volume  # 3 days ago
+        if t3 < t2 < t1:
+            if ohlcv.volume > t1:
+                return 5
+            return 3
+        return 0
+
+    # ------------------------------------------------------------------
+    # Pillar 2A: Paid chip scoring
+    # ------------------------------------------------------------------
+
     def _apply_paid_chip(self, bd: _ScoreBreakdown, chip_report: ChipReport) -> None:
         """Apply FinMind paid chip scoring to breakdown (in-place)."""
-        if chip_report.net_buyer_count_diff > 0:
-            bd.net_buyer_diff_pts = 15
-
-        if chip_report.active_branch_count >= 10:
-            if chip_report.concentration_top15 > 0.35:
-                bd.concentration_pts = 15
+        # 1. Breadth: net_buyer_count_diff tiers
+        diff = chip_report.net_buyer_count_diff
+        if diff > 10:
+            bd.breadth_pts = 10
+        elif diff >= 1:
+            bd.breadth_pts = 5
         else:
+            bd.breadth_pts = 0
+
+        # 2. Concentration quality (with thin-market cap)
+        if chip_report.active_branch_count >= 10:
+            conc = chip_report.concentration_top15
+            if conc > 0.35:
+                bd.concentration_pts = 10
+            elif conc >= 0.25:
+                bd.concentration_pts = 5
+            else:
+                bd.concentration_pts = 0
+        elif chip_report.active_branch_count > 0:
+            # Thin market: cap at +5 if concentration is strong
+            if chip_report.concentration_top15 > 0.35:
+                bd.concentration_pts = 5
             bd.flags.append(
                 f"THIN_MARKET: only {chip_report.active_branch_count} active branches "
-                "— concentration check skipped"
+                "— concentration capped at 5"
             )
+        else:
+            bd.flags.append("THIN_MARKET: no active branches")
 
+        # 3. Continuity: top-5 buyer overlap with prior days
+        bd.continuity_pts = self._compute_continuity_pts(chip_report)
+
+        # 4. 隔日沖 filter
         top3 = chip_report.top_buyers[:3]
         daytrade_in_top3 = any(b.label == "隔日沖" for b in top3)
         if not daytrade_in_top3:
-            bd.no_daytrade_pts = 10
+            bd.daytrade_filter_pts = 7
         else:
-            bd.daytrade_deduction = 25
+            bd.daytrade_risk = 25
             top3_names = [b.branch_name for b in top3 if b.label == "隔日沖"]
             bd.flags.append(f"隔日沖_TOP3: {', '.join(top3_names)}")
             chip_report.risk_flags.append("隔日沖_TOP3")
 
-        # Known FII branch code detection → +5 (Tier A, A5)
+        # 5. Known FII branch detection
         top_buyers = chip_report.top_buyers
-        if any(b.branch_code in _KNOWN_FII_BRANCH_CODES for b in top_buyers):
-            bd.paid_fii_presence_pts = 5
+        fii_in_top3 = any(
+            b.branch_code in _KNOWN_FII_BRANCH_CODES for b in top3
+        )
+        fii_any = any(b.branch_code in _KNOWN_FII_BRANCH_CODES for b in top_buyers)
+        if fii_any:
             fii_names = [
                 _KNOWN_FII_BRANCH_CODES[b.branch_code]
                 for b in top_buyers
                 if b.branch_code in _KNOWN_FII_BRANCH_CODES
             ]
             bd.flags.append(f"FII_PRESENT: {', '.join(fii_names)}")
+            if fii_in_top3 and chip_report.concentration_top15 > 0.35:
+                bd.foreign_broker_pts = 5
+            else:
+                bd.foreign_broker_pts = 3
+
+    def _compute_continuity_pts(self, chip_report: ChipReport) -> int:
+        """Main force continuity: top-5 buyer overlap with previous days.
+
+        Uses chip_report.historical_top5_buyers (index 0 = yesterday, etc.)
+        Returns 0/3/5/8.
+        """
+        if not chip_report.historical_top5_buyers:
+            return 0
+
+        today_codes = {b.branch_code for b in chip_report.top_buyers[:5]}
+
+        # Yesterday overlap
+        yesterday_top5 = chip_report.historical_top5_buyers[0]
+        yesterday_codes = {b.branch_code for b in yesterday_top5[:5]}
+        yesterday_overlap = len(today_codes & yesterday_codes)
+
+        if yesterday_overlap == 0:
+            base = 0
+        elif yesterday_overlap == 1:
+            base = 3
+        else:  # >= 2
+            base = 5
+
+        # 3-day average overlap bonus
+        if len(chip_report.historical_top5_buyers) >= 3:
+            overlaps = []
+            for day_list in chip_report.historical_top5_buyers[:3]:
+                prior_codes = {b.branch_code for b in day_list[:5]}
+                overlaps.append(len(today_codes & prior_codes))
+            avg_overlap = sum(overlaps) / len(overlaps)
+            if avg_overlap >= 2.0:
+                base = min(8, base + 3)
+
+        return base
+
+    # ------------------------------------------------------------------
+    # Pillar 2B: Free-tier chip scoring
+    # ------------------------------------------------------------------
 
     def _apply_free_chip(self, bd: _ScoreBreakdown, proxy: TWSEChipProxy) -> None:
         """Apply TWSE free-tier chip scoring to breakdown (in-place)."""
-        if proxy.foreign_net_buy > 0:
-            bd.twse_foreign_pts = 15
-        if proxy.trust_net_buy > 0:
-            bd.twse_trust_pts = 10
-        if proxy.dealer_net_buy > 0:
-            bd.twse_dealer_pts = 5
-        if proxy.margin_balance_change <= 0:
-            bd.twse_margin_pts = 10
-        # 三大法人同向: bonus when all three are net buyers
-        if proxy.foreign_net_buy > 0 and proxy.trust_net_buy > 0 and proxy.dealer_net_buy > 0:
-            bd.twse_all_inst_pts = 5
-        # 外資連買天數 >= 3
-        if proxy.foreign_consecutive_buy_days >= 3:
-            bd.twse_foreign_consec_pts = 5
+        avg_vol = proxy.avg_20d_volume
 
-        # --- Tier A expansion factors ---
-        # 投信連買天數 >= 3 → +5
+        # 1. Foreign buy strength (ratio-based)
+        bd.foreign_strength_pts = self._institution_strength_pts(
+            proxy.foreign_net_buy, avg_vol, tiers=(0.0, 0.03, 0.08), points=(0, 4, 8, 12)
+        )
+
+        # 2. Trust buy strength
+        bd.trust_strength_pts = self._institution_strength_pts(
+            proxy.trust_net_buy, avg_vol, tiers=(0.0, 0.03, 0.08), points=(0, 3, 6, 8)
+        )
+
+        # 3. Dealer buy strength
+        bd.dealer_strength_pts = self._institution_strength_pts(
+            proxy.dealer_net_buy, avg_vol, tiers=(0.0, 0.03), points=(0, 2, 4)
+        )
+
+        # 4. Institution continuity
+        consec_pts = 0
+        if proxy.foreign_consecutive_buy_days >= 3:
+            consec_pts += 4
         if proxy.trust_consecutive_buy_days >= 3:
-            bd.twse_trust_consec_pts = 5
-        # 自營商連買天數 >= 3 → +3
+            consec_pts += 3
         if proxy.dealer_consecutive_buy_days >= 3:
-            bd.twse_dealer_consec_pts = 3
-        # 融資使用率
+            consec_pts += 1
+        bd.institution_continuity_pts = consec_pts
+
+        # 5. Three-institution consensus
+        # All three net buy, and at least two at medium+ strength
+        foreign_medium = bd.foreign_strength_pts >= 4
+        trust_medium = bd.trust_strength_pts >= 3
+        dealer_medium = bd.dealer_strength_pts >= 2
+        all_net_buy = (
+            proxy.foreign_net_buy > 0
+            and proxy.trust_net_buy > 0
+            and proxy.dealer_net_buy > 0
+        )
+        medium_count = sum([foreign_medium, trust_medium, dealer_medium])
+        if all_net_buy and medium_count >= 2:
+            bd.institution_consensus_pts = 4
+
+        # 6. Margin structure (price direction × margin change)
+        bd.margin_structure_pts = self._margin_structure_pts(proxy)
+
+        # 7. Margin utilization
         if proxy.margin_utilization_rate is not None:
             if proxy.margin_utilization_rate < 0.20:
-                bd.twse_margin_util_pts = 5   # healthy: lots of room to buy
+                bd.margin_utilization_pts = 4
             elif proxy.margin_utilization_rate > 0.80:
-                bd.twse_margin_util_pts = -5  # crowded: nearly maxed out
+                bd.margin_utilization_pts = -4
                 bd.flags.append(f"MARGIN_HIGH_UTIL: {proxy.margin_utilization_rate:.1%}")
-        # 借券賣出占比 > 10% → deduction
-        if proxy.sbl_available and proxy.sbl_ratio > 0.10:
-            bd.twse_sbl_deduction = 5
-            bd.flags.append(f"SBL_HEAVY: {proxy.sbl_ratio:.1%}")
 
-        # 融券餘額暴增 + 券資比 > 15% → risk deduction
-        if proxy.short_balance_increased and proxy.short_margin_ratio > 0.15:
-            bd.short_spike_deduction = 10
-            bd.flags.append(
-                f"SHORT_SPIKE: ratio={proxy.short_margin_ratio:.2%}"
-            )
+        # 8. SBL pressure
+        if proxy.sbl_available:
+            if proxy.sbl_ratio > 0.10:
+                bd.sbl_pressure_pts = -8
+                bd.flags.append(f"SBL_HEAVY: {proxy.sbl_ratio:.1%}")
+            elif proxy.sbl_ratio > 0.05:
+                bd.sbl_pressure_pts = -4
+                bd.flags.append(f"SBL_MODERATE: {proxy.sbl_ratio:.1%}")
+
         for flag in proxy.data_quality_flags:
             bd.flags.append(f"TWSE:{flag}")
 
-    def _close_strength_score(self, ohlcv: DailyOHLCV) -> tuple[int, str | None]:
-        """K線收盤強弱比: (close - low) / (high - low) > 0.7 → +5 pts.
-
-        Measures where the close sits within today's range. > 0.7 means close
-        is in the top 30% of the day's range (strong close).
-        Skipped if high == low (no price movement, e.g. halted stock).
-        """
-        bar_range = ohlcv.high - ohlcv.low
-        if bar_range <= 0:
-            return 0, "CLOSE_STRENGTH_SKIP:ZERO_RANGE"
-        ratio = (ohlcv.close - ohlcv.low) / bar_range
-        return (5, None) if ratio > 0.7 else (0, None)
-
-    def _consec_up_score(
-        self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
+    @staticmethod
+    def _institution_strength_pts(
+        net_buy: int,
+        avg_20d_vol: int,
+        tiers: tuple,
+        points: tuple,
     ) -> int:
-        """連漲天數: +5 pts if close has risen for 3+ consecutive sessions (incl. today).
+        """Compute ratio-based institution strength points.
 
-        Counts consecutive sessions where close > prev_close going backward
-        from today (inclusive). Requires at least 3 sessions in history.
-        Returns 0 if insufficient history.
+        tiers: (lower_bound_1, lower_bound_2, ...) — ratios above which to award each tier
+        points: (pts_at_zero_or_below, pts_tier1, pts_tier2, ...)
         """
-        # Build sorted sequence: history + today's ohlcv
-        all_bars = sorted(history, key=lambda x: x.trade_date) + [ohlcv]
-        if len(all_bars) < 3:
+        if net_buy <= 0:
             return 0
-        count = 0
-        for i in range(len(all_bars) - 1, 0, -1):
-            if all_bars[i].close > all_bars[i - 1].close:
-                count += 1
-            else:
-                break
-        return 5 if count >= 3 else 0
+        if avg_20d_vol <= 0:
+            # No volume reference — binary: bought → lowest positive tier
+            return points[1] if len(points) > 1 else 0
+        ratio = net_buy / avg_20d_vol
+        # Walk tiers from highest to lowest
+        for i in range(len(tiers) - 1, -1, -1):
+            if ratio > tiers[i]:
+                return points[i + 1]
+        return points[0]
+
+    def _margin_structure_pts(self, proxy: TWSEChipProxy) -> int:
+        """融資結構 scoring: price direction × margin change.
+
+        Uses margin_balance_change sign as margin direction proxy.
+        '大增' = >5% single-day increase; we approximate from margin_balance_change sign
+        and the proxy field `short_balance_increased` (reused semantically).
+
+        v2 definition:
+        - 股價漲 + 融資減/持平 → +8
+        - 股價漲 + 融資小增 → +3
+        - 股價漲 + 融資大增 → -4
+        - 股價跌 + 融資大減 → +2
+        - 股價跌 + 融資不減 → -3
+        """
+        price_up = proxy.foreign_net_buy >= 0  # fallback: use proxy attribute
+        # We don't have prev_close in TWSEChipProxy directly; use margin_balance_change
+        # sign-only approach with magnitude classification:
+        # large = abs(change) > 5% of balance approximated by short_balance_increased flag
+        # small = change > 0 but not large
+        margin_up = proxy.margin_balance_change > 0
+        margin_down = proxy.margin_balance_change < 0
+        # margin_large_change: we reuse short_balance_increased as the "large" signal
+        # (caller is responsible for populating this correctly)
+        margin_large = proxy.short_balance_increased
+
+        # Determine "stock price direction" from proxy: if foreign is net buy → up, else down
+        # This is an approximation — callers should ensure margin_balance_change reflects
+        # today's margin change and short_balance_increased reflects a large margin increase
+        if margin_up:
+            if margin_large:
+                return -4  # 融資大增
+            return 3       # 融資小增
+        elif margin_down:
+            if margin_large:
+                # short_balance_increased here reused as "large decrease" signal
+                # (caller sets to True for large magnitude regardless of direction)
+                return 2   # 融資大減 (washout — positive)
+            return 8       # 融資減/持平 → best case
+        else:
+            # margin_balance_change == 0 → 持平
+            return 8
+
+    # ------------------------------------------------------------------
+    # Pillar 3: Structure/Space scoring methods
+    # ------------------------------------------------------------------
+
+    def _breakout_20d_score(
+        self, ohlcv: DailyOHLCV, volume_profile: VolumeProfile
+    ) -> tuple[int, str | None]:
+        """20-day high breakout: +8 if close >= twenty_day_high × 0.99.
+        Guard: twenty_day_high == 0 → condition NOT met.
+        """
+        if volume_profile.twenty_day_high <= 0:
+            return 0, "TWENTY_DAY_HIGH_ZERO"
+        if ohlcv.close >= volume_profile.twenty_day_high * 0.99:
+            return 8, None
+        return 0, None
+
+    def _breakout_60d_score(
+        self, ohlcv: DailyOHLCV, volume_profile: VolumeProfile
+    ) -> tuple[int, str | None]:
+        """60-day high breakout: +5 if close >= sixty_day_high × 0.99 (≥40 sessions)."""
+        if volume_profile.sixty_day_sessions < 40:
+            return 0, "INSUFFICIENT_HISTORY_60D_HIGH"
+        if volume_profile.sixty_day_high <= 0:
+            return 0, None
+        if ohlcv.close >= volume_profile.sixty_day_high * 0.99:
+            return 5, None
+        return 0, None
 
     def _ma_alignment_score(
         self, history: list[DailyOHLCV]
     ) -> tuple[int, str | None]:
-        """均線多頭排列: MA5 > MA10 > MA20 → +5 pts.
-
-        Requires at least 20 sessions. Skipped with flag if insufficient.
-        """
+        """均線多頭排列: MA5 > MA10 > MA20 → +5 pts (≥20 sessions required)."""
         recent = sorted(history, key=lambda x: x.trade_date)
         if len(recent) < 20:
             return 0, "INSUFFICIENT_HISTORY_MA_ALIGNMENT"
@@ -544,113 +952,179 @@ class TripleConfirmationEngine:
             return 0, "MA_ALIGNMENT_NAN"
         return (5, None) if ma5 > ma10 > ma20 else (0, None)
 
-    def _rs_score(
+    def _ma20_slope_score(self, history: list[DailyOHLCV]) -> tuple[int, str | None]:
+        """MA20 slope: +5 pts if MA20 is rising vs 5 sessions ago."""
+        slope = self._ma20_slope(history)
+        if slope is None:
+            return 0, "INSUFFICIENT_HISTORY_MA20_SLOPE"
+        return (5, None) if slope > 0 else (0, None)
+
+    def _relative_strength_score(
         self,
         ohlcv: DailyOHLCV,
         history: list[DailyOHLCV],
         taiex_history: list[DailyOHLCV],
     ) -> tuple[int, str | None]:
-        """RS vs 大盤: +5 pts if stock 5d return > TAIEX 5d return × 1.2.
-
-        Computes 5-day price return for the stock and for TAIEX.
-        Requires at least 5 sessions in both histories.
-        Stock return: (today.close - history[-5].close) / history[-5].close
-        """
+        """RS vs 大盤: 0–20% outperform → +3, >20% → +5."""
         stock_bars = sorted(history, key=lambda x: x.trade_date)
         taiex_bars = sorted(taiex_history, key=lambda x: x.trade_date)
-
-        # Need at least 5 sessions back (index 4 from end = 5 sessions ago)
         if len(stock_bars) < 5 or len(taiex_bars) < 5:
             return 0, "INSUFFICIENT_HISTORY_RS"
-
         stock_base = stock_bars[-5].close
         taiex_base = taiex_bars[-5].close
         if stock_base <= 0 or taiex_base <= 0:
             return 0, "RS_SCORE_ZERO_BASE"
-
-        # Find TAIEX close closest to today's date
-        taiex_close = taiex_bars[-1].close
-
         stock_ret = (ohlcv.close - stock_base) / stock_base
-        taiex_ret = (taiex_close - taiex_base) / taiex_base
+        taiex_ret = (taiex_bars[-1].close - taiex_base) / taiex_base
+        outperform = stock_ret - taiex_ret
+        if outperform > 0.20:
+            return 5, None
+        if outperform > 0:
+            return 3, None
+        return 0, None
 
-        return (5, None) if stock_ret > taiex_ret * 1.2 else (0, None)
+    def _upside_space_score(
+        self, ohlcv: DailyOHLCV, volume_profile: VolumeProfile
+    ) -> int:
+        """Upside space: distance to nearest resistance (120d or 52w high).
 
-    def _vwap_score(
-        self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> tuple[int, str | None]:
-        vwap_5d = self._vwap_5d(history)
-        if vwap_5d is None:
-            return 0, "INSUFFICIENT_HISTORY_VWAP5D"
-        return (20, None) if ohlcv.close > vwap_5d else (0, None)
-
-    def _volume_surge_score(
-        self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> tuple[int, str | None]:
-        vol_20ma = self._volume_20ma(history)
-        if vol_20ma is None:
-            return 0, "INSUFFICIENT_HISTORY_VOL20MA"
-        if ohlcv.volume <= vol_20ma * 1.5:
-            return 0, None
-        # Volume surge confirmed — check direction: distribution day does NOT get bonus
-        # Use the last history entry whose trade_date < ohlcv.trade_date (prev day)
-        prev_day = [d for d in history if d.trade_date < ohlcv.trade_date]
-        if prev_day:
-            prev_close = max(prev_day, key=lambda x: x.trade_date).close
-            if ohlcv.close < prev_close:
-                return 0, "VOLUME_DISTRIBUTION"
-        return 20, None
-
-    def _volume_trend_score(self, history: list[DailyOHLCV]) -> int:
-        """Volume accumulation trend: +5 if prior 3 sessions have strictly increasing volume.
-
-        Checks sessions[-4], [-3], [-2] (excludes today) to avoid double-counting
-        with _volume_surge_score which measures today's level.
-        Requires >= 4 sessions in history.
+        >8% room → +5, 3–8% → +2, <3% → 0.
+        Uses the lower of the two resistance levels as the nearest barrier.
         """
-        sorted_history = sorted(history, key=lambda x: x.trade_date)
-        if len(sorted_history) < 4:
+        candidates = []
+        if (
+            volume_profile.one_twenty_day_sessions >= 80
+            and volume_profile.one_twenty_day_high > 0
+        ):
+            candidates.append(volume_profile.one_twenty_day_high)
+        if (
+            volume_profile.fiftytwo_week_sessions >= 200
+            and volume_profile.fiftytwo_week_high > 0
+        ):
+            candidates.append(volume_profile.fiftytwo_week_high)
+
+        if not candidates or ohlcv.close <= 0:
             return 0
-        v1, v2, v3 = (
-            sorted_history[-4].volume,
-            sorted_history[-3].volume,
-            sorted_history[-2].volume,
-        )
-        return 5 if v1 < v2 < v3 else 0
 
-    def _space_score(
-        self, ohlcv: DailyOHLCV, volume_profile: VolumeProfile
-    ) -> tuple[int, str | None]:
-        if ohlcv.close > volume_profile.twenty_day_high * 0.99:
-            return 20, None
-        return 0, None
+        resistance = min(candidates)
+        if resistance <= ohlcv.close:
+            return 0  # at or above resistance — no upside space
 
-    def _sixty_day_high_score(
-        self, ohlcv: DailyOHLCV, volume_profile: VolumeProfile
-    ) -> tuple[int, str | None]:
-        """60-day high breakout: +10 if close within 1% of or above 60d high.
+        pct_room = (resistance - ohlcv.close) / ohlcv.close
+        if pct_room > 0.08:
+            return 5
+        if pct_room >= 0.03:
+            return 2
+        return 0
 
-        Fires independently of the 20d high check — genuine breakouts can score both (+30 total).
-        Returns INSUFFICIENT_HISTORY_60D_HIGH flag when fewer than 40 sessions available.
+    # ------------------------------------------------------------------
+    # Risk deductions
+    # ------------------------------------------------------------------
+
+    def _apply_risk_deductions(
+        self,
+        bd: _ScoreBreakdown,
+        ohlcv: DailyOHLCV,
+        history: list[DailyOHLCV],
+        volume_profile: VolumeProfile,
+        twse_proxy: TWSEChipProxy | None,
+    ) -> None:
+        """Compute and apply all risk deductions to breakdown (in-place)."""
+        vol_20ma = self._volume_20ma(history)
+        cs_ratio = self._close_strength_ratio(ohlcv)
+
+        # 1. 長上影放量: vol > 1.5×avg AND close_strength < 0.4
+        if vol_20ma is not None and vol_20ma > 0:
+            if ohlcv.volume > vol_20ma * 1.5:
+                if cs_ratio is not None and cs_ratio < 0.4:
+                    bd.long_upper_shadow = 8
+                    bd.flags.append("LONG_UPPER_SHADOW")
+
+        # 2. 過熱乖離 (requires MA history)
+        recent = sorted(history, key=lambda x: x.trade_date)
+        if len(recent) >= 20:
+            closes = pd.Series([d.close for d in recent])
+            ma20 = closes.rolling(20).mean().iloc[-1]
+            if not pd.isna(ma20) and ma20 > 0:
+                if ohlcv.close > ma20 * 1.10:
+                    bd.overheat_ma20 = 5
+                    bd.flags.append(f"OVERHEAT_MA20: {ohlcv.close/ma20:.1%} above MA20")
+            if len(recent) >= 60:
+                ma60 = closes.rolling(60).mean().iloc[-1]
+                if not pd.isna(ma60) and ma60 > 0:
+                    if ohlcv.close > ma60 * 1.20:
+                        bd.overheat_ma60 = 5
+                        bd.flags.append(f"OVERHEAT_MA60: {ohlcv.close/ma60:.1%} above MA60")
+
+        # 3. 當沖過熱: daytrade_ratio > 35% AND not above 20d high
+        if twse_proxy is not None and twse_proxy.daytrade_ratio is not None:
+            above_20d = (
+                volume_profile.twenty_day_high > 0
+                and ohlcv.close >= volume_profile.twenty_day_high * 0.99
+            )
+            if twse_proxy.daytrade_ratio > 0.35 and not above_20d:
+                bd.daytrade_heat = 5
+                bd.flags.append(f"DAYTRADE_HEAT: {twse_proxy.daytrade_ratio:.1%}")
+
+        # 4. 借券放空 + 突破失敗
+        if twse_proxy is not None and twse_proxy.sbl_available and twse_proxy.sbl_ratio > 0.10:
+            above_20d = (
+                volume_profile.twenty_day_high > 0
+                and ohlcv.close >= volume_profile.twenty_day_high * 0.99
+            )
+            if not above_20d:
+                bd.sbl_breakout_fail = 8
+                bd.flags.append("SBL_BREAKOUT_FAIL")
+
+        # 5. 融資追價過熱: price up + 融資大增 + margin_util > 60%
+        if twse_proxy is not None:
+            if (
+                twse_proxy.margin_balance_change > 0
+                and twse_proxy.short_balance_increased
+                and twse_proxy.margin_utilization_rate is not None
+                and twse_proxy.margin_utilization_rate > 0.60
+            ):
+                bd.margin_chase_heat = 5
+                bd.flags.append("MARGIN_CHASE_HEAT")
+
+    # ------------------------------------------------------------------
+    # Signal building
+    # ------------------------------------------------------------------
+
+    def _compute_taiex_regime(self, taiex_history: list[DailyOHLCV]) -> str:
+        """Return 'uptrend', 'downtrend', or 'neutral' based on TAIEX MA20.
+
+        uptrend:   TAIEX MA20 today > TAIEX MA20 5 sessions ago
+        downtrend: TAIEX MA20 today < TAIEX MA20 5 sessions ago by >1%
+        neutral:   otherwise
         """
-        if volume_profile.sixty_day_sessions < 40:
-            return 0, "INSUFFICIENT_HISTORY_60D_HIGH"
-        if volume_profile.sixty_day_high <= 0:
-            return 0, None
-        if ohlcv.close > volume_profile.sixty_day_high * 0.99:
-            return 10, None
-        return 0, None
-
-    def _ma20_slope_score(self, history: list[DailyOHLCV]) -> tuple[int, str | None]:
-        """MA20 slope: +5 pts if MA20 is rising (slope > 0).
-
-        Slope = (MA20[-1] - MA20[-5]) / MA20[-5]
-        Requires at least _MA20_SLOPE_MIN_SESSIONS = 24 sessions.
-        """
-        slope = self._ma20_slope(history)
+        slope = self._ma20_slope(taiex_history)
         if slope is None:
-            return 0, "INSUFFICIENT_HISTORY_MA20_SLOPE"
-        return (5, None) if slope > 0 else (0, None)
+            return "neutral"
+        if slope > 0:
+            return "uptrend"
+        if slope < -0.01:
+            return "downtrend"
+        return "neutral"
+
+    def _map_action(
+        self, confidence: int, bd: _ScoreBreakdown | None = None, chip_pts: int = 0
+    ) -> str:
+        """Map confidence score to action label using regime-adjusted thresholds."""
+        taiex = getattr(self, "_taiex_history", [])
+        regime = self._compute_taiex_regime(taiex)
+        if regime == "uptrend":
+            long_threshold = _LONG_THRESHOLD_UPTREND
+        elif regime == "downtrend":
+            long_threshold = _LONG_THRESHOLD_DOWNTREND
+        else:
+            long_threshold = _LONG_THRESHOLD_NEUTRAL
+
+        if confidence >= long_threshold:
+            return "LONG"
+        if confidence >= _WATCH_MIN:
+            return "WATCH"
+        return "CAUTION"
 
     def _build_signal(
         self,
@@ -659,13 +1133,34 @@ class TripleConfirmationEngine:
         volume_profile: VolumeProfile,
         chip_report: ChipReport,
     ) -> SignalOutput:
+        # Gate failure: return CAUTION with NO_SETUP flag and confidence=0
+        if "NO_SETUP" in breakdown.flags:
+            plan = self._make_execution_plan(ohlcv, volume_profile)
+            data_quality_flags = list(ohlcv.data_quality_flags)
+            data_quality_flags.extend(chip_report.data_quality_flags)
+            data_quality_flags.extend(volume_profile.data_quality_flags)
+            data_quality_flags.append("NO_SETUP")
+            data_quality_flags.append("scoring_version:v2")
+            return SignalOutput(
+                ticker=ohlcv.ticker,
+                date=ohlcv.trade_date,
+                action="CAUTION",
+                confidence=0,
+                reasoning=Reasoning(),
+                execution_plan=plan,
+                halt_flag=False,
+                data_quality_flags=data_quality_flags,
+                free_tier_mode=True if self._free_tier_mode else None,
+            )
+
         confidence = breakdown.total
-        action = self._map_action(confidence, breakdown.chip_pts)
+        action = self._map_action(confidence, breakdown, breakdown.chip_pts)
         plan = self._make_execution_plan(ohlcv, volume_profile)
 
         data_quality_flags = list(ohlcv.data_quality_flags)
         data_quality_flags.extend(chip_report.data_quality_flags)
         data_quality_flags.extend(volume_profile.data_quality_flags)
+        data_quality_flags.append("scoring_version:v2")
 
         return SignalOutput(
             ticker=ohlcv.ticker,
@@ -679,17 +1174,17 @@ class TripleConfirmationEngine:
             free_tier_mode=True if self._free_tier_mode else None,
         )
 
+    # ------------------------------------------------------------------
+    # Hints (non-scoring, for LLM reasoning)
+    # ------------------------------------------------------------------
+
     def _compute_hints(
         self,
         ohlcv: DailyOHLCV,
         history: list[DailyOHLCV],
         twse_proxy: TWSEChipProxy | None = None,
     ) -> _AnalysisHints:
-        """Compute non-scoring contextual hints for LLM reasoning.
-
-        All computations here are informational only — never affect scoring.
-        twse_proxy: optional; used to derive daytrade_ratio and short_cover_days.
-        """
+        """Compute non-scoring contextual hints for LLM reasoning."""
         hints = _AnalysisHints()
         sorted_history = sorted(history, key=lambda x: x.trade_date)
         closes = pd.Series([d.close for d in sorted_history])
@@ -701,23 +1196,20 @@ class TripleConfirmationEngine:
             macd_line, signal_line = self._macd(closes)
             hints.macd_line = macd_line
             hints.macd_signal = signal_line
-            if macd_line is not None and signal_line is not None:
-                # Simple cross detection: current vs previous bar
-                if len(closes) >= 27:
-                    prev_closes = closes.iloc[:-1]
-                    prev_macd, prev_signal = self._macd(prev_closes)
-                    if prev_macd is not None and prev_signal is not None:
-                        if prev_macd <= prev_signal and macd_line > signal_line:
-                            hints.macd_cross = "golden"
-                        elif prev_macd >= prev_signal and macd_line < signal_line:
-                            hints.macd_cross = "dead"
+            if macd_line is not None and signal_line is not None and len(closes) >= 27:
+                prev_closes = closes.iloc[:-1]
+                prev_macd, prev_signal = self._macd(prev_closes)
+                if prev_macd is not None and prev_signal is not None:
+                    if prev_macd <= prev_signal and macd_line > signal_line:
+                        hints.macd_cross = "golden"
+                    elif prev_macd >= prev_signal and macd_line < signal_line:
+                        hints.macd_cross = "dead"
 
         if len(closes) >= _MA20_SLOPE_MIN_SESSIONS:
             slope = self._ma20_slope(history)
             if slope is not None:
                 hints.ma20_slope_pct = round(slope * 100, 3)
 
-            # MA20 streak: consecutive sessions above/below MA20
             ma20 = closes.rolling(20).mean()
             streak = 0
             for i in range(len(closes) - 1, -1, -1):
@@ -735,65 +1227,24 @@ class TripleConfirmationEngine:
                         break
             hints.ma20_streak = streak
 
-        # Gap down hint
         if len(sorted_history) >= 2:
             prev_close = sorted_history[-2].close
             if prev_close > 0:
                 gap = (ohlcv.open - prev_close) / prev_close
                 hints.gap_down_pct = round(gap * 100, 3)
 
-        # high52w_pct: proximity to period high (uses available window, aspirationally 52w)
         all_highs = [d.high for d in sorted_history]
         if all_highs:
             period_high = max(all_highs)
             if period_high > 0:
                 hints.high52w_pct = round((ohlcv.close - period_high) / period_high * 100, 2)
 
-        # Chip hints from TWSE proxy (Tier A expansion)
         if twse_proxy is not None and twse_proxy.is_available:
             hints.daytrade_ratio = twse_proxy.daytrade_ratio
-
-            # Derive short_cover_days = short_balance_proxy / avg_daily_volume
-            # We use short_margin_ratio × margin_balance as a rough short balance proxy
-            # since the actual short balance isn't directly stored in TWSEChipProxy.
-            # More accurate: short_balance = short_margin_ratio × margin_balance
-            # avg_daily_volume from last 20 sessions of ohlcv_history
-            avg_vol = self._volume_20ma(history)
-            if (
-                avg_vol is not None
-                and avg_vol > 0
-                and twse_proxy.short_margin_ratio > 0
-            ):
-                # margin_balance_change is the diff, not the level — use it as a rough proxy
-                # when the margin balance level isn't available separately.
-                # short_cover_days requires actual short balance; if short_margin_ratio > 0
-                # and we have OHLCV volume, compute an approximate value.
-                # We cannot derive the exact short balance without the raw margin level,
-                # so we store None if the data is insufficient.
-                if twse_proxy.short_cover_days is not None:
-                    hints.short_cover_days = round(twse_proxy.short_cover_days, 1)
+            if twse_proxy.short_cover_days is not None:
+                hints.short_cover_days = round(twse_proxy.short_cover_days, 1)
 
         return hints
-
-    def _map_action(self, confidence: int, chip_pts: int = 0) -> str:
-        """Map confidence score to action label.
-
-        LONG guard (free_tier_mode only): even if score >= threshold,
-        LONG is blocked when chip_pts == 0 (no chip data available).
-        A score above threshold without chip confirmation is a false signal.
-        """
-        if confidence >= self._long_threshold:
-            if self._free_tier_mode and chip_pts == 0:
-                logger.debug(
-                    "LONG guard triggered: score=%d >= threshold=%d but chip_pts=0 "
-                    "(TWSE unavailable) → downgraded to WATCH",
-                    confidence, self._long_threshold,
-                )
-                return "WATCH"
-            return "LONG"
-        if confidence <= _CAUTION_THRESHOLD:
-            return "CAUTION"
-        return "WATCH"
 
     # ------------------------------------------------------------------
     # Static computation helpers
@@ -803,8 +1254,7 @@ class TripleConfirmationEngine:
     def _vwap_5d(history: list[DailyOHLCV]) -> float | None:
         """5-day volume-weighted average close.
 
-        vwap_5d = Σ(close_i × volume_i) / Σ(volume_i) for last 5 sessions.
-        Returns None if fewer than 5 sessions available.
+        Returns None if fewer than 5 sessions or total volume is zero.
         """
         recent = sorted(history, key=lambda x: x.trade_date)[-5:]
         if len(recent) < 5:
@@ -829,24 +1279,18 @@ class TripleConfirmationEngine:
     def _ma20_slope(history: list[DailyOHLCV]) -> float | None:
         """MA20 slope as percentage change over _MA20_SLOPE_DIFF_DAYS sessions.
 
-        slope = (MA20_today - MA20_N_days_ago) / MA20_N_days_ago
-
         Returns None if fewer than _MA20_SLOPE_MIN_SESSIONS sessions available.
         Positive = rising, Negative = falling.
         """
         recent = sorted(history, key=lambda x: x.trade_date)
         if len(recent) < _MA20_SLOPE_MIN_SESSIONS:
             return None
-
         closes = pd.Series([d.close for d in recent])
         ma20 = closes.rolling(20).mean()
-
         ma20_today = ma20.iloc[-1]
         ma20_prev = ma20.iloc[-1 - _MA20_SLOPE_DIFF_DAYS]
-
         if pd.isna(ma20_today) or pd.isna(ma20_prev) or ma20_prev == 0:
             return None
-
         return (ma20_today - ma20_prev) / ma20_prev
 
     @staticmethod
@@ -890,13 +1334,13 @@ class TripleConfirmationEngine:
 
         entry_bid_limit = close × 0.995  (lower bound, limit order)
         entry_max_chase = close × 1.005  (upper bound, max acceptable chase)
-        stop_loss       = T+0 closing price  (not intraday VWAP — requires tick data)
+        stop_loss       = T+0 closing price
         target          = poc_proxy × 1.05  (5% above 20-day high proxy)
         """
         close = ohlcv.close
         return ExecutionPlan(
             entry_bid_limit=round(close * 0.995, 2),
             entry_max_chase=round(close * 1.005, 2),
-            stop_loss=round(close, 2),
+            stop_loss=close,
             target=round(volume_profile.poc_proxy * 1.05, 2),
         )

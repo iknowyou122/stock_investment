@@ -50,6 +50,9 @@ class ChipReport(BaseModel):
     net_buyer_count_diff: int       # sum over last 3 days of (buying_branches - selling_branches)
     risk_flags: list[str]           # e.g. ['隔日沖_TOP3']
     active_branch_count: int        # number of branches with buy_volume > 0 today
+    # v2 field: historical top-5 buyer lists for continuity scoring
+    # index 0 = yesterday, 1 = 2 days ago, etc.
+    historical_top5_buyers: list[list[BrokerWithLabel]] = Field(default_factory=list)
     data_quality_flags: list[str] = Field(default_factory=list)
 
 
@@ -78,6 +81,8 @@ class TWSEChipProxy(BaseModel):
     margin_utilization_rate: float | None = None  # 融資餘額/融資限額; None if column missing
     daytrade_ratio: float | None = None       # 當沖占成交量比重 (hint only)
     short_cover_days: float | None = None     # derived: short_balance/avg_daily_volume
+    # v2 fields
+    avg_20d_volume: int = 0                   # 20-day average daily volume (shares); used for ratio scoring
     is_available: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
 
@@ -94,6 +99,11 @@ class VolumeProfile(BaseModel):
     twenty_day_sessions: int  # actual sessions counted (may be <20 near listing or holidays)
     sixty_day_high: float = 0.0
     sixty_day_sessions: int = 0  # actual sessions in 60-day window
+    # v2 fields: longer-horizon resistance levels for upside-space scoring
+    one_twenty_day_high: float = 0.0        # 120-day high; upper resistance level
+    one_twenty_day_sessions: int = 0        # actual sessions in 120-day window
+    fiftytwo_week_high: float = 0.0         # 52-week high; annual resistance level
+    fiftytwo_week_sessions: int = 0         # actual sessions in 52-week window
     data_quality_flags: list[str] = Field(default_factory=list)
 
 

@@ -140,3 +140,21 @@
 **Why:** Pre-requisite for A4 (SBL ratio scoring). Same IP-block issue as T86/MI_MARGN affects this.
 **Effort:** XS (human: 30 min / CC: ~5 min)
 **Priority:** P1 within chip expansion — must do BEFORE implementing _fetch_sbl_data().
+
+## v2 Factor Engine — Deferred (from /autoplan 2026-04-01)
+
+### P1 (blocking for v2)
+- [ ] `TWSEChipProxy.avg_20d_volume` field — required for ratio-based 外資/投信/自營商 free-tier factors
+- [ ] Migration 007: `signal_outcomes.scoring_version` column — must land before first v2 signal
+- [ ] Fix: `(close - low) / (high - low)` ZeroDivisionError when `high == low` (limit-up/halt)
+- [ ] Fix: Gate condition 3 passes silently when `twenty_day_high == 0.0` on partial-history stocks
+
+### P2 (v2.1)
+- [ ] IC Analysis Sprint — backtest v1 factor IC after 20 trading days of v2 live signals; calibrate weights in v2.1
+- [ ] `VolumeProfile` 120-day / 52-week high fields — full Pillar 3 upside space factor
+- [ ] `ChipReport.historical_top5_buyers` — 主力持続性 factor (can degrade to 0 without it)
+- [ ] Gate `gate_conditions_available` return value — expose TAIEX unavailability to caller
+
+### P3 (v3)
+- [ ] Market regime conditioning TAIEX threshold modifier (±5) — included in v2 per user approval; deferred items are fine-tuning only
+

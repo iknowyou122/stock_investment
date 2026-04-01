@@ -28,7 +28,12 @@ class SignalOutcomeRepository:
     they share the global psycopg2 connection pool.
     """
 
-    def record(self, signal: SignalOutput, branch_codes: list[str] | None = None) -> str:
+    def record(
+        self,
+        signal: SignalOutput,
+        branch_codes: list[str] | None = None,
+        scoring_version: str = "v1",
+    ) -> str:
         """Insert a new signal row.
 
         Returns the UUID string of the newly created signal_id.
@@ -42,6 +47,10 @@ class SignalOutcomeRepository:
             Optional list of broker branch codes associated with this signal.
             Stored in the branch_codes TEXT[] column (migration 004).
             Defaults to an empty array when None.
+        scoring_version:
+            The scoring formula version that produced this signal (e.g. "v1", "v2").
+            Stored in the scoring_version column (migration 007).
+            Defaults to "v1" for backward compatibility.
         """
         entry_price = signal.execution_plan.entry_bid_limit
         codes = branch_codes if branch_codes is not None else []
@@ -51,8 +60,8 @@ class SignalOutcomeRepository:
                     """
                     INSERT INTO signal_outcomes
                         (ticker, signal_date, confidence_score, action, entry_price,
-                         halt_flag, branch_codes)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                         halt_flag, branch_codes, scoring_version)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING signal_id
                     """,
                     (
@@ -63,6 +72,7 @@ class SignalOutcomeRepository:
                         entry_price,
                         signal.halt_flag,
                         codes,
+                        scoring_version,
                     ),
                 )
                 row = cur.fetchone()
@@ -143,7 +153,7 @@ class SignalOutcomeRepository:
                     (price, outcome, signal_id),
                 )
 
-    def win_rate_stats(self, days: int = 30) -> dict:
+    def win_rate_stats(self, days: int = 30, scoring_version: str | None = None) -> dict:
         """Compute win-rate statistics over the last N calendar days.
 
         Returns::
@@ -163,25 +173,51 @@ class SignalOutcomeRepository:
 
         Tiers: high >= 70, mid 50–69, low < 50.
         Win = outcome_Xd > 0. Only rows where outcome_Xd IS NOT NULL are counted.
+
+        Parameters
+        ----------
+        days:
+            Number of calendar days to look back.
+        scoring_version:
+            When provided, restrict stats to rows with this scoring_version value.
+            Pass "v1" or "v2" to avoid mixing formula generations in win-rate stats.
+            None (default) includes all rows for backward compatibility.
         """
         cutoff = datetime.utcnow() - timedelta(days=days)
 
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                        confidence_score,
-                        action,
-                        outcome_1d,
-                        outcome_3d,
-                        outcome_5d
-                    FROM signal_outcomes
-                    WHERE created_at >= %s
-                      AND halt_flag = FALSE
-                    """,
-                    (cutoff,),
-                )
+                if scoring_version is not None:
+                    cur.execute(
+                        """
+                        SELECT
+                            confidence_score,
+                            action,
+                            outcome_1d,
+                            outcome_3d,
+                            outcome_5d
+                        FROM signal_outcomes
+                        WHERE created_at >= %s
+                          AND halt_flag = FALSE
+                          AND scoring_version = %s
+                        """,
+                        (cutoff, scoring_version),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT
+                            confidence_score,
+                            action,
+                            outcome_1d,
+                            outcome_3d,
+                            outcome_5d
+                        FROM signal_outcomes
+                        WHERE created_at >= %s
+                          AND halt_flag = FALSE
+                        """,
+                        (cutoff,),
+                    )
                 rows = cur.fetchall()
 
         if not rows:

@@ -300,24 +300,35 @@ class StrategistAgent:
 信心分數: {signal.confidence}/100
 行動建議: {signal.action}
 
-=== 評分細節 ===
-動能指標:
-  - VWAP 5日均: {'+20' if breakdown.vwap_5d_pts else '0'} 分
-  - 量能突破: {'+20' if breakdown.volume_surge_pts else '0'} 分
+=== 評分細節 (v2) ===
+動能指標 (Pillar 1):
+  - 量能比率: {breakdown.volume_ratio_pts} 分
+  - VWAP 5日優勢: {breakdown.vwap_advantage_pts} 分
+  - 收盤方向: {breakdown.price_direction_pts} 分
+  - 收盤強度: {breakdown.close_strength_pts} 分
+  - 趨勢延續: {breakdown.trend_continuity_pts} 分
+  - 量能遞增: {breakdown.volume_escalation_pts} 分
 
-籌碼指標:
-  - 買賣家數差: {'+15' if breakdown.net_buyer_diff_pts else '0'} 分 (net_buyer_count_diff={chip_report.net_buyer_count_diff})
-  - 集中度 Top15: {'+15' if breakdown.concentration_pts else '0'} 分 ({chip_report.concentration_top15:.1%})
-  - 無隔日沖在前三: {'+10' if breakdown.no_daytrade_pts else '0'} 分
-  - 外資買賣超 (TWSE): {'+15' if breakdown.twse_foreign_pts else '0'} 分
-  - 融資餘額變化 (TWSE): {'+10' if breakdown.twse_margin_pts else '0'} 分
+籌碼指標 (Pillar 2):
+  - 付費版 - 買盤廣度: {breakdown.breadth_pts} 分
+  - 付費版 - 集中度: {breakdown.concentration_pts} 分
+  - 付費版 - 隔日沖過濾: {breakdown.daytrade_filter_pts} 分 (net_buyer_count_diff={chip_report.net_buyer_count_diff})
+  - 免費版 - 外資強度: {breakdown.foreign_strength_pts} 分
+  - 免費版 - 融資結構: {breakdown.margin_structure_pts} 分
+  - 免費版 - 借券壓力: {breakdown.sbl_pressure_pts} 分
 
-空間指標:
-  - 接近/突破20日高點: {'+20' if breakdown.space_pts else '0'} 分
-  - MA20趨勢向上: {'+5' if breakdown.ma20_slope_pts else '0'} 分
+空間指標 (Pillar 3):
+  - 突破20日高點: {breakdown.breakout_20d_pts} 分
+  - 突破60日高點: {breakdown.breakout_60d_pts} 分
+  - MA多頭排列: {breakdown.ma_alignment_pts} 分
+  - MA20斜率: {breakdown.ma20_slope_pts} 分
+  - 相對強弱: {breakdown.relative_strength_pts} 分
 
 風險扣分:
-  - 隔日沖扣分: {'-' + str(breakdown.daytrade_deduction) if breakdown.daytrade_deduction else '無'}
+  - 隔日沖: {'-' + str(breakdown.daytrade_risk) if breakdown.daytrade_risk else '無'}
+  - 長上影: {'-' + str(breakdown.long_upper_shadow) if breakdown.long_upper_shadow else '無'}
+  - 過熱乖離: {'-' + str(breakdown.overheat_ma20 + breakdown.overheat_ma60) if (breakdown.overheat_ma20 or breakdown.overheat_ma60) else '無'}
+  - 融資追價: {'-' + str(breakdown.margin_chase_heat) if breakdown.margin_chase_heat else '無'}
 
 前三大買超券商:
 {self._format_top3(chip_report.top_buyers[:3])}

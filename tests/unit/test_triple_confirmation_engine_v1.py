@@ -1,4 +1,10 @@
-"""Unit tests for TripleConfirmationEngine.
+"""Unit tests for TripleConfirmationEngine v1 (superseded by v2).
+
+These tests document v1 scoring behavior (point values, thresholds).
+They are skipped because v2 replaces the scoring formula — the point
+values tested here are intentionally different from v2.
+
+DO NOT modify these tests. They serve as a historical record of v1 behavior.
 
 Coverage targets (from test diagram in design doc):
   - Pillar 1: vwap_5d (price above / below)
@@ -21,6 +27,8 @@ Coverage targets (from test diagram in design doc):
   - free_tier_mode threshold switching (55 vs 70)
   - LONG guard (chip_pts=0 + free_tier_mode → WATCH)
 """
+# SKIP MARKER: v1 tests are superseded by v2 — point values no longer match.
+# Run the v2 tests in test_triple_confirmation_engine_v2.py instead.
 from __future__ import annotations
 
 from datetime import date, timedelta
