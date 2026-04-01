@@ -2,9 +2,9 @@
 
 台股籌碼面信號系統。每日收盤後分析指定股票，輸出 **LONG / WATCH / CAUTION** 三級信號，幫助判斷主力是否在進場。
 
-> **Last updated:** 2026-03-31
+> **Last updated:** 2026-04-01
 > **Current focus:** Phase 5（Stripe 付款整合 + 社群信譽評分）
-> **Tests:** 253 passed
+> **Tests:** 185 unit passed（214 integration skipped，需 DB）
 
 ---
 
@@ -12,39 +12,44 @@
 
 每天收盤後，對一支股票做三件事：
 
-1. **動能評分（Pillar 1）** — 量價結構：VWAP、量能突破、K線強弱、連漲天數
-2. **籌碼評分（Pillar 2）** — 主力行為：外資/投信連買、融資變化、分點集中度（付費）
-3. **空間評分（Pillar 3）** — 突破位置：20/60 日高點、均線多頭排列、相對強度
+1. **Gate 層** — 先確認有沒有可交易的 setup（2-of-4 條件）
+2. **三柱評分** — 動能（max 35）+ 籌碼（max 40）+ 空間（max 35）
+3. **風險修正** — 隔日沖、過熱、長上影、借券等扣分，最多 -51
 
-三柱加總，超過門檻輸出信號。
+三層通過後，根據 TAIEX 趨勢動態調整門檻，輸出 LONG / WATCH / CAUTION 信號。
 
 ---
 
 ## 如何解讀輸出
 
 ```
-🔴  2330 | CAUTION | Confidence: 30/100 | 2026-03-26
-  執行: 進場 1830.8-1849.2 | 停損 1840.0 | 目標 2110.5
+⚠️  6257 | CAUTION | Confidence: 44/100 | 2026-04-01
+  動能: 量能比率尚可，但收盤強度與趨勢延續偏弱。
+  籌碼: 外資強度低，融資結構分數偏低。
+  風險: RSI 76.2 超買，有過熱乖離扣分。
+  執行: 進場 155.22-156.78 | 停損 156.0 | 目標 170.1
+  ⚠ 數據品質: NO_BROKER_DATA, scoring_version:v2
 ```
 
 | 欄位 | 說明 |
 |------|------|
-| **信號** | `LONG` 三柱齊發；`WATCH` 動能+空間到位但籌碼不足；`CAUTION` 條件不足，不宜進場 |
+| **信號** | `LONG` 三柱均衡且超過門檻；`WATCH` 部分到位；`CAUTION` 條件不足或風險過高 |
 | **Confidence** | 三柱總分（0–100），不是勝率，是信號強度 |
 | **進場區間** | bid_limit（下限）到 max_chase（上限），超過上限不追價 |
-| **停損** | 基於 ATR 計算，跌破即出場 |
-| **目標** | 2:1 風報比 |
+| **停損** | T+0 收盤價 |
+| **目標** | 60 日高點 × 1.05 |
 | **data_quality_flags** | 資料缺口說明（見下方） |
 
 ### 常見 flags
 
 | Flag | 意思 | 影響 |
 |------|------|------|
-| `NO_BROKER_DATA` | FinMind 分點資料需付費，未取得 | 切換免費模式評分，Pillar 2 用 TWSE 代替 |
-| `TWSE_T86_ERROR` | TWSE T86 端點被 WAF 擋（2026-03 起） | 自動切換 OHLCV RS proxy（見下方） |
-| `TWSE_T86_NO_DATA` | 當日無 T86 外資資料（假日/停牌） | Pillar 2 部分因子為 0 |
-| `TWSE_T86_PROXY:RS=+X.X%` | T86 被擋，以 RS vs 大盤估算外資方向 | RS ≥ 3% 自動注入外資買超訊號 |
-| `free_tier_mode: true` | 使用 TWSE opendata 替代分點資料 | 門檻自動調整（LONG ≥ 60，WATCH ≥ 35） |
+| `NO_BROKER_DATA` | FinMind 分點資料需付費 | 切換免費模式（TWSE proxy） |
+| `NO_SETUP` | Gate 層未通過（2-of-4 條件不足） | 強制 CAUTION，confidence=0 |
+| `DOJI_OR_HALT` | 當日 high==low（漲停/停牌） | close_strength 設為 0 |
+| `scoring_version:v2` | 使用 v2 引擎評分 | 正常，代表新版架構 |
+| `TWSE_T86_ERROR` | TWSE T86 被 WAF 封鎖 | 自動切換 RS proxy |
+| `free_tier_mode: true` | 使用 TWSE opendata 替代分點資料 | Pillar 2 用法人資料 |
 
 ---
 
@@ -54,13 +59,13 @@
 
 | | 免費模式 | 付費模式 |
 |--|---------|---------|
-| **資料** | TWSE openapi MI_MARGN（融資）+ OHLCV RS proxy（T86 被 WAF 擋，2026-03 起） | + FinMind 分點明細 |
-| **Pillar 2 滿分** | 63 pts | 45 pts |
-| **LONG 門檻** | ≥ 60 | ≥ 70 |
-| **優勢** | 免費，T86 當日可用 | 主力分點行為，更精確 |
-| **缺點** | 無法辨識隔日沖分點，主力買賣無法分辨 | FinMind 需付費訂閱 |
+| **資料** | TWSE openapi（法人/融資/借券）+ OHLCV | + FinMind 分點明細 |
+| **Pillar 2** | 外資/投信/自營比率、融資結構、借券壓力 | 分點集中度、主力持續性、隔日沖過濾 |
+| **Pillar 2 max** | 40 pts | 40 pts |
+| **LONG 門檻** | 63 / 68 / 73（依 TAIEX 趨勢） | 同左 |
+| **缺點** | 無法辨識隔日沖分點 | FinMind 需付費訂閱 |
 
-> 免費模式下信號仍然有效，但假訊號率較高。建議搭配自己的盤感過濾。
+> 免費模式下信號仍有效，但假訊號率較高。建議搭配自己的盤感過濾。
 
 ---
 
@@ -76,10 +81,17 @@
 ### 1. 安裝
 
 ```bash
-pip install -e ".[dev]"
+# 建立 venv
+python3.11 -m venv .venv
 
-# 若要跑 API server
-pip install -r requirements-api.txt
+# 基本安裝
+make install
+
+# 含 Gemini LLM（推薦）
+make install-gemini
+
+# 含 OpenAI LLM
+make install-openai
 ```
 
 ### 2. 設定環境變數
@@ -107,7 +119,7 @@ FINMIND_API_KEY=<你的 FinMind JWT token>
 
 ```bash
 make test-unit
-# 預期：249 passed
+# 預期：185 passed
 ```
 
 ---
@@ -217,64 +229,88 @@ python3 scripts/run_bayesian_update.py
 
 ---
 
-## 分析因子（Triple Confirmation Engine）
+## 分析因子（Triple Confirmation Engine v2）
 
-詳細說明（為什麼 / 量測什麼 / 怎麼用）見 [`docs/design/factor-guide.md`](docs/design/factor-guide.md)。
+詳細規格見 [`docs/design/factor-optimization-v2-plan.md`](docs/design/factor-optimization-v2-plan.md)。
 
-### Pillar 1 — 動能 Momentum｜最高 55 pts
+### Gate 層（2-of-4 通過才進入評分）
 
-| 因子 | 觸發條件 | 分數 |
-|------|----------|------|
-| VWAP 5日均 | 收盤 > 5日成交量加權均價 | +20 |
-| 量能突破 | 今日量 > 20日均量 × 1.5，且收盤不收黑 | +20 |
-| K線收盤強弱比 | (收–低)/(高–低) > 0.7 | +5 |
-| 連漲天數 | 連續收高 ≥ 3 日 | +5 |
-| 量能遞增趨勢 | 前 3 日成交量連續遞增 | +5 |
+| # | 條件 | 備註 |
+|---|------|------|
+| 1 | 收盤 > 5日平均 VWAP | |
+| 2 | 今日量 > 20日均量 × 1.3 | |
+| 3 | 收盤 ≥ 20日高點 × 0.99 | 20日高點為 0 時不計入 |
+| 4 | 個股 5日報酬 > TAIEX 5日報酬 | TAIEX 無資料時不計入 |
 
-### Pillar 2 — 籌碼 Chip｜付費 45 pts / 免費 63 pts
+未通過：`action="CAUTION"`, `confidence=0`, `data_quality_flags=["NO_SETUP"]`
 
-**付費版（FinMind 分點資料）**
+### Pillar 1 — 動能 Momentum｜max 35 pts
 
-| 因子 | 觸發條件 | 分數 |
-|------|----------|------|
-| 淨買超家數差 | 3 日累計買方分點數 > 賣方 | +15 |
-| 籌碼集中度 Top15 | 前 15 分點買量 / 總買量 > 35% | +15 |
-| 前三無隔日沖 | Top3 買超分點無隔日沖標籤 | +10 |
-| 外資分點偵測 | Top 買超含已知外資分點代碼 | +5 |
-| ⚠ 風險扣分 | Top3 有隔日沖分點 | **-25** |
+| 因子 | 條件 | 分數 |
+|------|------|------|
+| 量能比率 | 今日量/20日均量：1.2–1.8→4，>1.8→8 | 0/4/8 |
+| 價格方向 | 收盤 ≥ 昨收 | +3 |
+| K線收盤強弱 | (收–低)/(高–低)：≥0.7→4，0.5–0.7→2 | 0/2/4 |
+| VWAP 優勢 | 收盤 > 5日平均 VWAP | +6 |
+| 趨勢延續 | 3日連漲→3，近5日有4日收紅→5 | 0/3/5 |
+| 量能遞增 | T-3<T-2<T-1→3，今日再大→5 | 0/3/5 |
 
-**免費版（TWSE opendata）**
+### Pillar 2A — 籌碼付費｜max 40 pts（FinMind 分點）
 
-| 因子 | 觸發條件 | 分數 |
-|------|----------|------|
-| 外資買賣超 | foreign_net_buy > 0 | +15 |
-| 投信買賣超 | trust_net_buy > 0 | +10 |
-| 自營商買賣超 | dealer_net_buy > 0 | +5 |
-| 融資餘額變化 | margin_balance_change ≤ 0 | +10 |
-| 三大法人同向 | 外資 + 投信 + 自營商全部淨買 | +5 |
-| 外資連買天數 | 連續外資淨買 ≥ 3 日 | +5 |
-| 投信連買天數 | 連續投信淨買 ≥ 3 日 | +5 |
-| 自營商連買天數 | 連續自營商淨買 ≥ 3 日 | +3 |
-| 融資使用率 | 使用率 < 20%（籌碼未被散戶鎖死）| +5 / −5 |
-| ⚠ 風險扣分 | 融券暴增 AND 券資比 > 15% | **-10** |
+| 因子 | 條件 | 分數 |
+|------|------|------|
+| 買盤廣度 | 3日淨買分點差：1-10→5，>10→10 | 0/5/10 |
+| 集中度品質 | Top15買量/總買量（<10家分點上限+5）| 0/5/10 |
+| 主力持續性 | Top5分點與前日重疊：1→3，≥2→5；3日均重疊≥2→+3 | 0–8 |
+| 隔日沖過濾 | Top3全非隔日沖→7，否則→0（觸發-25扣分）| 0/7 |
+| 外資分點 | 已知外資分點出現→3，進入Top3→5 | 0/3/5 |
 
-### Pillar 3 — 空間 Space｜最高 45 pts
+### Pillar 2B — 籌碼免費｜max 40 pts（TWSE opendata）
 
-| 因子 | 觸發條件 | 分數 |
-|------|----------|------|
-| 20 日高點突破 | 收盤 ≥ 20 日高 × 0.99 | +20 |
-| 60 日高點突破 | 收盤 ≥ 60 日高 × 0.99 | +10 |
+| 因子 | 條件 | 分數 |
+|------|------|------|
+| 外資強度 | 外資買超/20日均量：0-3%→4，3-8%→8，>8%→12 | 0/4/8/12 |
+| 投信強度 | 投信買超/20日均量：0-3%→3，3-8%→6，>8%→8 | 0/3/6/8 |
+| 自營商強度 | 自營買超/20日均量：0-3%→2，>3%→4 | 0/2/4 |
+| 法人持續性 | 外資連買≥3→4，投信→3，自營→1 | 0–8 |
+| 三大法人共識 | 三者全買且兩者達中等以上 | +4 |
+| 融資結構 | 漲+減→8，漲+小增→3，漲+大增→-4，跌+大減→2，跌+不減→-3 | -4~+8 |
+| 融資使用率 | <20%→+4，>80%→-4 | -4/0/+4 |
+| 借券賣出壓力 | 占比5-10%→-4，>10%→-8 | 0/-4/-8 |
+
+### Pillar 3 — 空間 Structure｜max 35 pts
+
+| 因子 | 條件 | 分數 |
+|------|------|------|
+| 20日高點突破 | 收盤 ≥ 20日高 × 0.99 | +8 |
+| 60日高點突破 | 收盤 ≥ 60日高 × 0.99 | +5 |
+| 突破站穩品質 | 站穩未跌回 | +2 |
 | 均線多頭排列 | MA5 > MA10 > MA20 | +5 |
-| MA20 斜率向上 | MA20 最近 5 日斜率為正 | +5 |
-| RS vs 大盤 | 個股 5 日報酬 > TAIEX 5 日報酬 × 1.2 | +5 |
+| MA20 斜率 | MA20 向上 | +5 |
+| 相對強弱 | 跑贏大盤 0-20%→3，>20%→5 | 0/3/5 |
+| 上方空間 | 距壓力：>8%→5，3-8%→2 | 0/2/5 |
 
-### 信號門檻
+### 風險扣分（最多 -51）
 
-| 模式 | LONG | WATCH | CAUTION |
-|------|------|-------|---------|
-| 付費（有分點資料） | ≥ 70 | 40–69 | < 40 |
-| 免費（TWSE proxy） | ≥ 60 | 35–59 | < 35 |
-| 特殊規則 | 免費且 chip_pts = 0 → 強制 CAUTION | | |
+| 條件 | 扣分 |
+|------|------|
+| Top3 買超含隔日沖分點 | -25 |
+| 長上影線（量>1.5倍 且 收盤強度<0.4） | -8 |
+| 過熱 vs MA20（>MA20×1.10） | -5 |
+| 過熱 vs MA60（>MA60×1.20） | -5 |
+| 當沖過熱（占比>35% 且 未站穩突破位） | -5 |
+| 借券放空+突破失敗 | -8 |
+| 融資追價過熱 | -5 |
+
+### 信號門檻（v2，依 TAIEX MA20 斜率）
+
+| TAIEX 趨勢 | LONG | WATCH | CAUTION |
+|-----------|------|-------|---------|
+| 上升（MA20 向上） | ≥ 63 | 45–62 | < 45 |
+| 中性 | ≥ 68 | 45–67 | < 45 |
+| 下跌（MA20 向下） | ≥ 73 | 45–72 | < 45 |
+
+**LONG 額外條件：** Momentum ≥ 15, Chip ≥ 12, Structure ≥ 12
 
 ---
 
@@ -288,7 +324,8 @@ python3 scripts/run_bayesian_update.py
 | Phase 3a | ✅ 完成 | StrategistAgent CLI + 多 LLM 支援（Gemini/Claude/OpenAI）+ TWSE free-tier proxy |
 | Phase 3b | ✅ 完成 | FastAPI + 真實 DB 路由 + /track-record + /register |
 | Phase 4 | ✅ 完成 | Collective label curation + BayesianLabelUpdater + 社群勝率回報 API + 付費 stub |
-| Phase 4.5 | ✅ 完成 | Makefile 本地開發環境 + 253 tests passing + DB integration 修復 |
+| Phase 4.5 | ✅ 完成 | Makefile 本地開發環境 + DB integration 修復 + Gemini 2.5 Flash |
+| Phase 4.6 | ✅ 完成 | v2 引擎：Gate 層 + 三柱重構 + 風險修正 + TAIEX regime 門檻 + migration 007 |
 | Phase 5 | ⏳ 規劃中 | Stripe 真實付款整合 + 社群信譽評分 + 台灣 Pay |
 
 ---
@@ -301,8 +338,8 @@ Infrastructure  ──  FinMindClient      (fetch + Parquet cache + retry)
      │              db.py              (PostgreSQL connection pool)
      │
 Domain          ──  BrokerLabelClassifier    (D+2 reversal rate → 隔日沖 label)
-     │              TripleConfirmationEngine  (三柱確認評分引擎)
-     │              SignalOutcomeRepository   (信號結果追蹤)
+     │              TripleConfirmationEngine  (v2：Gate + 三柱 + Risk Adjust)
+     │              BayesianLabelUpdater      (Beta-Bernoulli 社群勝率更新)
      │              models.py                (Pydantic schemas)
      │
 Agentic         ──  ScoutAgent         (全市場異常掃描：量能、突破、板塊)
@@ -336,9 +373,9 @@ Presentation    ──  __main__.py        (每日 CLI)
 
 | 文件 | 用途 |
 |------|------|
-| `CLAUDE.md` | AI 協作者必讀：架構決策、Phase Gates |
-| `docs/design/factor-guide.md` | 所有因子詳解：為什麼、量測什麼、怎麼用 |
-| `docs/design/signal-engine-design.md` | 完整技術規格：Triple Confirmation 公式、分點分類邏輯 |
+| `CLAUDE.md` | AI 協作必讀：架構決策、Phase Gates |
+| `docs/design/factor-optimization-v2-plan.md` | v2 因子完整規格 + autoplan review |
+| `docs/design/signal-engine-design.md` | 技術規格：v2 公式、分點分類邏輯 |
 | `docs/design/ceo-plan.md` | 產品願景、scope 決策、12 個月目標 |
 | `DESIGN.md` | Phase 3b UI 設計系統：色票、字型、layout |
 
@@ -355,10 +392,10 @@ stock_investment/
 │   │   ├── db.py                   # PostgreSQL connection pool
 │   │   └── signal_outcome_repo.py  # Signal 結果追蹤（含 branch_codes）
 │   ├── domain/
-│   │   ├── triple_confirmation_engine.py  # 三柱確認評分核心
+│   │   ├── triple_confirmation_engine.py  # v2 引擎（Gate + 三柱 + Risk Adjust）
 │   │   ├── broker_label_classifier.py     # 隔日沖分類核心
-│   │   ├── bayesian_label_updater.py      # Phase 4：Beta-Bernoulli 社群勝率更新
-│   │   └── models.py                      # Pydantic schemas
+│   │   ├── bayesian_label_updater.py      # Beta-Bernoulli 社群勝率更新（按 scoring_version 分版）
+│   │   └── models.py                      # Pydantic schemas（含 avg_20d_volume 等 v2 新欄位）
 │   ├── agents/
 │   │   ├── scout_agent.py          # 全市場異常掃描 + 板塊熱力圖
 │   │   ├── chip_detective_agent.py # 籌碼偵探
@@ -378,8 +415,14 @@ stock_investment/
 │   ├── validate_margin_utilization.py  # MI_MARGN 融資限額驗證
 │   └── data_alignment_check.py     # 資料日期對齊驗證
 ├── tests/
-│   ├── unit/                       # 179 tests，無需 DB/網路
+│   ├── unit/
+│   │   ├── test_triple_confirmation_engine_v2.py  # 59 個 v2 新測試
+│   │   ├── test_triple_confirmation_engine_v1.py  # v1 保留（skip 標記）
+│   │   └── ...                     # 185 tests 總計，無需 DB/網路
 │   └── integration/                # 需要 PostgreSQL
-├── db/migrations/                  # SQL migrations（001–006）
-└── docs/design/                    # 設計文件
+├── db/migrations/                  # SQL migrations（001–007，007 新增 scoring_version）
+└── docs/design/
+    ├── factor-optimization-v2-plan.md  # v2 因子完整規格
+    ├── signal-engine-design.md
+    └── ceo-plan.md
 ```
