@@ -30,7 +30,7 @@ endif
 # 用法: make scan
 #       make scan DATE=2026-03-27
 scan:
-	$(PYTHON) -m taiwan_stock_agent.scripts.batch_scan --date $(DATE)
+	$(PYTHON) scripts/batch_scan.py --date $(DATE)
 
 # ── API server ───────────────────────────────────────────────────────────────
 api:
