@@ -406,16 +406,20 @@ class TripleConfirmationEngine:
         ohlcv: DailyOHLCV,
         ohlcv_history: list[DailyOHLCV],
         volume_profile: VolumeProfile,
-    ) -> tuple[bool, int]:
+    ) -> tuple[bool, int, int, list[str]]:
         """Evaluate the 2-of-4 gate conditions.
 
-        Returns (passes: bool, gate_conditions_available: int).
+        Returns (passes, conditions_available, conditions_met, detail_flags).
+        detail_flags carries per-condition GATE_PASS/GATE_FAIL/GATE_SKIP and
+        INSUFFICIENT_GATE_DATA entries so callers can surface exactly which
+        condition blocked the gate.
         'Available' means the data existed to evaluate that condition.
         Unavailable conditions are treated as NOT met (not penalized, but
         the denominator for the 2-of-4 check is still 4).
         """
         conditions_met = 0
         conditions_available = 0
+        detail_flags: list[str] = []
 
         # Condition 1: close > 5d_avg_vwap
         vwap_5d = self._vwap_5d(ohlcv_history)
@@ -423,36 +427,64 @@ class TripleConfirmationEngine:
             conditions_available += 1
             if ohlcv.close > vwap_5d:
                 conditions_met += 1
+                detail_flags.append("GATE_PASS:VWAP")
+            else:
+                detail_flags.append("GATE_FAIL:VWAP")
+        else:
+            detail_flags.append("GATE_SKIP:VWAP")
+            detail_flags.append("INSUFFICIENT_GATE_DATA:VWAP")
 
-        # Condition 2: volume > 20d_avg_volume × 1.3
+        # Condition 2: volume > 20d_avg_volume × 1.2
+        # Threshold aligned with Momentum Pillar volume_ratio_pts first bracket (>1.2×)
         vol_20ma = self._volume_20ma(ohlcv_history)
         if vol_20ma is not None:
             conditions_available += 1
-            if ohlcv.volume > vol_20ma * 1.3:
+            if ohlcv.volume > vol_20ma * 1.2:
                 conditions_met += 1
+                detail_flags.append("GATE_PASS:VOL")
+            else:
+                detail_flags.append("GATE_FAIL:VOL")
+        else:
+            detail_flags.append("GATE_SKIP:VOL")
+            detail_flags.append("INSUFFICIENT_GATE_DATA:VOL")
 
         # Condition 3: close >= twenty_day_high × 0.99
         # Guard: twenty_day_high == 0.0 → condition NOT met (partial-history stocks)
         conditions_available += 1
         if volume_profile.twenty_day_high > 0 and ohlcv.close >= volume_profile.twenty_day_high * 0.99:
             conditions_met += 1
+            detail_flags.append("GATE_PASS:HIGH20")
+        else:
+            detail_flags.append("GATE_FAIL:HIGH20")
 
-        # Condition 4: 5d_stock_return > 5d_taiex_return (only if taiex data available)
+        # Condition 4: 5d_stock_return > 5d_taiex_return
+        # Uses date-intersection of stock and TAIEX history to avoid misalignment
+        # on trading suspensions or holiday gaps.
         taiex = getattr(self, "_taiex_history", [])
-        stock_bars = sorted(ohlcv_history, key=lambda x: x.trade_date)
-        taiex_bars = sorted(taiex, key=lambda x: x.trade_date)
-        if len(stock_bars) >= 5 and len(taiex_bars) >= 5:
+        stock_date_map = {b.trade_date: b for b in ohlcv_history}
+        taiex_date_map = {b.trade_date: b for b in taiex}
+        common_dates = sorted(stock_date_map.keys() & taiex_date_map.keys())
+        if len(common_dates) >= 5:
             conditions_available += 1
-            stock_base = stock_bars[-5].close
-            taiex_base = taiex_bars[-5].close
+            base_date = common_dates[-5]
+            stock_base = stock_date_map[base_date].close
+            taiex_base = taiex_date_map[base_date].close
             if stock_base > 0 and taiex_base > 0:
                 stock_ret = (ohlcv.close - stock_base) / stock_base
-                taiex_ret = (taiex_bars[-1].close - taiex_base) / taiex_base
+                taiex_ret = (taiex_date_map[common_dates[-1]].close - taiex_base) / taiex_base
                 if stock_ret > taiex_ret:
                     conditions_met += 1
+                    detail_flags.append("GATE_PASS:RS")
+                else:
+                    detail_flags.append("GATE_FAIL:RS")
+            else:
+                detail_flags.append("GATE_FAIL:RS")
+        else:
+            detail_flags.append("GATE_SKIP:RS")
+            detail_flags.append("INSUFFICIENT_GATE_DATA:RS")
 
         passes = conditions_met >= 2
-        return passes, conditions_available
+        return passes, conditions_available, conditions_met, detail_flags
 
     # ------------------------------------------------------------------
     # Core computation
@@ -469,8 +501,12 @@ class TripleConfirmationEngine:
         bd = _ScoreBreakdown()
 
         # --- Gate check first ---
-        gate_passes, gate_available = self._gate_check(ohlcv, ohlcv_history, volume_profile)
+        gate_passes, gate_available, gate_met, gate_detail_flags = self._gate_check(
+            ohlcv, ohlcv_history, volume_profile
+        )
         bd.flags.append(f"GATE_AVAILABLE:{gate_available}")
+        bd.flags.append(f"GATE_MET:{gate_met}")
+        bd.flags.extend(gate_detail_flags)
 
         if not gate_passes:
             bd.flags.append("NO_SETUP")
@@ -1139,7 +1175,17 @@ class TripleConfirmationEngine:
             data_quality_flags = list(ohlcv.data_quality_flags)
             data_quality_flags.extend(chip_report.data_quality_flags)
             data_quality_flags.extend(volume_profile.data_quality_flags)
+            # Propagate gate detail flags (GATE_PASS/FAIL/SKIP, INSUFFICIENT_GATE_DATA, GATE_MET)
+            for f in breakdown.flags:
+                if any(f.startswith(p) for p in (
+                    "GATE_PASS:", "GATE_FAIL:", "GATE_SKIP:",
+                    "INSUFFICIENT_GATE_DATA:", "GATE_MET:", "GATE_AVAILABLE:",
+                )):
+                    data_quality_flags.append(f)
             data_quality_flags.append("NO_SETUP")
+            # Top-level summary when data was insufficient
+            if any(f.startswith("INSUFFICIENT_GATE_DATA:") for f in breakdown.flags):
+                data_quality_flags.append("INSUFFICIENT_GATE_DATA")
             data_quality_flags.append("scoring_version:v2")
             return SignalOutput(
                 ticker=ohlcv.ticker,

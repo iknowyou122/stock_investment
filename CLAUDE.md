@@ -27,6 +27,8 @@ you will create drift that is expensive to fix.
 | Phase 4.5 | ✅ Done | Makefile local dev ✅ · DB integration fix (json.dumps metadata) ✅ · Gemini 2.5 Flash wired end-to-end ✅ |
 | Phase 4.6 | ✅ Done | v2 Triple Confirmation Engine ✅ · Gate layer (2-of-4) ✅ · 3-Pillar + Risk Adjust ✅ · TAIEX regime gate (63/68/73) ✅ · migration 007 (scoring_version) ✅ · 185 unit tests passing ✅ |
 | Phase 4.7 | ✅ Done | `make scan` 路徑修正 ✅ · T86 週末跳過（suppress spurious WARNINGs）✅ · 動態 watchlist（728 檔，上市+上櫃 半導體/光電/電子，每日 cache）✅ |
+| Phase 4.8 | ✅ Done | 互動式產業選單（數字代號選擇）✅ · 全市場 industry_map cache（ticker→industry）✅ · 日期自動判斷（17:00 切換前一/當日交易日）✅ · T86 rate-limit retry with backoff ✅ |
+| Phase 4.9 | ✅ Done | Gate 層可觀測性（GATE_PASS/FAIL/SKIP/MET flags）✅ · Gate VOL 門檻 1.3→1.2 ✅ · RS 日期交集對齊 ✅ · Flag 中文翻譯（_translate_flag）✅ · 輸出條列式換行 ✅ · T86 rate-limit 改 try/except ValueError + retry ✅ · 批次掃描互動式 LLM 選單 ✅ · 兩階段 LLM（Phase 1 全量 deterministic → Phase 2 top N with LLM）✅ |
 
 **Phase 5 (next):**
 - Real Stripe webhook handling (requires production Stripe account + deployment)

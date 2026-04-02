@@ -11,6 +11,7 @@ with is_available=False. Never raises to callers.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -99,6 +100,11 @@ class ChipProxyFetcher:
             or margin_change is not None
         )
 
+        if not is_available:
+            rate_limited = any(f.startswith("TWSE_T86_RATE_LIMITED") for f in flags)
+            reason = "TWSE 限流（非 JSON 回應）" if rate_limited else "無資料（假日或尚未更新）"
+            logger.info("ChipProxy unavailable for %s %s: %s", ticker, trade_date, reason)
+
         return TWSEChipProxy(
             ticker=ticker,
             trade_date=trade_date,
@@ -154,19 +160,33 @@ class ChipProxyFetcher:
                 pass
 
         try:
-            resp = requests.get(
-                TWSE_T86_URL,
-                params={
-                    "date": trade_date.strftime("%Y%m%d"),
-                    "selectType": "ALL",
-                    "response": "json",
-                },
-                headers=_TWSE_HEADERS,
-                timeout=10,
-                verify=False,  # TWSE CA cert missing Subject Key Identifier (OpenSSL 3.x strict)
-            )
-            resp.raise_for_status()
-            body = resp.json()
+            body = None
+            for _attempt in range(3):
+                resp = requests.get(
+                    TWSE_T86_URL,
+                    params={
+                        "date": trade_date.strftime("%Y%m%d"),
+                        "selectType": "ALL",
+                        "response": "json",
+                    },
+                    headers=_TWSE_HEADERS,
+                    timeout=10,
+                    verify=False,  # TWSE CA cert missing Subject Key Identifier (OpenSSL 3.x strict)
+                )
+                resp.raise_for_status()
+                try:
+                    body = resp.json()
+                    break
+                except ValueError:
+                    # Empty body or HTML error page — TWSE rate-limiting
+                    logger.debug("T86 rate-limited for %s %s (attempt %d)", ticker, trade_date, _attempt + 1)
+                    body = None
+                if _attempt < 2:
+                    time.sleep(1.0 + _attempt * 1.5)
+            if body is None:
+                logger.debug("T86 unavailable for %s %s after retries — 籌碼資料缺失", ticker, trade_date)
+                flags.append(f"TWSE_T86_RATE_LIMITED:{trade_date}")
+                return None, None, None
 
             if body.get("stat") != "OK" or not body.get("data"):
                 flags.append(f"TWSE_T86_NO_DATA:{trade_date}")
@@ -438,7 +458,11 @@ class ChipProxyFetcher:
                 verify=False,
             )
             resp.raise_for_status()
-            body = resp.json()
+            try:
+                body = resp.json()
+            except ValueError:
+                flags.append(f"TWSE_SBL_RATE_LIMITED:{trade_date}")
+                return None
 
             if body.get("stat") != "OK" or not body.get("data"):
                 return None
@@ -551,7 +575,10 @@ class ChipProxyFetcher:
                 verify=False,
             )
             resp.raise_for_status()
-            body = resp.json()
+            try:
+                body = resp.json()
+            except ValueError:
+                return None  # TWSE rate-limited — daytrade is hint-only, skip silently
 
             if body.get("stat") != "OK" or not body.get("data"):
                 return None

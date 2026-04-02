@@ -403,7 +403,7 @@ class TestGateAllCombinations:
         engine = TripleConfirmationEngine()
         engine._taiex_history = taiex_history
 
-        gate_passes, _ = engine._gate_check(ohlcv, history, vp)
+        gate_passes, *_ = engine._gate_check(ohlcv, history, vp)
         assert gate_passes == expected_passes
 
 
@@ -422,9 +422,9 @@ class TestGateTwentyDayHighZero:
 
         engine = TripleConfirmationEngine()
         # No TAIEX → cond4 not available
-        gate_passes, available = engine._gate_check(ohlcv, history, vp)
+        gate_passes, available, _, __ = engine._gate_check(ohlcv, history, vp)
 
-        # cond1: fails (close < vwap), cond2: fails (5000 < 10000*1.3=13000)
+        # cond1: fails (close < vwap), cond2: fails (5000 < 10000*1.2=12000)
         # cond3: fails (twenty_day_high=0 → NOT met)
         # cond4: not available (no taiex)
         assert gate_passes is False
@@ -457,7 +457,7 @@ class TestGateTaiexUnavailable:
 
         engine = TripleConfirmationEngine()
         # No taiex injected → cond4 not available
-        gate_passes, available = engine._gate_check(ohlcv, history, vp)
+        gate_passes, available, _, __ = engine._gate_check(ohlcv, history, vp)
 
         assert gate_passes is True
         assert available == 3  # cond1 + cond2 + cond3 available; cond4 not available

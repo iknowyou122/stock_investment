@@ -2,10 +2,10 @@
 
 台股籌碼面信號系統。每日收盤後分析指定股票，輸出 **LONG / WATCH / CAUTION** 三級信號，幫助判斷主力是否在進場。
 
-> **Last updated:** 2026-04-01
+> **Last updated:** 2026-04-02
 > **Current focus:** Phase 5（Stripe 付款整合 + 社群信譽評分）
 > **Tests:** 185 unit passed（214 integration skipped，需 DB）
-> **Scan watchlist:** 728 檔（上市+上櫃 半導體/光電/電子，每日自動更新）
+> **Scan watchlist:** 全市場上市+上櫃（每日自動更新），互動式選擇產業 + LLM 兩階段優化
 
 ---
 
@@ -130,32 +130,69 @@ make test-unit
 ### 基本用法 — 分析特定股票
 
 ```bash
-# 今日信號（收盤後跑）
-make run DATE=$(date +%F) TICKERS="2330 2454 2317"
+# 分析特定股票（日期自動判斷：17:00 前用前一交易日，之後用今日）
+make run TICKERS="2330 2454 2317"
 
-# 歷史回測（跳過時效檢查，--skip-freshness-check 已內建）
+# 指定歷史日期
 make run DATE=2024-03-04 TICKERS="2330"
 
 # 不要 LLM，只看分數
-PYTHONPATH=src python3 -m taiwan_stock_agent --date $(date +%F) --tickers 2330 --no-llm
+PYTHONPATH=src python3 -m taiwan_stock_agent --tickers 2330 --no-llm
 ```
 
 ### 批量掃描 — 找出當日強勢股
 
-預設掃描清單：**728 檔**（上市+上櫃 半導體業、光電業、電腦及週邊設備業、電子零組件業、其他電子業），每日從 TWSE/OTC 即時抓取，結果 cache 於 `data/watchlist_cache/`。
+每日從 TWSE/OTC 即時抓取全市場上市+上櫃股票，cache 於 `data/watchlist_cache/industry_map_YYYY-MM-DD.json`。
+`make scan` 啟動時顯示**互動式產業選單**，接著選擇 LLM provider，掃描完成後再決定送前幾名給 LLM。
 
 ```bash
-# 掃描全部 728 檔（盤後跑，DATE 預設前一交易日）
+# 啟動互動式掃描
 make scan
 
 # 指定日期
 make scan DATE=2026-03-28
 
-# 只掃特定標的
-.venv/bin/python scripts/batch_scan.py --tickers 2330 2454 2317 --date $(date +%F)
+# 非互動模式（CI/自動化）：直接傳產業代號 + LLM 設定
+.venv/bin/python scripts/batch_scan.py --sectors 1 4 --llm gemini --llm-top 5
+
+# 只掃特定標的（跳過產業選單）
+.venv/bin/python scripts/batch_scan.py --tickers 2330 2454 2317
+
+# 純 deterministic（不呼叫 LLM）
+.venv/bin/python scripts/batch_scan.py --no-llm
 
 # 掃描並存 CSV
-.venv/bin/python scripts/batch_scan.py --date $(date +%F) --save-csv
+.venv/bin/python scripts/batch_scan.py --save-csv
+```
+
+**互動式流程：**
+```
+可用產業別：
+  #   產業別              檔數
+  1   半導體業              234
+  2   光電業                 89
+  ...
+請輸入產業代號（空白分隔），直接 Enter 使用預設 [1 2 3 4 5]：> 1
+
+LLM 引擎：
+  1  自動偵測（依 API key）
+  2  Google Gemini
+  3  Anthropic Claude
+  4  OpenAI
+  5  不使用 LLM（純 deterministic）
+請輸入代號，直接 Enter 使用 [1 自動偵測]：> 2
+  → gemini（前幾名送 LLM 將在 Phase 1 完成後詢問）
+
+[Phase 1] deterministic scan：234 檔
+  [  1/234] 2330     conf=72
+  ...
+
+[Phase 1 完成] 234 檔（有效 210 檔）
+  前幾名: 2330(72), 3711(68), 2454(65)...
+
+送前幾名給 LLM [gemini]？（Enter = 不送）：> 5
+
+[Phase 2] 送前 5 名給 LLM (gemini)：2330, 3711, 2454, 6669, 2379
 ```
 
 ### API Server
@@ -180,8 +217,11 @@ crontab -e
 ```
 
 ```cron
-# 每日信號：20:30 CST（台灣收盤後）
-30 12 * * 1-5  cd /path/to/stock_investment && make run DATE=$(date +\%F) TICKERS="2330 2454 2317" >> logs/signal.log 2>&1
+# 每日信號：20:30 CST（台灣收盤後，日期自動判斷）
+30 12 * * 1-5  cd /path/to/stock_investment && make run TICKERS="2330 2454 2317" >> logs/signal.log 2>&1
+
+# 批量掃描（非互動，指定產業代號）
+30 12 * * 1-5  cd /path/to/stock_investment && .venv/bin/python scripts/batch_scan.py --sectors 1 2 --save-csv >> logs/scan.log 2>&1
 ```
 
 ---
@@ -247,7 +287,7 @@ python3 scripts/run_bayesian_update.py
 | # | 條件 | 備註 |
 |---|------|------|
 | 1 | 收盤 > 5日平均 VWAP | |
-| 2 | 今日量 > 20日均量 × 1.3 | |
+| 2 | 今日量 > 20日均量 × 1.2 | |
 | 3 | 收盤 ≥ 20日高點 × 0.99 | 20日高點為 0 時不計入 |
 | 4 | 個股 5日報酬 > TAIEX 5日報酬 | TAIEX 無資料時不計入 |
 
@@ -336,6 +376,7 @@ python3 scripts/run_bayesian_update.py
 | Phase 4.5 | ✅ 完成 | Makefile 本地開發環境 + DB integration 修復 + Gemini 2.5 Flash |
 | Phase 4.6 | ✅ 完成 | v2 引擎：Gate 層 + 三柱重構 + 風險修正 + TAIEX regime 門檻 + migration 007 |
 | Phase 4.7 | ✅ 完成 | `make scan` 路徑修正 + T86 週末跳過 + 動態 watchlist（728 檔，每日自動更新）|
+| Phase 4.8 | ✅ 完成 | 互動式產業選單（`--sectors` 數字代號）+ 全市場 industry_map cache + 日期自動判斷（17:00 切換）+ T86 rate-limit retry |
 | Phase 5 | ⏳ 規劃中 | Stripe 真實付款整合 + 社群信譽評分 + 台灣 Pay |
 
 ---
@@ -415,7 +456,7 @@ stock_investment/
 │       ├── schemas.py              # API request/response models
 │       └── auth.py                 # API key 驗證（DB + master key）
 ├── data/
-│   └── watchlist_cache/            # 動態 watchlist 每日 cache（watchlist_YYYY-MM-DD.json）
+│   └── watchlist_cache/            # 全市場 ticker→industry map 每日 cache（industry_map_YYYY-MM-DD.json）
 ├── frontend/
 │   └── index.html                  # Phase 3b Landing page
 ├── scripts/

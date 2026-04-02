@@ -1,13 +1,19 @@
 """Batch scanner — runs StrategistAgent on multiple tickers and ranks by confidence.
 
 Usage:
-    python scripts/batch_scan.py
+    python scripts/batch_scan.py                                    # 互動式選擇產業
+    python scripts/batch_scan.py --sectors 1 4                      # 非互動：用產業代號
     python scripts/batch_scan.py --date 2026-03-25
     python scripts/batch_scan.py --tickers 2330 2454 2317 --date 2026-03-25
     python scripts/batch_scan.py --min-confidence 40
     python scripts/batch_scan.py --top 10 --date 2026-03-25
-    python scripts/batch_scan.py --save-csv              # 存到 data/scans/
+    python scripts/batch_scan.py --no-llm                           # 純 deterministic scoring
+    python scripts/batch_scan.py --llm gemini --llm-top 5           # 非互動：Gemini，只對前5名
+    python scripts/batch_scan.py --save-csv                         # 存到 data/scans/
     python scripts/batch_scan.py --save-csv --csv-path results.csv
+
+Interactive (make scan):
+    產業選單 → LLM 選單（provider + 前幾名）→ 自動兩階段執行
 """
 from __future__ import annotations
 
@@ -46,9 +52,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
-# 目標產業別（對應 TWSE/OTC ISIN 頁面的「產業別」欄位）
+# 預設產業別（互動模式的 Enter 預設值）
 # -------------------------------------------------------------------
-_TARGET_INDUSTRIES = {
+_DEFAULT_SECTOR_NAMES = {
     "半導體業",
     "光電業",
     "電腦及週邊設備業",
@@ -63,9 +69,15 @@ _ISIN_URLS = {
 
 _CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "watchlist_cache"
 
+_FALLBACK_TICKERS = [
+    "2330", "2454", "2303", "2379", "3711", "2408", "2344",
+    "2317", "2382", "2356", "2324", "6669", "3231", "2357", "2353", "2308",
+    "2409", "3481",
+]
 
-def _fetch_isin_tickers(url: str) -> list[str]:
-    """Parse TWSE/OTC ISIN page and return tickers in target industries."""
+
+def _fetch_isin_tickers(url: str) -> dict[str, str]:
+    """Parse TWSE/OTC ISIN page; return {ticker: industry} for ALL valid stocks."""
     import requests
     resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20, verify=False)
     resp.raise_for_status()
@@ -73,61 +85,122 @@ def _fetch_isin_tickers(url: str) -> list[str]:
     cells = re.findall(r"<td[^>]*>(.*?)</td>", html, re.DOTALL)
     cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
 
-    tickers: list[str] = []
+    mapping: dict[str, str] = {}
     for i in range(len(cells) - 6):
         industry = cells[i + 5]
         code_name = cells[i + 1]
-        if industry in _TARGET_INDUSTRIES and re.match(r"^\d{4}", code_name):
+        if industry and re.match(r"^\d{4}", code_name):
             code = code_name[:4]
-            # Skip preferred shares, warrants, etc. (usually have * or extra chars)
             name = code_name[5:].strip()
             if "*" not in name and "DR" not in name:
-                tickers.append(code)
-    return tickers
+                mapping[code] = industry
+    return mapping
 
 
-def _build_watchlist() -> list[str]:
-    """Fetch all 上市+上櫃 tickers in target industries, cached daily.
+def _build_industry_map() -> dict[str, str]:
+    """Load or fetch full ticker→industry map (ALL sectors), cached daily.
 
-    Cache file: data/watchlist_cache/watchlist_YYYY-MM-DD.json
-    Falls back to a minimal hardcoded list if fetch fails.
+    Cache file: data/watchlist_cache/industry_map_YYYY-MM-DD.json
+    Returns empty dict if fetch fails (caller handles fallback).
     """
+    from collections import Counter
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file = _CACHE_DIR / f"watchlist_{date.today()}.json"
+    cache_file = _CACHE_DIR / f"industry_map_{date.today()}.json"
 
     if cache_file.exists():
         try:
-            tickers = json.loads(cache_file.read_text())
-            if tickers:
-                return tickers
+            data = json.loads(cache_file.read_text())
+            if data:
+                return data
         except Exception:
             pass
 
-    print("正在從 TWSE/OTC 抓取產業清單（半導體/光電/電子）...")
-    all_tickers: list[str] = []
+    print("正在從 TWSE/OTC 抓取完整產業清單...")
+    all_map: dict[str, str] = {}
     for market, url in _ISIN_URLS.items():
         try:
-            tickers = _fetch_isin_tickers(url)
-            print(f"  {market.upper()}: {len(tickers)} 檔")
-            all_tickers.extend(tickers)
+            m = _fetch_isin_tickers(url)
+            print(f"  {market.upper()}: {len(m)} 檔")
+            all_map.update(m)
         except Exception as e:
-            logger.warning("Failed to fetch %s watchlist: %s", market, e)
+            logger.warning("Failed to fetch %s: %s", market, e)
 
-    # Deduplicate (some codes appear in both lists) and sort
-    all_tickers = sorted(set(all_tickers))
+    if all_map:
+        counts = Counter(all_map.values())
+        total_sectors = len(counts)
+        cache_file.write_text(json.dumps(all_map, ensure_ascii=False))
+        print(f"  合計: {len(all_map)} 檔，{total_sectors} 個產業（已快取至 {cache_file.name}）\n")
+        return all_map
 
-    if all_tickers:
-        cache_file.write_text(json.dumps(all_tickers))
-        print(f"  合計: {len(all_tickers)} 檔（已快取至 {cache_file.name}）\n")
-        return all_tickers
-
-    # Fallback: core liquid names if fetch fails
     logger.warning("TWSE/OTC fetch failed; using fallback watchlist")
-    return [
-        "2330", "2454", "2303", "2379", "3711", "2408", "2344",
-        "2317", "2382", "2356", "2324", "6669", "3231", "2357", "2353", "2308",
-        "2409", "3481",
+    return {}
+
+
+def _sector_menu(industry_map: dict[str, str]) -> list[tuple[int, str, int]]:
+    """Print numbered sector table. Returns [(idx, industry_name, count), ...]."""
+    from collections import Counter
+    counts = Counter(industry_map.values())
+    rows = [(i, ind, counts[ind]) for i, ind in enumerate(sorted(counts.keys()), start=1)]
+    print("\n可用產業別：")
+    print(f"  {'#':>3}  {'產業別':<18}  {'檔數':>4}")
+    print("  " + "-" * 30)
+    for idx, ind, cnt in rows:
+        print(f"  {idx:>3}  {ind:<18}  {cnt:>4}")
+    return rows
+
+
+def _select_sectors(
+    rows: list[tuple[int, str, int]],
+    default_names: set[str],
+) -> set[str]:
+    """Prompt user to pick sectors by number. Enter → use defaults."""
+    default_indices = " ".join(str(i) for i, name, _ in rows if name in default_names)
+    prompt = f"\n請輸入產業代號（空白分隔），直接 Enter 使用預設 [{default_indices}]：> "
+    raw = input(prompt).strip()
+    if not raw:
+        return default_names
+    idx_map = {i: name for i, name, _ in rows}
+    selected: set[str] = set()
+    for token in raw.split():
+        try:
+            selected.add(idx_map[int(token)])
+        except (ValueError, KeyError):
+            print(f"  忽略無效代號: {token}")
+    return selected or default_names
+
+
+def _llm_menu() -> tuple:
+    """互動式選擇 LLM provider 與前幾名篩選。回傳 (llm_provider, llm_top)。"""
+    from taiwan_stock_agent.domain.llm_provider import create_llm_provider
+
+    _PROVIDERS = [
+        ("auto",   "自動偵測（依 API key）"),
+        ("gemini", "Google Gemini"),
+        ("claude", "Anthropic Claude"),
+        ("openai", "OpenAI"),
+        ("none",   "不使用 LLM（純 deterministic）"),
     ]
+
+    print("\nLLM 引擎：")
+    for i, (_, label) in enumerate(_PROVIDERS, 1):
+        print(f"  {i}  {label}")
+
+    raw = input("\n請輸入代號，直接 Enter 使用 [1 自動偵測]：> ").strip()
+    choice = int(raw) if raw.isdigit() and 1 <= int(raw) <= len(_PROVIDERS) else 1
+    provider_key, _ = _PROVIDERS[choice - 1]
+
+    if provider_key == "none":
+        print("  → 純 deterministic 模式（不呼叫 LLM）")
+        return None, None
+
+    llm_provider = create_llm_provider(None if provider_key == "auto" else provider_key)
+    if llm_provider is None:
+        print("  ⚠ 找不到對應 API key，LLM 停用")
+        return None, None
+
+    print(f"  → {llm_provider.name}（前幾名送 LLM 將在 Phase 1 完成後詢問）\n")
+
+    return llm_provider, None
 
 
 class _EmptyLabelRepo:
@@ -137,30 +210,38 @@ class _EmptyLabelRepo:
 
 
 def _default_date() -> date:
-    candidate = date.today() - timedelta(days=1)
+    from datetime import datetime
+    now = datetime.now()
+    # 17:00 前用前一交易日；之後用今天（收盤資料已回傳）
+    candidate = date.today() if now.hour >= 17 else date.today() - timedelta(days=1)
     while candidate.weekday() >= 5:
         candidate -= timedelta(days=1)
     return candidate
 
 
-def _make_agent() -> StrategistAgent:
+def _make_agent(llm_provider=None, no_llm: bool = False) -> StrategistAgent:
     """Create a thread-local agent with its own FinMind + TWSE clients.
 
     Each worker thread gets independent HTTP sessions and Parquet cache file
     handles, avoiding lock contention and race conditions on shared state.
+    no_llm=True forces LLM off even if ANTHROPIC_API_KEY is in env (Phase 1 use).
     """
-    return StrategistAgent(
+    agent = StrategistAgent(
         FinMindClient(),
         _EmptyLabelRepo(),
         chip_proxy_fetcher=ChipProxyFetcher(),
+        llm_provider=llm_provider,
     )
+    if no_llm:
+        agent._llm_provider = None  # override auto-detection in StrategistAgent.__init__
+    return agent
 
 
-def _scan_one(ticker: str, analysis_date: date) -> dict:
+def _scan_one(ticker: str, analysis_date: date, llm_provider=None, no_llm: bool = False) -> dict:
     """Run pipeline for one ticker; return result dict."""
     t0 = time.time()
     try:
-        signal = _make_agent().run(ticker, analysis_date)
+        signal = _make_agent(llm_provider, no_llm=no_llm).run(ticker, analysis_date)
         elapsed = time.time() - t0
         return {
             "ticker": ticker,
@@ -282,7 +363,35 @@ def _print_table(results: list[dict], top: int, min_confidence: int) -> None:
         print(f"\n  略過 {len(halted)} 檔 (HALT/ERROR):", ", ".join(r["ticker"] for r in halted))
 
     print(f"{'=' * 72}")
-    print(f"  掃描完成: {len(results)} 檔，有效訊號 {len(valid)} 檔\n")
+    llm_count = sum(1 for r in results if r.get("momentum") or r.get("chip") or r.get("risk"))
+    llm_note = f"，LLM 補充 {llm_count} 檔" if llm_count else ""
+    print(f"  掃描完成: {len(results)} 檔，有效訊號 {len(valid)} 檔{llm_note}\n")
+
+
+def _run_phase(
+    tickers: list[str],
+    analysis_date: date,
+    workers: int,
+    llm_provider=None,
+    no_llm: bool = False,
+) -> list[dict]:
+    """執行一批 ticker 的掃描，回傳 results list（順序不保證）。
+    no_llm=True 強制關閉 LLM（Phase 1 deterministc 用，避免 StrategistAgent 自動偵測 API key）。
+    """
+    results: list[dict] = []
+    total = len(tickers)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_scan_one, ticker, analysis_date, llm_provider, no_llm): ticker
+            for ticker in tickers
+        }
+        for i, future in enumerate(as_completed(futures), 1):
+            ticker = futures[future]
+            result = future.result()
+            results.append(result)
+            status = "HALT" if result["halt"] else f"conf={result['confidence']}"
+            print(f"  [{i:>2}/{total}] {ticker:<8} {status}")
+    return results
 
 
 def run_batch(
@@ -292,26 +401,48 @@ def run_batch(
     min_confidence: int,
     workers: int,
     csv_path: Path | None = None,
+    llm_provider=None,
+    llm_top: int | None = None,
 ) -> None:
+    llm_label = getattr(llm_provider, "name", None) or "（無 LLM）"
     print(f"\n掃描清單: {len(tickers)} 檔")
     print(f"分析日期: {analysis_date}")
+    print(f"LLM 引擎: {llm_label}")
     print(f"並行執行: {workers} 個 worker（每個 worker 獨立 HTTP session）\n")
 
-    results: list[dict] = []
+    if llm_provider is None:
+        # 純 deterministic：強制關閉 LLM（避免 StrategistAgent 自動偵測 API key）
+        results = _run_phase(tickers, analysis_date, workers, no_llm=True)
+    else:
+        # 永遠兩階段：Phase 1 全量 deterministic → Phase 2 top N with LLM
+        print(f"[Phase 1] deterministic scan：{len(tickers)} 檔")
+        results = _run_phase(tickers, analysis_date, workers, no_llm=True)
 
-    # Each worker creates its own StrategistAgent+FinMindClient to avoid
-    # shared-state race conditions on requests.Session and Parquet cache handles.
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(_scan_one, ticker, analysis_date): ticker
-            for ticker in tickers
-        }
-        for i, future in enumerate(as_completed(futures), 1):
-            ticker = futures[future]
-            result = future.result()
-            results.append(result)
-            status = "HALT" if result["halt"] else f"conf={result['confidence']}"
-            print(f"  [{i:>2}/{len(tickers)}] {ticker:<8} {status}")
+        # 排序有效結果
+        eligible = sorted(
+            [r for r in results if not r["halt"] and r["error"] is None],
+            key=lambda r: r["confidence"], reverse=True,
+        )
+        print(f"\n[Phase 1 完成] {len(results)} 檔（有效 {len(eligible)} 檔）")
+        if eligible:
+            top5 = ", ".join(f"{r['ticker']}({r['confidence']})" for r in eligible[:5])
+            print(f"  前幾名: {top5}{'...' if len(eligible) > 5 else ''}")
+
+        # 決定 Phase 2 範圍：CLI 指定優先，否則互動詢問
+        if llm_top is None:
+            raw = input(f"\n送前幾名給 LLM [{llm_label}]？（Enter = 不送）：> ").strip()
+            llm_top = int(raw) if raw.isdigit() and int(raw) > 0 else 0
+
+        llm_tickers = [r["ticker"] for r in eligible[:llm_top]] if llm_top else []
+
+        if not llm_tickers:
+            print("  → 跳過 LLM\n")
+        else:
+            print(f"\n[Phase 2] 送前 {llm_top} 名給 LLM（{llm_label}）：{', '.join(llm_tickers)}")
+            p2_workers = min(3, len(llm_tickers))
+            phase2 = _run_phase(llm_tickers, analysis_date, p2_workers, llm_provider=llm_provider)
+            p2_valid = {r["ticker"]: r for r in phase2 if r.get("error") is None}
+            results = [p2_valid.get(r["ticker"], r) for r in results]
 
     _print_table(results, top, min_confidence)
 
@@ -321,7 +452,14 @@ def run_batch(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="批量掃描台股，依信心分數排序")
-    parser.add_argument("--tickers", nargs="+", help="自訂標的清單（預設: 內建 watchlist）")
+    parser.add_argument("--tickers", nargs="+", help="自訂標的清單（跳過產業選單）")
+    parser.add_argument(
+        "--sectors",
+        nargs="+",
+        type=int,
+        metavar="N",
+        help="產業代號（數字，非互動模式；例: --sectors 1 4）",
+    )
     parser.add_argument(
         "--date",
         type=lambda s: date.fromisoformat(s),
@@ -338,6 +476,24 @@ def main() -> None:
         default=None,
         help="CSV 路徑（預設: data/scans/scan_YYYY-MM-DD.csv）",
     )
+    parser.add_argument(
+        "--llm",
+        default=None,
+        metavar="PROVIDER",
+        help="LLM 引擎（gemini/claude/openai）；未指定時進入互動選單",
+    )
+    parser.add_argument(
+        "--llm-top",
+        type=int,
+        default=None,
+        metavar="N",
+        help="僅對前 N 名呼叫 LLM（非互動模式用）",
+    )
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="關閉 LLM reasoning，只跑 deterministic scoring",
+    )
     args = parser.parse_args()
 
     csv_path: Path | None = None
@@ -348,8 +504,44 @@ def main() -> None:
             scan_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
             csv_path = scan_dir / f"scan_{args.date}.csv"
 
-    tickers = args.tickers or _build_watchlist()
-    run_batch(tickers, args.date, args.top, args.min_confidence, args.workers, csv_path)
+    if args.tickers:
+        tickers = args.tickers
+    else:
+        industry_map = _build_industry_map()
+        if not industry_map:
+            logger.warning("No industry map available; using fallback ticker list")
+            tickers = _FALLBACK_TICKERS
+        else:
+            rows = _sector_menu(industry_map)
+            idx_map = {i: name for i, name, _ in rows}
+
+            if args.sectors:
+                # Non-interactive: resolve numeric codes directly
+                chosen = {idx_map[n] for n in args.sectors if n in idx_map}
+                if not chosen:
+                    print("  指定代號無效，使用預設產業")
+                    chosen = _DEFAULT_SECTOR_NAMES
+            else:
+                chosen = _select_sectors(rows, _DEFAULT_SECTOR_NAMES)
+
+            tickers = sorted(t for t, ind in industry_map.items() if ind in chosen)
+            from collections import Counter
+            counts = Counter(ind for t, ind in industry_map.items() if ind in chosen)
+            summary = " + ".join(f"{ind}({counts[ind]})" for ind in sorted(chosen))
+            print(f"\n掃描範圍: {summary} = {len(tickers)} 檔")
+
+    from taiwan_stock_agent.domain.llm_provider import create_llm_provider
+    if args.no_llm:
+        llm_provider, llm_top = None, None
+    elif args.llm is not None or args.llm_top is not None:
+        # 非互動模式：CLI 明確指定
+        llm_provider = create_llm_provider(args.llm)
+        llm_top = args.llm_top
+    else:
+        # 互動模式：進入選單
+        llm_provider, llm_top = _llm_menu()
+
+    run_batch(tickers, args.date, args.top, args.min_confidence, args.workers, csv_path, llm_provider, llm_top)
 
 
 if __name__ == "__main__":
