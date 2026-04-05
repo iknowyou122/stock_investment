@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze backtest
+.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze backtest daily settle
 
 # ── 分析股票 ─────────────────────────────────────────────────────────────────
 # 用法: make run DATE=2026-03-27 TICKERS="2330 2317 2454"
@@ -99,3 +99,18 @@ backtest:
 		--date-from $(DATE_FROM) \
 		--date-to $(DATE_TO) \
 		$(if $(BACKTEST_TICKERS),--tickers $(BACKTEST_TICKERS))
+
+# ── 每日真實訊號 ──────────────────────────────────────────────────────────────
+daily:
+ifeq ($(DATE),$(_TODAY))
+	$(PYTHON) scripts/daily_runner.py daily
+else
+	$(PYTHON) scripts/daily_runner.py daily --date $(DATE)
+endif
+
+settle:
+ifeq ($(DATE),$(_TODAY))
+	$(PYTHON) scripts/daily_runner.py settle
+else
+	$(PYTHON) scripts/daily_runner.py settle --date $(DATE)
+endif
