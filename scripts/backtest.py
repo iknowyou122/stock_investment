@@ -52,6 +52,8 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]]) -> None:
     """
     finmind = FinMindClient()
 
+    # Reuse single connection across all updates for this batch.
+    # get_connection() auto-commits on clean exit.
     with get_connection() as conn:
         for signal_id, ticker, signal_date in signal_ids:
             end = signal_date + timedelta(days=14)
@@ -74,7 +76,9 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]]) -> None:
 
             def get_offset(n: int) -> float | None:
                 idx = signal_idx + n
-                return closes[trading_days[idx]] if idx < len(trading_days) else None
+                if 0 <= idx < len(trading_days):
+                    return closes[trading_days[idx]]
+                return None
 
             p1 = get_offset(1)
             p3 = get_offset(3)
