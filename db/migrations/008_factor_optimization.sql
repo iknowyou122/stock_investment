@@ -5,10 +5,18 @@ ALTER TABLE signal_outcomes
     ADD COLUMN IF NOT EXISTS score_breakdown JSONB,
     ADD COLUMN IF NOT EXISTS source VARCHAR(10) NOT NULL DEFAULT 'live';
 
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'source_valid' AND conrelid = 'signal_outcomes'::regclass
+  ) THEN
+    ALTER TABLE signal_outcomes ADD CONSTRAINT source_valid CHECK (source IN ('live', 'backtest', 'replay', 'sandbox'));
+  END IF;
+END $$;
+
 -- Factor lifecycle registry
 CREATE TABLE IF NOT EXISTS factor_registry (
     name               VARCHAR(50) PRIMARY KEY,
-    status             VARCHAR(20) NOT NULL DEFAULT 'experimental',
+    status             VARCHAR(20) NOT NULL DEFAULT 'experimental' CHECK (status IN ('experimental', 'active', 'deprecated')),
     -- 'experimental' | 'active' | 'deprecated'
     lift_30d           FLOAT,
     lift_90d           FLOAT,
@@ -17,13 +25,13 @@ CREATE TABLE IF NOT EXISTS factor_registry (
     notes              TEXT
 );
 
--- Seed known active factors
+-- Seed known active factors (names must match bd.flags.append() strings in the engine)
 INSERT INTO factor_registry (name, status, added_date)
 VALUES
-    ('RSI_MOM',           'active', CURRENT_DATE),
     ('BREAKOUT_WITH_VOL', 'active', CURRENT_DATE),
-    ('GATE_VOL_MET',      'active', CURRENT_DATE),
-    ('GATE_TREND_MET',    'active', CURRENT_DATE)
+    ('NO_SETUP',          'active', CURRENT_DATE),
+    ('NO_CHIP_DATA',      'active', CURRENT_DATE),
+    ('LONG_UPPER_SHADOW', 'active', CURRENT_DATE)
 ON CONFLICT (name) DO NOTHING;
 
 -- Engine parameter change history
