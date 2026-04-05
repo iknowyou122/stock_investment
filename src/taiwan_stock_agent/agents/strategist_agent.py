@@ -8,6 +8,7 @@ This agent:
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -167,7 +168,6 @@ class StrategistAgent:
             )
 
         # --- Build score_breakdown for factor replay and DB storage ---
-        import dataclasses
         pts_dict = {
             k: v for k, v in dataclasses.asdict(breakdown).items()
             if k != "flags"
@@ -178,16 +178,7 @@ class StrategistAgent:
             round(today_ohlcv.volume / avg_vol, 4) if avg_vol > 0 else None
         )
         # Determine taiex_slope label for threshold replay
-        taiex_slope = "neutral"
-        if taiex_history and len(taiex_history) >= 25:
-            sorted_taiex = sorted(taiex_history, key=lambda x: x.trade_date)
-            ma20_today = sum(d.close for d in sorted_taiex[-20:]) / 20
-            ma20_5ago = sum(d.close for d in sorted_taiex[-25:-5]) / 20
-            slope_pct = (ma20_today - ma20_5ago) / ma20_5ago * 100 if ma20_5ago else 0
-            if slope_pct > 0:
-                taiex_slope = "bull"
-            elif slope_pct < -1.0:
-                taiex_slope = "bear"
+        taiex_slope = engine._compute_taiex_regime(taiex_history) if taiex_history else "neutral"
 
         breakdown_dict = {
             "raw": {
