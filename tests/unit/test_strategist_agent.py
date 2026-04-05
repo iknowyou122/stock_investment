@@ -233,20 +233,52 @@ def _make_ohlcv_list(
 
 
 class TestStrategistVolumeProfile:
-    def test_build_volume_profile_uses_20d_high(self):
-        """poc_proxy equals max(high) of the last 20 entries (not all 25)."""
+    def test_build_volume_profile_poc_is_max_volume_close(self):
+        """poc_proxy = close of highest-volume day in last 20 sessions (not the 20d high)."""
         history = _make_ohlcv_list(25, base_high=100.0)
-        # The 20-day window is entries [5..24]; max high is at index 24
+        # Make one entry in the last-20 window have the highest volume
+        peak_idx = 10  # within last 20 (window is indices 5..24)
+        peak = history[peak_idx]
+        history[peak_idx] = DailyOHLCV(
+            ticker=peak.ticker,
+            trade_date=peak.trade_date,
+            open=peak.open,
+            high=peak.high,
+            low=peak.low,
+            close=peak.close,
+            volume=999_999,  # highest volume
+        )
+
         expected_high = max(e.high for e in history[-20:])
-        # All-time max would include indices 0..4 as well, but we only want last 20
+        expected_poc = history[peak_idx].close  # highest-volume day's close
         period_end = history[-1].trade_date
 
         vp = StrategistAgent._build_volume_profile("9999", period_end, history)
 
-        assert vp.poc_proxy == expected_high
+        assert vp.poc_proxy == expected_poc
         assert vp.twenty_day_high == expected_high
         assert vp.twenty_day_sessions == 20
         assert vp.data_quality_flags == []
+
+    def test_build_volume_profile_poc_window_is_last_20_not_all(self):
+        """poc_proxy uses only the last 20 sessions, not the full history."""
+        history = _make_ohlcv_list(25, base_high=100.0)
+        # Make the highest-volume day be in the FIRST 5 entries (outside the 20-day window)
+        history[2] = DailyOHLCV(
+            ticker=history[2].ticker,
+            trade_date=history[2].trade_date,
+            open=history[2].open,
+            high=history[2].high,
+            low=history[2].low,
+            close=history[2].close,
+            volume=999_999,
+        )
+        period_end = history[-1].trade_date
+
+        vp = StrategistAgent._build_volume_profile("9999", period_end, history)
+
+        # poc_proxy should NOT use the high-volume entry at index 2 (outside last 20)
+        assert vp.poc_proxy != history[2].close
 
     def test_build_volume_profile_partial_flag_when_fewer_than_20(self):
         """Only 10 entries → PARTIAL_PROFILE flag in data_quality_flags."""
@@ -513,3 +545,22 @@ class TestApplyInstitutionalProxy:
 
         assert result.margin_balance_change == -5000
         assert result.foreign_net_buy == 1
+
+
+# ===========================================================================
+# TestScoreBreakdown
+# ===========================================================================
+
+def test_run_populates_score_breakdown():
+    """StrategistAgent.run() must populate score_breakdown with raw + pts + flags."""
+    agent, _ = _make_agent()
+    signal = agent.run("9999", _ANALYSIS_DATE)
+    assert signal.score_breakdown is not None
+    assert "raw" in signal.score_breakdown
+    assert "pts" in signal.score_breakdown
+    assert "flags" in signal.score_breakdown
+    assert "taiex_slope" in signal.score_breakdown
+    # raw must contain the keys needed by scoring_replay
+    raw = signal.score_breakdown["raw"]
+    assert "rsi_14" in raw
+    assert "volume_vs_20ma" in raw

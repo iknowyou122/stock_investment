@@ -128,6 +128,16 @@ class StrategistAgent:
         if not taiex_df.empty:
             taiex_history = self._df_to_ohlcv_list(taiex_df, "TAIEX")
 
+        # --- Enrich TWSEChipProxy with avg_20d_volume from OHLCV ---
+        # avg_20d_volume is required for ratio-based institution strength scoring
+        # (foreign/trust/dealer net_buy / avg_vol → tiered 0/4/8/12 pts).
+        # Without it, scoring falls back to binary mode (bought = 4 pts, regardless of size).
+        if twse_proxy is not None and history:
+            recent_20_vols = sorted(history, key=lambda x: x.trade_date)[-20:]
+            if recent_20_vols:
+                avg_vol = int(sum(d.volume for d in recent_20_vols) / len(recent_20_vols))
+                twse_proxy = twse_proxy.model_copy(update={"avg_20d_volume": avg_vol})
+
         # --- OHLCV institutional proxy (Option B: fills Factor 3 when T86 is blocked) ---
         if twse_proxy is not None:
             twse_proxy = self._apply_institutional_proxy(twse_proxy, history, taiex_history)
@@ -156,6 +166,41 @@ class StrategistAgent:
                 ticker,
             )
 
+        # --- Build score_breakdown for factor replay and DB storage ---
+        import dataclasses
+        pts_dict = {
+            k: v for k, v in dataclasses.asdict(breakdown).items()
+            if k != "flags"
+        }
+        # Compute volume_vs_20ma for replay (breakout_vol_ratio grid search)
+        avg_vol = twse_proxy.avg_20d_volume if twse_proxy else 0
+        volume_vs_20ma = (
+            round(today_ohlcv.volume / avg_vol, 4) if avg_vol > 0 else None
+        )
+        # Determine taiex_slope label for threshold replay
+        taiex_slope = "neutral"
+        if taiex_history and len(taiex_history) >= 25:
+            sorted_taiex = sorted(taiex_history, key=lambda x: x.trade_date)
+            ma20_today = sum(d.close for d in sorted_taiex[-20:]) / 20
+            ma20_5ago = sum(d.close for d in sorted_taiex[-25:-5]) / 20
+            slope_pct = (ma20_today - ma20_5ago) / ma20_5ago * 100 if ma20_5ago else 0
+            if slope_pct > 0:
+                taiex_slope = "bull"
+            elif slope_pct < -1.0:
+                taiex_slope = "bear"
+
+        breakdown_dict = {
+            "raw": {
+                "rsi_14": hints.rsi_14,
+                "volume_vs_20ma": volume_vs_20ma,
+                "ma20_slope_pct": hints.ma20_slope_pct,
+            },
+            "pts": pts_dict,
+            "flags": list(breakdown.flags),
+            "taiex_slope": taiex_slope,
+            "scoring_version": breakdown.scoring_version,
+        }
+        signal = signal.model_copy(update={"score_breakdown": breakdown_dict})
         return signal
 
     # ------------------------------------------------------------------
@@ -185,12 +230,17 @@ class StrategistAgent:
     ) -> VolumeProfile:
         """Build Phase 1-3 VolumeProfile proxy from 20-day OHLCV.
 
-        poc_proxy = 20-day high (real POC requires intraday tick data, Phase 4+).
-        target_price = poc_proxy * 1.05 (5% above 20-day high).
+        poc_proxy = highest-volume day's close in last 20 sessions.
+        This is a better approximation of where most volume traded (real POC concept)
+        compared to using the 20-day high. Real POC requires intraday tick data (Phase 4+).
+        target_price = poc_proxy * 1.05.
         """
         sorted_hist = sorted(history, key=lambda x: x.trade_date)
         recent_20 = sorted_hist[-20:]
         recent_60 = sorted_hist[-60:]
+        recent_120 = sorted_hist[-120:]
+        recent_252 = sorted_hist[-252:]
+
         if not recent_20:
             return VolumeProfile(
                 ticker=ticker,
@@ -205,6 +255,16 @@ class StrategistAgent:
 
         twenty_day_high = max(d.high for d in recent_20)
         sixty_day_high = max(d.high for d in recent_60) if recent_60 else 0.0
+        one_twenty_day_high = max(d.high for d in recent_120) if recent_120 else 0.0
+        fiftytwo_week_high = max(d.high for d in recent_252) if recent_252 else 0.0
+
+        # POC proxy: close price of the highest-volume day in last 20 sessions.
+        # Rationale: the day with the most volume is where the most conviction existed;
+        # that price level tends to act as support/resistance.
+        # Falls back to twenty_day_high if all volumes are 0 (data quality issue).
+        max_vol_day = max(recent_20, key=lambda d: d.volume)
+        poc_proxy = max_vol_day.close if max_vol_day.volume > 0 else twenty_day_high
+
         flags = []
         if len(recent_20) < 20:
             flags.append(f"PARTIAL_PROFILE: only {len(recent_20)} sessions")
@@ -212,11 +272,15 @@ class StrategistAgent:
         return VolumeProfile(
             ticker=ticker,
             period_end=period_end,
-            poc_proxy=twenty_day_high,
+            poc_proxy=poc_proxy,
             twenty_day_high=twenty_day_high,
             twenty_day_sessions=len(recent_20),
             sixty_day_high=sixty_day_high,
             sixty_day_sessions=len(recent_60),
+            one_twenty_day_high=one_twenty_day_high,
+            one_twenty_day_sessions=len(recent_120),
+            fiftytwo_week_high=fiftytwo_week_high,
+            fiftytwo_week_sessions=len(recent_252),
             data_quality_flags=flags,
         )
 
@@ -308,6 +372,7 @@ class StrategistAgent:
   - 收盤強度: {breakdown.close_strength_pts} 分
   - 趨勢延續: {breakdown.trend_continuity_pts} 分
   - 量能遞增: {breakdown.volume_escalation_pts} 分
+  - RSI動能區間: {breakdown.rsi_momentum_pts} 分
 
 籌碼指標 (Pillar 2):
   - 付費版 - 買盤廣度: {breakdown.breadth_pts} 分
@@ -320,6 +385,7 @@ class StrategistAgent:
 空間指標 (Pillar 3):
   - 突破20日高點: {breakdown.breakout_20d_pts} 分
   - 突破60日高點: {breakdown.breakout_60d_pts} 分
+  - 突破量能確認: {breakdown.breakout_volume_pts} 分
   - MA多頭排列: {breakdown.ma_alignment_pts} 分
   - MA20斜率: {breakdown.ma20_slope_pts} 分
   - 相對強弱: {breakdown.relative_strength_pts} 分

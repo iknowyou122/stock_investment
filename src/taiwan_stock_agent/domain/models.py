@@ -89,12 +89,14 @@ class TWSEChipProxy(BaseModel):
 
 class VolumeProfile(BaseModel):
     """
-    Phase 1–3 proxy: POC = 20-day high (real VolumeProfile requires intraday data, Phase 4+).
-    Target price = poc_proxy * 1.05 (5% above 20-day high).
+    Phase 1–3 proxy: POC = highest-volume day's close in last 20 sessions.
+    This approximates where the most volume traded (real POC concept) better than
+    using the 20-day high. Real VolumeProfile requires intraday tick data (Phase 4+).
+    Target price = poc_proxy * 1.05 (5% above POC proxy).
     """
     ticker: str
     period_end: date
-    poc_proxy: float          # 20-day high; used as resistance proxy
+    poc_proxy: float          # highest-volume day's close in last 20 sessions
     twenty_day_high: float
     twenty_day_sessions: int  # actual sessions counted (may be <20 near listing or holidays)
     sixty_day_high: float = 0.0
@@ -130,6 +132,7 @@ class SignalOutput(BaseModel):
     halt_flag: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
     free_tier_mode: bool | None = None   # None=legacy, True=free-tier signals, False=paid-tier
+    score_breakdown: dict | None = None
 
 
 class SectorChipScore(BaseModel):
