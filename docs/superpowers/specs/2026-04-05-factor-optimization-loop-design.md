@@ -211,6 +211,29 @@ CREATE TABLE engine_versions (
 | `make factor-report` | 因子效益分析 + Grid Search + 殘差分析 |
 | `make test-factor FACTOR=<name>` | 測試實驗因子 |
 | `make tune-review` | 互動式 review + 套用調參 |
+| `make optimize` | **一鍵跑完完整優化迴路**（見下方）|
+
+### `make optimize` — 一鍵優化腳本 `scripts/optimize.py`
+
+依序執行以下步驟，中間任一步驟失敗即停止：
+
+```
+Step 1  settle        補填昨日 + 前幾日所有待結算訊號
+Step 2  factor-report 跑因子效益分析 + grid search + 殘差分析
+Step 3  tune-review   顯示建議清單，等待 approve/skip
+```
+
+支援參數：
+```bash
+make optimize                    # 互動式（tune-review 需要你 approve）
+make optimize AUTO_APPROVE=1     # 全自動（適合 cron，lift > 0 的建議全部套用）
+make optimize SKIP_SETTLE=1      # 跳過 settle（已手動跑過）
+make optimize DRY_RUN=1          # 只看報告，不套用任何變更
+```
+
+**AUTO_APPROVE 安全機制：**
+- 單一參數調整幅度超過 20% → 強制停止，需人工確認
+- 任何建議廢棄因子 → 強制停止，需人工確認（廢棄是不可逆操作）
 
 ---
 
@@ -234,3 +257,4 @@ CREATE TABLE engine_versions (
 4. `scripts/factor_report.py`（Lift 分析 → Grid Search → 殘差分析）
 5. Factor Sandbox（`make test-factor`）
 6. `scripts/apply_tuning.py` + `make tune-review`
+7. `scripts/optimize.py` + `make optimize`（整合 step 1–6 的一鍵腳本）
