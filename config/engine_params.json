@@ -1,0 +1,12 @@
+{
+  "_comment": "Tunable parameters for TripleConfirmationEngine. Edited by apply_tuning.py.",
+  "gate_vol_ratio": 1.2,
+  "rsi_momentum_lo": 55,
+  "rsi_momentum_hi": 70,
+  "breakout_vol_ratio": 1.5,
+  "sector_topN_pct": 0.20,
+  "long_threshold_uptrend": 63,
+  "long_threshold_neutral": 68,
+  "long_threshold_downtrend": 73,
+  "watch_min": 45
+}
