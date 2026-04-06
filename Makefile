@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze migrate backtest daily settle factor-report tune-review test-factor optimize
+.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze setup migrate backtest daily settle factor-report tune-review test-factor optimize
 
 # ── 分析股票 ─────────────────────────────────────────────────────────────────
 # 用法: make run DATE=2026-03-27 TICKERS="2330 2317 2454"
@@ -86,6 +86,11 @@ analyze:
 	$(PYTHON) scripts/analyze_outcomes.py \
 		--days $(DAYS) \
 		$(if $(SCORING_VERSION),--scoring-version $(SCORING_VERSION))
+
+# ── 環境初始化（第一次使用）────────────────────────────────────────────────────
+# 自動安裝 PostgreSQL、建立 DB、設定 .env、跑所有 migrations
+setup:
+	$(PYTHON) scripts/setup.py
 
 # ── DB Migrations ────────────────────────────────────────────────────────────
 # 用法: make migrate
