@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze backtest daily settle factor-report tune-review test-factor
+.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze backtest daily settle factor-report tune-review test-factor optimize
 
 # ── 分析股票 ─────────────────────────────────────────────────────────────────
 # 用法: make run DATE=2026-03-27 TICKERS="2330 2317 2454"
@@ -123,11 +123,24 @@ factor-report:
 
 # ── 調參 ──────────────────────────────────────────────────────────────────────
 AUTO_APPROVE ?=
+SKIP_SETTLE ?=
 
 tune-review:
 	$(PYTHON) scripts/apply_tuning.py \
 		$(if $(AUTO_APPROVE),--auto-approve) \
 		$(if $(DRY_RUN),--dry-run)
+
+# ── 一鍵優化迴路 ──────────────────────────────────────────────────────────────
+# 用法: make optimize
+#       make optimize AUTO_APPROVE=1      # 全自動（cron 用）
+#       make optimize DRY_RUN=1           # 只看報告
+#       make optimize SKIP_SETTLE=1       # 跳過補填步驟
+optimize:
+	$(PYTHON) scripts/optimize.py \
+		$(if $(AUTO_APPROVE),--auto-approve) \
+		$(if $(DRY_RUN),--dry-run) \
+		$(if $(SKIP_SETTLE),--skip-settle) \
+		$(if $(FACTOR_DAYS),--days $(FACTOR_DAYS))
 
 # ── 實驗因子測試 ──────────────────────────────────────────────────────────────
 # 用法: make test-factor FACTOR=my_factor_name
