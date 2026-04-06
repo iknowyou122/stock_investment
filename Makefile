@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze backtest daily settle
+.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze backtest daily settle factor-report
 
 # ── 分析股票 ─────────────────────────────────────────────────────────────────
 # 用法: make run DATE=2026-03-27 TICKERS="2330 2317 2454"
@@ -114,3 +114,9 @@ ifeq ($(DATE),$(_TODAY))
 else
 	$(PYTHON) scripts/daily_runner.py settle --date $(DATE)
 endif
+
+# ── 因子分析 ──────────────────────────────────────────────────────────────────
+FACTOR_DAYS ?= 180
+
+factor-report:
+	$(PYTHON) scripts/factor_report.py --days $(FACTOR_DAYS)
