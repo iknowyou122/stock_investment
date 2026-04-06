@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from datetime import date, timedelta
@@ -47,6 +48,8 @@ def run_daily(analysis_date: date, llm: str | None, sectors: str | None) -> None
             return {}
 
     init_pool()
+    if llm:
+        os.environ["LLM_PROVIDER"] = llm
     agent = StrategistAgent(
         finmind=FinMindClient(),
         label_repo=_EmptyLabelRepo(),
