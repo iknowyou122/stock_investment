@@ -109,6 +109,7 @@ def run_settle(settle_date: date) -> None:
                 FROM signal_outcomes
                 WHERE price_5d IS NULL
                   AND halt_flag = FALSE
+                  AND source = 'live'
                   AND signal_date <= %s - INTERVAL '5 days'
                 ORDER BY signal_date DESC
                 LIMIT 200

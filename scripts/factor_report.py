@@ -49,7 +49,7 @@ def _fetch_rows(days: int, scoring_version: str | None) -> list[dict]:
         SELECT signal_id, ticker, signal_date, confidence_score, action,
                outcome_1d, outcome_3d, outcome_5d, score_breakdown, source
         FROM signal_outcomes
-        WHERE signal_date >= CURRENT_DATE - INTERVAL '%s days'
+        WHERE signal_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
           AND halt_flag = FALSE
           AND outcome_1d IS NOT NULL
           AND score_breakdown IS NOT NULL
@@ -128,11 +128,10 @@ def _win_rate_at_threshold(rows: list[dict], params: dict) -> float:
     """Win rate among signals that would be LONG under these params."""
     if not rows:
         return 0.0
-    threshold = params.get("long_threshold_neutral", 68)
     longs = [
         r for r in rows
         if r.get("score_breakdown") and
-        recompute_score(r["score_breakdown"], params)[0] >= threshold
+        recompute_score(r["score_breakdown"], params)[1] == "LONG"
     ]
     if len(longs) < 5:
         return 0.0

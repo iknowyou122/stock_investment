@@ -86,8 +86,8 @@ def recompute_score(breakdown: dict, params: dict) -> tuple[int, str]:
     if vol_ratio is not None:
         gate_vol = params.get("gate_vol_ratio", DEFAULT_PARAMS["gate_vol_ratio"])
         flags = breakdown.get("flags", [])
-        gate_was_passing = any("GATE_PASS" in f or "GATE_MET" in f or "GATE_VOL" in f for f in flags)
-        if gate_was_passing and vol_ratio < gate_vol:
+        gate_vol_passed = any(f == "GATE_PASS:VOL" for f in flags)
+        if gate_vol_passed and vol_ratio < gate_vol:
             return 0, "CAUTION"
 
     score = _sum_pts(pts)
