@@ -39,6 +39,9 @@ def run_test(factor_name: str) -> None:
         sys.exit(1)
 
     spec = importlib.util.spec_from_file_location(factor_name, factor_path)
+    if spec is None:
+        print(f"Cannot load factor module: {factor_path}")
+        sys.exit(1)
     mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
 

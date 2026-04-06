@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from dotenv import load_dotenv
 load_dotenv()
 
-from taiwan_stock_agent.domain.scoring_replay import load_params, DEFAULT_PARAMS
+from taiwan_stock_agent.domain.scoring_replay import load_params
 from taiwan_stock_agent.infrastructure.db import init_pool, get_connection
 
 _PARAMS_PATH = Path(__file__).resolve().parents[1] / "config" / "engine_params.json"
@@ -75,7 +75,7 @@ def _safety_check(old_params: dict, new_params: dict) -> list[str]:
     violations = []
     for k, new_val in new_params.items():
         old_val = old_params.get(k)
-        if old_val and old_val != 0:
+        if old_val is not None and old_val != 0:
             change_pct = abs(new_val - old_val) / abs(old_val)
             if change_pct > _MAX_CHANGE_PCT:
                 violations.append(
@@ -125,12 +125,13 @@ def run_review(auto_approve: bool, dry_run: bool) -> None:
 
     # Safety check for auto_approve
     violations = _safety_check(old_params, best["params"])
-    if violations and auto_approve:
+    if violations:
         print(f"\n⚠ 安全限制觸發（AUTO_APPROVE 不可套用）：")
         for v in violations:
             print(f"  - {v}")
         print("請使用互動模式手動確認。")
-        return
+        if auto_approve:
+            return
 
     if auto_approve and not violations:
         _apply_params(best["params"], old_params, f"auto-tune {report['report_date']}", lift)
