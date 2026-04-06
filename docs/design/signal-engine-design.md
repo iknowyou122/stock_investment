@@ -253,13 +253,27 @@ Presentation Layer:
    - `score < 45 OR critical risk → CAUTION`
    - Gate failed → `CAUTION` + `data_quality_flags=["NO_SETUP"]`
 
-   **Pillar max scores (v2):**
-   | Pillar | Max | Key changes from v1 |
-   |--------|-----|---------------------|
-   | 1 Momentum | 35 pts | Replaced binary 20+20 with graded 8+3+4+6+5+5 |
-   | 2 Chip paid | 40 pts | Added breadth, continuity, foreign broker factors |
-   | 2 Chip free | 40 pts | Ratio-based (needs avg_20d_volume); bidirectional 融資 |
-   | 3 Structure | 35 pts | Added 60d breakout, upside space; RS threshold lowered |
+   **Pillar max scores (v2, updated Phase 4.10):**
+   | Pillar | Max | Key changes from v1 / Phase 4.10 additions |
+   |--------|-----|--------------------------------------------|
+   | 1 Momentum | 39 pts | +RSI(14) 55–70 zone → +4 pts (`rsi_momentum_pts`); +breakout with vol >1.5× avg → +3 pts (`breakout_volume_pts`) |
+   | 2 Chip paid | 40 pts | Added breadth, continuity, foreign broker factors (requires paid FinMind) |
+   | 2 Chip free | 40 pts | Ratio-based; avg_20d_volume bug fixed (was always 0); TPEx T86 fallback for 上櫃 stocks |
+   | 3 Structure | 38 pts | VolumeProfile POC proxy = highest-volume day's close (not 20d high) |
+
+   **Post-processing boosts (applied after all pillar scoring):**
+   - **Sector relative ranking:** top 20% within same industry (≥3 stocks in group) → +5 pts. Applied in `batch_scan.py:_apply_sector_ranks()`.
+   - **Signal persistence:** stock scored ≥50 in yesterday's `--save-csv` output → +5 pts. Applied in `batch_scan.py:_apply_persistence_bonus()`.
+
+   **Free vs paid data factors:**
+   | Factor | Free | Paid FinMind | Notes |
+   |--------|------|--------------|-------|
+   | Pillar 1 (RSI, breakout, MA) | ✅ | — | TWSE/TPEx OHLCV open data |
+   | Pillar 2B 三大法人 | ✅ | — | TWSE T86 + TPEx T86 (上櫃 fallback) |
+   | Pillar 2A 分點籌碼 | ✗ | ✅ | `TaiwanStockBrokerTradingStatement`; `_EmptyLabelRepo` fallback always active on free plan |
+   | Pillar 3 融資融券 | ✅ | — | MI_MARGN open data; SBL (TWT93U) degrades to 0 |
+   | Sector ranking boost | ✅ | — | Uses local industry_map cache |
+   | Persistence bonus | ✅ | — | Requires `--save-csv` on consecutive days |
 
    **scoring_version:** All v2 signals tagged `scoring_version="v2"` in `data_quality_flags` and `signal_outcomes.scoring_version` DB column (migration 007). BayesianLabelUpdater filters by version to prevent v1/v2 stat mixing.
 
@@ -500,6 +514,109 @@ class _ScoreBreakdown:
 2. **`concentration_top15` edge case for thinly traded stocks.** If fewer than 15 branches are active for a ticker, top-15 = all branches and the threshold loses meaning. Suggested: skip concentration check if active_branches < 10; add `active_branch_count` to ChipReport output.
 
 3. **Pre-phase spike data alignment.** FinMind 分點 settlement dates must be verified to align with OHLCV trade dates before running the spike. Run a single-stock sanity check first (known ticker, known date) to confirm the join key works.
+
+## Factor Optimization Loop (Phase 4.11)
+
+### Overview
+
+A closed-loop system that backfills historical signals, accumulates daily live signals, and surfaces tuning recommendations through a human-review gate. The key insight: by storing `score_breakdown` (all raw values + pts) alongside each signal, the system can replay scoring for 500 parameter combinations in milliseconds without re-running the engine.
+
+### Four Pipelines
+
+```
+Pipeline 1: make backtest        → 建立歷史訊號資料庫 (source='backtest')
+Pipeline 2: make daily/settle    → 每日真實訊號累積 (source='live')
+Pipeline 3: make factor-report   → Lift 分析 + Grid Search + 殘差分析
+Pipeline 4: make tune-review     → 人工確認 → 套用參數
+            make optimize        → 一鍵串接 Pipeline 2-4
+```
+
+### `score_breakdown` Schema
+
+Stored as JSONB in `signal_outcomes.score_breakdown`:
+
+```json
+{
+  "raw": {
+    "rsi_14": 62.3,
+    "volume_vs_20ma": 1.7,
+    "ma20_slope_pct": 0.004
+  },
+  "pts": {
+    "vwap_5d_pts": 20, "volume_surge_pts": 0,
+    "rsi_momentum_pts": 4, "breakout_volume_pts": 3,
+    "foreign_pts": 12, ...
+  },
+  "flags": ["GATE_PASS:VOL", "BREAKOUT_WITH_VOL", "RSI_MOM_HIT"],
+  "taiex_slope": "uptrend",
+  "scoring_version": "v2"
+}
+```
+
+`taiex_slope` values: `"uptrend"` / `"downtrend"` / `"neutral"` — must match `engine._compute_taiex_regime()` output.
+
+### Tunable Parameter Whitelist (`config/engine_params.json`)
+
+Only these params are auto-tunable via Grid Search. Engine core logic is not touched.
+
+| 參數 | 預設值 | Grid Search 範圍 |
+|------|--------|-----------------|
+| `rsi_momentum_lo` | 55 | 45–60, step 1 |
+| `rsi_momentum_hi` | 70 | 65–80, step 1 |
+| `breakout_vol_ratio` | 1.5 | 1.2–2.0, step 0.1 |
+| `long_threshold_neutral` | 68 | 60–75, step 1 |
+| `gate_vol_ratio` | 1.2 | (in JSON, engine not yet wired to read) |
+| `sector_topN_pct` | 0.20 | (in JSON, post-processing only) |
+
+### `scoring_replay.recompute_score(breakdown, params)`
+
+Re-evaluates scoring from stored breakdown without re-running the engine:
+- Re-evaluates `rsi_momentum_pts` from `raw.rsi_14` using new `rsi_momentum_lo/hi`
+- Re-evaluates `breakout_volume_pts` from `raw.volume_vs_20ma` using new `breakout_vol_ratio`
+- Re-evaluates gate VOL pass/fail using exact `"GATE_PASS:VOL"` flag check
+- Maps `taiex_slope` to regime-correct threshold (`long_threshold_uptrend/neutral/downtrend`)
+- Returns `(score: int, action: "LONG"|"WATCH"|"CAUTION")`
+
+### Grid Search + Walk-forward
+
+Random search over 500 candidates from `_PARAM_GRID`. Walk-forward validation: 6-month train / 1-month sliding test windows. A candidate is recommended only if ALL test windows show non-negative lift (prevents overfitting).
+
+Win rate is evaluated using `recompute_score(...)[1] == "LONG"` to correctly apply regime-specific thresholds.
+
+### DB Tables Added (Migration 008)
+
+| Table / Column | Purpose |
+|----------------|---------|
+| `signal_outcomes.score_breakdown JSONB` | Raw values + pts for replay |
+| `signal_outcomes.source VARCHAR(10)` | `'live'` \| `'backtest'` \| `'replay'` \| `'sandbox'` |
+| `factor_registry` | Factor lifecycle: `experimental → active → deprecated` |
+| `engine_versions` | Audit trail of param changes with before/after JSONB snapshots |
+
+### Makefile Targets
+
+| 指令 | 說明 |
+|------|------|
+| `make backtest DATE_FROM=... DATE_TO=...` | 歷史回測，建立基礎訊號資料庫 |
+| `make daily` | 每日掃描 + 存入 DB (source='live') |
+| `make settle [DATE=...]` | 補填 T+1/T+3/T+5 結算價（只處理 source='live'） |
+| `make factor-report [FACTOR_DAYS=180]` | Lift 分析 + Grid Search + 殘差分析 → JSON |
+| `make test-factor FACTOR=<name>` | 測試實驗因子（放在 `src/.../factors/experimental/`） |
+| `make tune-review [AUTO_APPROVE=1] [DRY_RUN=1]` | 互動式 Review Gate |
+| `make optimize [AUTO_APPROVE=1] [DRY_RUN=1] [SKIP_SETTLE=1]` | 一鍵跑完完整優化迴路 |
+
+### AUTO_APPROVE 安全機制
+
+單一參數調整幅度超過 20%（`_MAX_CHANGE_PCT = 0.20`）→ 強制停止，需人工確認。違規時警告訊息也會顯示給互動式使用者。
+
+### 最小啟動路徑
+
+```bash
+psql $DATABASE_URL < db/migrations/008_factor_optimization.sql
+make backtest DATE_FROM=2025-01-01 DATE_TO=2026-03-31
+make optimize   # 或分步: make factor-report → make tune-review
+```
+
+---
 
 ## GSTACK REVIEW REPORT
 

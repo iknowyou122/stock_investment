@@ -29,6 +29,19 @@ you will create drift that is expensive to fix.
 | Phase 4.7 | ✅ Done | `make scan` 路徑修正 ✅ · T86 週末跳過（suppress spurious WARNINGs）✅ · 動態 watchlist（728 檔，上市+上櫃 半導體/光電/電子，每日 cache）✅ |
 | Phase 4.8 | ✅ Done | 互動式產業選單（數字代號選擇）✅ · 全市場 industry_map cache（ticker→industry）✅ · 日期自動判斷（17:00 切換前一/當日交易日）✅ · T86 rate-limit retry with backoff ✅ |
 | Phase 4.9 | ✅ Done | Gate 層可觀測性（GATE_PASS/FAIL/SKIP/MET flags）✅ · Gate VOL 門檻 1.3→1.2 ✅ · RS 日期交集對齊 ✅ · Flag 中文翻譯（_translate_flag）✅ · 輸出條列式換行 ✅ · T86 rate-limit 改 try/except ValueError + retry ✅ · 批次掃描互動式 LLM 選單 ✅ · 兩階段 LLM（Phase 1 全量 deterministic → Phase 2 top N with LLM）✅ |
+| Phase 4.10 | ✅ Done | avg_20d_volume bug 修正（一直回傳 0 → 注入真實 20 日均量）✅ · TPEx T86 fallback（上櫃股票三大法人資料）✅ · RSI(14) 計分（55–70 → +4 pts）✅ · 突破確認量能（breakout_volume_pts +3 pts）✅ · 產業相對排名（同產業 top 20% → +5 pts post-processing）✅ · 信號持續加分（前日 CSV 得分 ≥50 → +5 pts）✅ · VolumeProfile POC proxy 改為最大量日收盤價（非 20 日最高價）✅ · `scripts/build_broker_labels.py`（付費 FinMind 用）✅ · `scripts/analyze_outcomes.py`（win-rate 分析）✅ · `make build-labels` / `make analyze` 目標 ✅ |
+| Phase 4.11 | ✅ Done | Factor Optimization Loop ✅ · DB migration 008（`score_breakdown JSONB`, `source`, `factor_registry`, `engine_versions` 表）✅ · `signal_recorder.py`（寫入 DB）✅ · `scoring_replay.py`（無需重跑引擎的 Grid Search）✅ · `config/engine_params.json`（可調參數白名單）✅ · `scripts/backtest.py` + `make backtest`（歷史回測）✅ · `scripts/daily_runner.py` + `make daily` / `make settle`（每日掃描+結算）✅ · `scripts/factor_report.py` + `make factor-report`（Lift 分析 + Walk-forward Grid Search + 殘差分析）✅ · `scripts/apply_tuning.py` + `make tune-review`（互動式 Review Gate）✅ · `scripts/test_factor.py` + `make test-factor`（實驗因子 Sandbox）✅ · `scripts/optimize.py` + `make optimize`（一鍵優化迴路）✅ · 213 unit tests passing ✅ |
+
+**免費 vs 付費因子說明：**
+
+| 因子 | 免費可用 | 需付費 FinMind | 說明 |
+|------|----------|----------------|------|
+| Pillar 1 動能（RSI、突破、均線）| ✅ | — | TWSE/TPEx OHLCV 政府公開資料 |
+| Pillar 2B 三大法人（外資+投信+自營）| ✅ | — | TWSE T86 + TPEx T86 政府端點 |
+| Pillar 2A 分點籌碼（隔日沖/波段贏家）| ✗ | ✅ | FinMind `TaiwanStockBrokerTradingStatement` |
+| Pillar 3 結構（支撐/壓力/融資融券）| ✅（部分）| — | MI_MARGN 政府資料；SBL 目前降級為 0 |
+| 產業排名後處理加分 | ✅ | — | 本機 industry_map cache |
+| 信號持續加分 | ✅ | — | 前日 `--save-csv` 輸出 |
 
 **Phase 5 (next):**
 - Real Stripe webhook handling (requires production Stripe account + deployment)
