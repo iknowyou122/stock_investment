@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze backtest daily settle factor-report
+.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze backtest daily settle factor-report tune-review test-factor
 
 # ── 分析股票 ─────────────────────────────────────────────────────────────────
 # 用法: make run DATE=2026-03-27 TICKERS="2330 2317 2454"
@@ -120,3 +120,21 @@ FACTOR_DAYS ?= 180
 
 factor-report:
 	$(PYTHON) scripts/factor_report.py --days $(FACTOR_DAYS)
+
+# ── 調參 ──────────────────────────────────────────────────────────────────────
+AUTO_APPROVE ?=
+
+tune-review:
+	$(PYTHON) scripts/apply_tuning.py \
+		$(if $(AUTO_APPROVE),--auto-approve) \
+		$(if $(DRY_RUN),--dry-run)
+
+# ── 實驗因子測試 ──────────────────────────────────────────────────────────────
+# 用法: make test-factor FACTOR=my_factor_name
+FACTOR ?=
+
+test-factor:
+ifndef FACTOR
+	$(error 請指定 FACTOR，例如: make test-factor FACTOR=consecutive_foreign_3d)
+endif
+	$(PYTHON) scripts/test_factor.py --factor $(FACTOR)
