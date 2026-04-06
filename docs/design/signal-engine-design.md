@@ -596,6 +596,8 @@ Win rate is evaluated using `recompute_score(...)[1] == "LONG"` to correctly app
 
 | 指令 | 說明 |
 |------|------|
+| `make migrate` | 套用所有 pending DB migrations（冪等，重跑安全）|
+| `make migrate DRY_RUN=1` | 只列出 pending migrations，不執行 |
 | `make backtest DATE_FROM=... DATE_TO=...` | 歷史回測，建立基礎訊號資料庫 |
 | `make daily` | 每日掃描 + 存入 DB (source='live') |
 | `make settle [DATE=...]` | 補填 T+1/T+3/T+5 結算價（只處理 source='live'） |
@@ -610,9 +612,38 @@ Win rate is evaluated using `recompute_score(...)[1] == "LONG"` to correctly app
 
 ### 最小啟動路徑
 
+**Step 1: 安裝並啟動 PostgreSQL（第一次只需做一次）**
+
 ```bash
-psql $DATABASE_URL < db/migrations/008_factor_optimization.sql
+brew install postgresql@17
+brew services start postgresql@17
+createdb taiwan_stock
+```
+
+在 `.env` 設定：
+```
+DATABASE_URL=postgresql://localhost/taiwan_stock
+```
+
+**Step 2: 跑所有 DB migrations（`make migrate` 會追蹤已套用的，重跑安全）**
+
+```bash
+make migrate
+# 輸出: Applying 001_broker_labels.sql ... done
+#        Applying 002_signal_outcomes.sql ... done
+#        ...
+#        Applying 008_factor_optimization.sql ... done
+```
+
+**Step 3: 建立歷史訊號資料庫**
+
+```bash
 make backtest DATE_FROM=2025-01-01 DATE_TO=2026-03-31
+```
+
+**Step 4: 跑優化迴路**
+
+```bash
 make optimize   # 或分步: make factor-report → make tune-review
 ```
 

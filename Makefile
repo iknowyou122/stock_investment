@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze backtest daily settle factor-report tune-review test-factor optimize
+.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze migrate backtest daily settle factor-report tune-review test-factor optimize
 
 # ── 分析股票 ─────────────────────────────────────────────────────────────────
 # 用法: make run DATE=2026-03-27 TICKERS="2330 2317 2454"
@@ -86,6 +86,12 @@ analyze:
 	$(PYTHON) scripts/analyze_outcomes.py \
 		--days $(DAYS) \
 		$(if $(SCORING_VERSION),--scoring-version $(SCORING_VERSION))
+
+# ── DB Migrations ────────────────────────────────────────────────────────────
+# 用法: make migrate
+#       make migrate DRY_RUN=1   # 只列出 pending，不執行
+migrate:
+	$(PYTHON) scripts/migrate.py $(if $(DRY_RUN),--dry-run)
 
 # ── 歷史回測 ──────────────────────────────────────────────────────────────────
 # 用法: make backtest DATE_FROM=2025-10-01 DATE_TO=2026-03-31
