@@ -105,13 +105,25 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]]) -> None:
 
 
 def _load_watchlist_for_date(analysis_date: date, data_dir: Path) -> list[str]:
-    """Load cached watchlist (industry_map) for a date, falling back up to 7 days."""
+    """Load ticker list for a date.
+
+    1. Try cached industry_map within 7 days of the target date.
+    2. Fall back to fetching today's TWSE/OTC ticker list via _build_industry_map()
+       (ticker universe is stable enough for historical backtest purposes).
+    """
     for delta in range(0, 8):
         candidate = analysis_date - timedelta(days=delta)
         cache_file = data_dir / f"industry_map_{candidate}.json"
         if cache_file.exists():
             with open(cache_file) as f:
                 return list(json.load(f).keys())
+
+    # No cache found — fetch live TWSE/OTC list and cache it for today
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from batch_scan import _build_industry_map  # type: ignore[import]
+    industry_map = _build_industry_map()
+    if industry_map:
+        return list(industry_map.keys())
     return []
 
 
