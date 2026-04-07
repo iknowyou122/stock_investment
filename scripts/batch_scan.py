@@ -28,6 +28,19 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
+from threading import Lock
+
+from rich.console import Console
+from rich.table import Table
+from rich import box
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TaskProgressColumn
+from rich.panel import Panel
+from rich.text import Text
+from rich.style import Style
+from rich import print as rprint
+
+_console = Console()
+_progress_lock = Lock()
 
 try:
     import certifi
@@ -115,12 +128,12 @@ def _build_industry_map() -> dict[str, str]:
         except Exception:
             pass
 
-    print("正在從 TWSE/OTC 抓取完整產業清單...")
+    _console.print("[dim]正在從 TWSE/OTC 抓取完整產業清單...[/dim]")
     all_map: dict[str, str] = {}
     for market, url in _ISIN_URLS.items():
         try:
             m = _fetch_isin_tickers(url)
-            print(f"  {market.upper()}: {len(m)} 檔")
+            _console.print(f"  [dim]{market.upper()}: {len(m)} 檔[/dim]")
             all_map.update(m)
         except Exception as e:
             logger.warning("Failed to fetch %s: %s", market, e)
@@ -129,7 +142,7 @@ def _build_industry_map() -> dict[str, str]:
         counts = Counter(all_map.values())
         total_sectors = len(counts)
         cache_file.write_text(json.dumps(all_map, ensure_ascii=False))
-        print(f"  合計: {len(all_map)} 檔，{total_sectors} 個產業（已快取至 {cache_file.name}）\n")
+        _console.print(f"  [dim]合計: {len(all_map)} 檔，{total_sectors} 個產業（已快取至 {cache_file.name}）[/dim]\n")
         return all_map
 
     logger.warning("TWSE/OTC fetch failed; using fallback watchlist")
@@ -141,11 +154,25 @@ def _sector_menu(industry_map: dict[str, str]) -> list[tuple[int, str, int]]:
     from collections import Counter
     counts = Counter(industry_map.values())
     rows = [(i, ind, counts[ind]) for i, ind in enumerate(sorted(counts.keys()), start=1)]
-    print("\n可用產業別：")
-    print(f"  {'#':>3}  {'產業別':<18}  {'檔數':>4}")
-    print("  " + "-" * 30)
+
+    table = Table(
+        title="可用產業別",
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold cyan",
+        title_style="bold white",
+        border_style="bright_black",
+    )
+    table.add_column("#", style="dim", justify="right", width=4)
+    table.add_column("產業別", style="white", min_width=18)
+    table.add_column("檔數", justify="right", style="green")
+
     for idx, ind, cnt in rows:
-        print(f"  {idx:>3}  {ind:<18}  {cnt:>4}")
+        bar = "█" * min(cnt // 10, 20)
+        table.add_row(str(idx), ind, f"{cnt:>4}  [dim]{bar}[/dim]")
+
+    _console.print()
+    _console.print(table)
     return rows
 
 
@@ -155,8 +182,8 @@ def _select_sectors(
 ) -> set[str]:
     """Prompt user to pick sectors by number. Enter → use defaults."""
     default_indices = " ".join(str(i) for i, name, _ in rows if name in default_names)
-    prompt = f"\n請輸入產業代號（空白分隔），直接 Enter 使用預設 [{default_indices}]：> "
-    raw = input(prompt).strip()
+    _console.print(f"\n[bold yellow]請輸入產業代號[/bold yellow]（空白分隔），直接 Enter 使用預設 [dim][{default_indices}][/dim]")
+    raw = _console.input("[bold cyan]> [/bold cyan]").strip()
     if not raw:
         return default_names
     idx_map = {i: name for i, name, _ in rows}
@@ -165,7 +192,7 @@ def _select_sectors(
         try:
             selected.add(idx_map[int(token)])
         except (ValueError, KeyError):
-            print(f"  忽略無效代號: {token}")
+            _console.print(f"  [red]忽略無效代號: {token}[/red]")
     return selected or default_names
 
 
@@ -181,24 +208,29 @@ def _llm_menu() -> tuple:
         ("none",   "不使用 LLM（純 deterministic）"),
     ]
 
-    print("\nLLM 引擎：")
+    table = Table(box=box.SIMPLE, show_header=False, border_style="bright_black")
+    table.add_column("#", style="bold cyan", justify="right", width=3)
+    table.add_column("LLM 引擎", style="white")
     for i, (_, label) in enumerate(_PROVIDERS, 1):
-        print(f"  {i}  {label}")
+        table.add_row(str(i), label)
+    _console.print()
+    _console.print(Panel(table, title="[bold white]LLM 引擎選擇[/bold white]", border_style="cyan"))
 
-    raw = input("\n請輸入代號，直接 Enter 使用 [1 自動偵測]：> ").strip()
+    _console.print("\n[bold yellow]請輸入代號[/bold yellow]，直接 Enter 使用 [dim][1 自動偵測][/dim]")
+    raw = _console.input("[bold cyan]> [/bold cyan]").strip()
     choice = int(raw) if raw.isdigit() and 1 <= int(raw) <= len(_PROVIDERS) else 1
     provider_key, _ = _PROVIDERS[choice - 1]
 
     if provider_key == "none":
-        print("  → 純 deterministic 模式（不呼叫 LLM）")
+        _console.print("  [dim]→ 純 deterministic 模式（不呼叫 LLM）[/dim]")
         return None, None
 
     llm_provider = create_llm_provider(None if provider_key == "auto" else provider_key)
     if llm_provider is None:
-        print("  ⚠ 找不到對應 API key，LLM 停用")
+        _console.print("  [yellow]⚠ 找不到對應 API key，LLM 停用[/yellow]")
         return None, None
 
-    print(f"  → {llm_provider.name}（前幾名送 LLM 將在 Phase 1 完成後詢問）\n")
+    _console.print(f"  [green]→ {llm_provider.name}[/green]\n")
 
     return llm_provider, None
 
@@ -207,6 +239,124 @@ class _EmptyLabelRepo:
     def get(self, _): return None
     def upsert(self, _): pass
     def list_all(self): return []
+
+
+# ---------------------------------------------------------------------------
+# Post-processing: sector relative ranking + signal persistence
+# ---------------------------------------------------------------------------
+
+def _apply_sector_ranks(results: list[dict], industry_map: dict[str, str]) -> int:
+    """Boost stocks in top 20% of their sector by +5 pts.
+
+    Only applied when a sector has ≥ 3 valid (non-halt) results.
+    Adds SECTOR_RANK:N/M flag to boosted stocks.
+    Returns count of stocks boosted.
+    """
+    from collections import defaultdict
+
+    sector_valid: dict[str, list[dict]] = defaultdict(list)
+    for r in results:
+        if r["halt"] or r["error"] is not None:
+            continue
+        sector = industry_map.get(r["ticker"], "")
+        if sector:
+            sector_valid[sector].append(r)
+
+    boosted = 0
+    for sector, rs in sector_valid.items():
+        if len(rs) < 3:
+            continue
+        sorted_rs = sorted(rs, key=lambda r: r["confidence"], reverse=True)
+        top_n = max(1, len(sorted_rs) // 5)  # top 20%
+        for rank, r in enumerate(sorted_rs[:top_n], 1):
+            r["confidence"] = min(100, r["confidence"] + 5)
+            r["flags"] = list(r.get("flags") or []) + [f"SECTOR_RANK:{rank}/{len(sorted_rs)}"]
+            boosted += 1
+
+    return boosted
+
+
+def _apply_persistence_bonus(
+    results: list[dict],
+    analysis_date: date,
+    data_dir: Path,
+    min_prev_conf: int = 50,
+    bonus: int = 5,
+) -> int:
+    """Add +5 pts for stocks that scored ≥ min_prev_conf yesterday.
+
+    Looks for data/scans/scan_{prev_date}.csv.
+    Skips gracefully if the file doesn't exist or is malformed.
+    Adds PERSIST:{prev_conf} flag to boosted stocks.
+    Returns count of stocks boosted.
+    """
+    # Walk back to find the last trading day's CSV (skip weekends)
+    prev_date = analysis_date - timedelta(days=1)
+    for _ in range(4):  # at most 4 days back (skip long weekends)
+        if prev_date.weekday() < 5:
+            break
+        prev_date -= timedelta(days=1)
+
+    prev_csv = data_dir / f"scan_{prev_date}.csv"
+    if not prev_csv.exists():
+        return 0
+
+    try:
+        prev_scores: dict[str, int] = {}
+        with prev_csv.open(encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    conf = int(row.get("confidence", 0))
+                    if conf >= min_prev_conf:
+                        prev_scores[row["ticker"]] = conf
+                except (ValueError, KeyError):
+                    continue
+    except Exception:
+        return 0
+
+    boosted = 0
+    for r in results:
+        ticker = r["ticker"]
+        if ticker in prev_scores and not r["halt"] and r["error"] is None:
+            prev_conf = prev_scores[ticker]
+            r["confidence"] = min(100, r["confidence"] + bonus)
+            r["flags"] = list(r.get("flags") or []) + [f"PERSIST:{prev_conf}"]
+            boosted += 1
+
+    return boosted
+
+
+def _make_label_repo():
+    """Try to connect to PostgreSQL BrokerLabelRepository.
+
+    Falls back to _EmptyLabelRepo (silent, no crash) when:
+    - DATABASE_URL is not set
+    - DB is unreachable
+    - broker_labels table is empty (first run before build-labels)
+
+    Run `make build-labels` to populate the table for full Pillar 2A scoring.
+    """
+    import os
+    if not os.environ.get("DATABASE_URL"):
+        return _EmptyLabelRepo()
+    try:
+        from taiwan_stock_agent.infrastructure.db import init_pool
+        from taiwan_stock_agent.domain.broker_label_classifier import PostgresBrokerLabelRepository
+        init_pool()
+        repo = PostgresBrokerLabelRepository(None)
+        count = len(repo.list_all())
+        if count == 0:
+            _console.print(
+                "  [dim yellow]⚠ broker_labels 表為空 — Pillar 2A (隔日沖過濾) 停用。"
+                "執行 [bold]make build-labels[/bold] 建立分類資料。[/dim yellow]"
+            )
+            return _EmptyLabelRepo()
+        _console.print(f"  [dim green]✓ BrokerLabelRepository: {count} 筆分點標籤已載入[/dim green]")
+        return repo
+    except Exception as e:
+        logger.debug("BrokerLabelRepository unavailable (%s); using empty repo", e)
+        return _EmptyLabelRepo()
 
 
 def _default_date() -> date:
@@ -219,16 +369,17 @@ def _default_date() -> date:
     return candidate
 
 
-def _make_agent(llm_provider=None, no_llm: bool = False) -> StrategistAgent:
+def _make_agent(llm_provider=None, no_llm: bool = False, label_repo=None) -> StrategistAgent:
     """Create a thread-local agent with its own FinMind + TWSE clients.
 
     Each worker thread gets independent HTTP sessions and Parquet cache file
     handles, avoiding lock contention and race conditions on shared state.
     no_llm=True forces LLM off even if ANTHROPIC_API_KEY is in env (Phase 1 use).
+    label_repo: BrokerLabelRepository instance (shared across threads — read-only during scan).
     """
     agent = StrategistAgent(
         FinMindClient(),
-        _EmptyLabelRepo(),
+        label_repo or _EmptyLabelRepo(),
         chip_proxy_fetcher=ChipProxyFetcher(),
         llm_provider=llm_provider,
     )
@@ -237,11 +388,11 @@ def _make_agent(llm_provider=None, no_llm: bool = False) -> StrategistAgent:
     return agent
 
 
-def _scan_one(ticker: str, analysis_date: date, llm_provider=None, no_llm: bool = False) -> dict:
+def _scan_one(ticker: str, analysis_date: date, llm_provider=None, no_llm: bool = False, label_repo=None) -> dict:
     """Run pipeline for one ticker; return result dict."""
     t0 = time.time()
     try:
-        signal = _make_agent(llm_provider, no_llm=no_llm).run(ticker, analysis_date)
+        signal = _make_agent(llm_provider, no_llm=no_llm, label_repo=label_repo).run(ticker, analysis_date)
         elapsed = time.time() - t0
         return {
             "ticker": ticker,
@@ -313,59 +464,105 @@ def _save_csv(results: list[dict], analysis_date: date, csv_path: Path) -> None:
                 "data_quality_flags": "|".join(r.get("flags") or []),
             })
 
-    print(f"\n  📄 CSV 已儲存: {csv_path}  ({len(results)} 筆)")
+    _console.print(f"\n  [green]📄 CSV 已儲存:[/green] {csv_path}  ({len(results)} 筆)")
+
+
+def _action_style(action: str) -> str:
+    mapping = {
+        "BUY": "bold green",
+        "STRONG_BUY": "bold bright_green",
+        "SELL": "bold red",
+        "STRONG_SELL": "bold bright_red",
+        "HOLD": "yellow",
+        "CAUTION": "dim yellow",
+        "WATCH": "cyan",
+    }
+    return mapping.get(action.upper(), "white")
+
+
+def _conf_bar(conf: int) -> str:
+    filled = round(conf / 10)
+    bar = "█" * filled + "░" * (10 - filled)
+    if conf >= 70:
+        color = "green"
+    elif conf >= 50:
+        color = "yellow"
+    else:
+        color = "red"
+    return f"[{color}]{bar}[/{color}] [dim]{conf}[/dim]"
 
 
 def _print_table(results: list[dict], top: int, min_confidence: int) -> None:
-    # Filter out errors and halts
     valid = [r for r in results if not r["halt"] and r["error"] is None]
     halted = [r for r in results if r["halt"] or r["error"] is not None]
 
-    # Sort by confidence desc
     valid.sort(key=lambda r: r["confidence"], reverse=True)
 
-    # Apply filters
     if min_confidence > 0:
         valid = [r for r in valid if r["confidence"] >= min_confidence]
-
     if top:
         valid = valid[:top]
 
-    print(f"\n{'=' * 72}")
-    print(f"  BATCH SCAN RESULTS")
-    print(f"{'=' * 72}")
-    print(f"  {'Rank':<5} {'Ticker':<8} {'Action':<10} {'Conf':>5} {'Entry':>10} {'Stop':>10} {'Target':>10}")
-    print(f"  {'-' * 67}")
+    table = Table(
+        title="BATCH SCAN RESULTS",
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold white on dark_blue",
+        title_style="bold white",
+        border_style="blue",
+        show_lines=True,
+    )
+    table.add_column("Rank", justify="center", style="dim", width=5)
+    table.add_column("Ticker", style="bold white", width=8)
+    table.add_column("Action", width=12)
+    table.add_column("Confidence", width=18)
+    table.add_column("Entry", justify="right", style="cyan", width=9)
+    table.add_column("Stop", justify="right", style="red", width=9)
+    table.add_column("Target", justify="right", style="green", width=9)
 
     for i, r in enumerate(valid, 1):
-        action_display = r["action"]
-        if r["free_tier"]:
-            action_display += "*"  # mark free-tier results
-        print(
-            f"  {i:<5} {r['ticker']:<8} {action_display:<10} {r['confidence']:>5} "
-            f"{r['entry_bid']:>10.1f} {r['stop_loss']:>10.1f} {r['target']:>10.1f}"
+        action = r["action"] + ("*" if r["free_tier"] else "")
+        action_text = Text(action, style=_action_style(r["action"]))
+        table.add_row(
+            str(i),
+            r["ticker"],
+            action_text,
+            _conf_bar(r["confidence"]),
+            f"{r['entry_bid']:.1f}",
+            f"{r['stop_loss']:.1f}",
+            f"{r['target']:.1f}",
         )
-        if r["momentum"]:
-            print(f"         動能: {r['momentum']}")
-        if r["chip"]:
-            print(f"         籌碼: {r['chip']}")
-        if r["risk"]:
-            print(f"         風險: {r['risk']}")
+
+    _console.print()
+    if valid:
+        _console.print(table)
+    else:
+        _console.print(Panel(f"[dim]無符合條件的標的 (min_confidence={min_confidence})[/dim]", border_style="yellow"))
+
+    # LLM details
+    for r in valid:
         if r["momentum"] or r["chip"] or r["risk"]:
-            print()
+            _console.print(f"\n[bold white]{r['ticker']}[/bold white] LLM 分析")
+            if r["momentum"]:
+                _console.print(f"  [cyan]動能[/cyan] {r['momentum']}")
+            if r["chip"]:
+                _console.print(f"  [magenta]籌碼[/magenta] {r['chip']}")
+            if r["risk"]:
+                _console.print(f"  [yellow]風險[/yellow] {r['risk']}")
 
-    if not valid:
-        print(f"  (無符合條件的標的，min_confidence={min_confidence})")
-
-    print(f"\n  * = free_tier_mode (無分點資料，閾值較低)")
+    _console.print(f"\n  [dim]* = free_tier_mode（無分點資料，閾值較低）[/dim]")
 
     if halted:
-        print(f"\n  略過 {len(halted)} 檔 (HALT/ERROR):", ", ".join(r["ticker"] for r in halted))
+        tickers_str = ", ".join(r["ticker"] for r in halted)
+        _console.print(f"\n  [dim]略過 {len(halted)} 檔 (HALT/ERROR): {tickers_str}[/dim]")
 
-    print(f"{'=' * 72}")
     llm_count = sum(1 for r in results if r.get("momentum") or r.get("chip") or r.get("risk"))
     llm_note = f"，LLM 補充 {llm_count} 檔" if llm_count else ""
-    print(f"  掃描完成: {len(results)} 檔，有效訊號 {len(valid)} 檔{llm_note}\n")
+    _console.print(Panel(
+        f"[bold green]掃描完成[/bold green]  {len(results)} 檔  •  有效訊號 [bold]{len(valid)}[/bold] 檔{llm_note}",
+        border_style="green",
+        padding=(0, 2),
+    ))
 
 
 def _run_phase(
@@ -374,23 +571,42 @@ def _run_phase(
     workers: int,
     llm_provider=None,
     no_llm: bool = False,
+    label_repo=None,
 ) -> list[dict]:
     """執行一批 ticker 的掃描，回傳 results list（順序不保證）。
     no_llm=True 強制關閉 LLM（Phase 1 deterministc 用，避免 StrategistAgent 自動偵測 API key）。
+    label_repo: shared BrokerLabelRepository instance（read-only，多執行緒安全）。
     """
     results: list[dict] = []
     total = len(tickers)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(_scan_one, ticker, analysis_date, llm_provider, no_llm): ticker
-            for ticker in tickers
-        }
-        for i, future in enumerate(as_completed(futures), 1):
-            ticker = futures[future]
-            result = future.result()
-            results.append(result)
-            status = "HALT" if result["halt"] else f"conf={result['confidence']}"
-            print(f"  [{i:>2}/{total}] {ticker:<8} {status}")
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(bar_width=30, style="cyan", complete_style="green"),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=_console,
+        transient=False,
+    ) as progress:
+        task = progress.add_task(f"掃描 {total} 檔", total=total)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_scan_one, ticker, analysis_date, llm_provider, no_llm, label_repo): ticker
+                for ticker in tickers
+            }
+            for future in as_completed(futures):
+                ticker = futures[future]
+                result = future.result()
+                results.append(result)
+                if result["halt"]:
+                    log_line = f"[dim]{ticker:<8}[/dim] [red]HALT[/red]"
+                else:
+                    conf = result["confidence"]
+                    color = "green" if conf >= 60 else "yellow" if conf >= 40 else "white"
+                    log_line = f"[dim]{ticker:<8}[/dim] [{color}]conf={conf}[/{color}]"
+                with _progress_lock:
+                    progress.console.print(log_line)
+                    progress.update(task, advance=1)
     return results
 
 
@@ -403,30 +619,43 @@ def run_batch(
     csv_path: Path | None = None,
     llm_provider=None,
     llm_top: int | None = None,
+    label_repo=None,
+    industry_map: dict[str, str] | None = None,
 ) -> None:
     llm_label = getattr(llm_provider, "name", None) or "（無 LLM）"
-    print(f"\n掃描清單: {len(tickers)} 檔")
-    print(f"分析日期: {analysis_date}")
-    print(f"LLM 引擎: {llm_label}")
-    print(f"並行執行: {workers} 個 worker（每個 worker 獨立 HTTP session）\n")
+    label_status = (
+        f"[green]{len(label_repo.list_all())} 筆標籤[/green]"
+        if label_repo is not None and not isinstance(label_repo, _EmptyLabelRepo)
+        else "[dim yellow]空（Pillar 2A 停用）[/dim yellow]"
+    )
+    _console.print(Panel(
+        f"[bold white]掃描清單[/bold white]  {len(tickers)} 檔\n"
+        f"[bold white]分析日期[/bold white]  {analysis_date}\n"
+        f"[bold white]LLM 引擎[/bold white]  [cyan]{llm_label}[/cyan]\n"
+        f"[bold white]分點標籤[/bold white]  {label_status}\n"
+        f"[bold white]並行執行[/bold white]  {workers} workers",
+        title="[bold cyan]Taiwan Stock Scanner[/bold cyan]",
+        border_style="cyan",
+        padding=(0, 2),
+    ))
 
     if llm_provider is None:
         # 純 deterministic：強制關閉 LLM（避免 StrategistAgent 自動偵測 API key）
-        results = _run_phase(tickers, analysis_date, workers, no_llm=True)
+        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo)
     else:
         # 永遠兩階段：Phase 1 全量 deterministic → Phase 2 top N with LLM
-        print(f"[Phase 1] deterministic scan：{len(tickers)} 檔")
-        results = _run_phase(tickers, analysis_date, workers, no_llm=True)
+        _console.print(f"\n[bold cyan][Phase 1][/bold cyan] deterministic scan：{len(tickers)} 檔")
+        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo)
 
         # 排序有效結果
         eligible = sorted(
             [r for r in results if not r["halt"] and r["error"] is None],
             key=lambda r: r["confidence"], reverse=True,
         )
-        print(f"\n[Phase 1 完成] {len(results)} 檔（有效 {len(eligible)} 檔）")
+        _console.print(f"\n[bold cyan][Phase 1 完成][/bold cyan] {len(results)} 檔（有效 [green]{len(eligible)}[/green] 檔）")
         if eligible:
-            top5 = ", ".join(f"{r['ticker']}({r['confidence']})" for r in eligible[:5])
-            print(f"  前幾名: {top5}{'...' if len(eligible) > 5 else ''}")
+            top5 = "  ".join(f"[bold]{r['ticker']}[/bold]([green]{r['confidence']}[/green])" for r in eligible[:5])
+            _console.print(f"  前幾名: {top5}{'[dim]...[/dim]' if len(eligible) > 5 else ''}")
 
         # 決定 Phase 2 範圍：CLI 指定優先，否則互動詢問
         if llm_top is None:
@@ -436,13 +665,25 @@ def run_batch(
         llm_tickers = [r["ticker"] for r in eligible[:llm_top]] if llm_top else []
 
         if not llm_tickers:
-            print("  → 跳過 LLM\n")
+            _console.print("  [dim]→ 跳過 LLM[/dim]\n")
         else:
-            print(f"\n[Phase 2] 送前 {llm_top} 名給 LLM（{llm_label}）：{', '.join(llm_tickers)}")
+            _console.print(f"\n[bold cyan][Phase 2][/bold cyan] 送前 {llm_top} 名給 [cyan]{llm_label}[/cyan]：{', '.join(llm_tickers)}")
             p2_workers = min(3, len(llm_tickers))
-            phase2 = _run_phase(llm_tickers, analysis_date, p2_workers, llm_provider=llm_provider)
+            phase2 = _run_phase(llm_tickers, analysis_date, p2_workers, llm_provider=llm_provider, label_repo=label_repo)
             p2_valid = {r["ticker"]: r for r in phase2 if r.get("error") is None}
             results = [p2_valid.get(r["ticker"], r) for r in results]
+
+    # --- Post-processing: sector ranking + persistence ---
+    scan_data_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
+
+    if industry_map:
+        n_sector = _apply_sector_ranks(results, industry_map)
+        if n_sector:
+            _console.print(f"  [dim]↑ 產業相對排名加分: {n_sector} 檔 (+5 pts each)[/dim]")
+
+    n_persist = _apply_persistence_bonus(results, analysis_date, scan_data_dir)
+    if n_persist:
+        _console.print(f"  [dim]↑ 前日持續訊號加分: {n_persist} 檔 (+5 pts each)[/dim]")
 
     _print_table(results, top, min_confidence)
 
@@ -504,6 +745,8 @@ def main() -> None:
             scan_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
             csv_path = scan_dir / f"scan_{args.date}.csv"
 
+    industry_map: dict[str, str] = {}
+
     if args.tickers:
         tickers = args.tickers
     else:
@@ -519,7 +762,7 @@ def main() -> None:
                 # Non-interactive: resolve numeric codes directly
                 chosen = {idx_map[n] for n in args.sectors if n in idx_map}
                 if not chosen:
-                    print("  指定代號無效，使用預設產業")
+                    _console.print("  [yellow]指定代號無效，使用預設產業[/yellow]")
                     chosen = _DEFAULT_SECTOR_NAMES
             else:
                 chosen = _select_sectors(rows, _DEFAULT_SECTOR_NAMES)
@@ -528,7 +771,7 @@ def main() -> None:
             from collections import Counter
             counts = Counter(ind for t, ind in industry_map.items() if ind in chosen)
             summary = " + ".join(f"{ind}({counts[ind]})" for ind in sorted(chosen))
-            print(f"\n掃描範圍: {summary} = {len(tickers)} 檔")
+            _console.print(f"\n[bold]掃描範圍:[/bold] {summary} = [cyan]{len(tickers)}[/cyan] 檔")
 
     from taiwan_stock_agent.domain.llm_provider import create_llm_provider
     if args.no_llm:
@@ -541,7 +784,14 @@ def main() -> None:
         # 互動模式：進入選單
         llm_provider, llm_top = _llm_menu()
 
-    run_batch(tickers, args.date, args.top, args.min_confidence, args.workers, csv_path, llm_provider, llm_top)
+    # 嘗試載入 BrokerLabelRepository（需要 DATABASE_URL + build-labels 已執行）
+    label_repo = _make_label_repo()
+
+    run_batch(
+        tickers, args.date, args.top, args.min_confidence, args.workers,
+        csv_path, llm_provider, llm_top, label_repo,
+        industry_map=industry_map,
+    )
 
 
 if __name__ == "__main__":

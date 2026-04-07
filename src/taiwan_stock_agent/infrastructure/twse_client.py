@@ -34,6 +34,10 @@ TWSE_MARGIN_OPENAPI_URL = "https://openapi.twse.com.tw/v1/marginTrading/MI_MARGN
 TWSE_SBL_URL = "https://www.twse.com.tw/rwd/zh/shortselling/TWT93U"
 TWSE_DAYTRADE_URL = "https://www.twse.com.tw/rwd/zh/block/TWTB4U"
 
+# TPEx (上櫃/OTC) institutional flow — fallback when ticker not found on TWSE T86.
+# Date format: YYYY/MM/DD  |  Fields: idx0=代號, idx4=外資買賣超, idx10=投信買賣超, idx16=自營商買賣超
+TPEX_T86_URL = "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php"
+
 _TWSE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -234,13 +238,114 @@ class ChipProxyFetcher:
                     pd.DataFrame([cache_row]).to_parquet(cache, index=False)
                     return foreign_val, trust_val, dealer_val
 
-            # Ticker not found in today's data (may not have traded)
+            # Ticker not found on TWSE — try TPEx (上櫃 stocks)
+            tpex_result = self._fetch_tpex_t86_data(ticker, trade_date, flags)
+            if any(v is not None for v in tpex_result):
+                return tpex_result
             flags.append(f"TWSE_T86_TICKER_NOT_FOUND:{ticker}")
             return None, None, None
 
         except Exception as e:
             logger.warning("ChipProxyFetcher: T86 fetch failed for %s %s: %s", ticker, trade_date, e)
             flags.append(f"TWSE_T86_ERROR:{type(e).__name__}")
+            return None, None, None
+
+    def _fetch_tpex_t86_data(
+        self, ticker: str, trade_date: date, flags: list[str]
+    ) -> tuple[int | None, int | None, int | None]:
+        """Fetch 三大法人買賣超 from TPEx (上櫃/OTC) endpoint.
+
+        Fallback for stocks not found on TWSE T86 (i.e., 上櫃 stocks).
+        Returns (foreign_net_buy, trust_net_buy, dealer_net_buy) in shares.
+
+        TPEx field layout (25 cols):
+          0: 代號, 1: 名稱
+          2-4: 外資 買進/賣出/買賣超
+          5-7: 外資自營 買進/賣出/買賣超
+          8-10: 投信 買進/賣出/買賣超
+          11-13: 自營商(自行) 買進/賣出/買賣超
+          14-16: 自營商(避險) 買進/賣出/買賣超
+          17-19: 自營商合計 買進/賣出/買賣超
+          20-22: 三大法人合計 買進/賣出/買賣超
+          23: (reserved)
+          24: 三大法人買賣超股數合計
+        """
+        cache = self._cache_dir / f"tpex_t86_{ticker}_{trade_date}.parquet"
+        if cache.exists():
+            try:
+                df = pd.read_parquet(cache)
+                if not df.empty:
+                    foreign = int(df["foreign_net_buy"].iloc[0]) if "foreign_net_buy" in df.columns else None
+                    trust = int(df["trust_net_buy"].iloc[0]) if "trust_net_buy" in df.columns else None
+                    dealer = int(df["dealer_net_buy"].iloc[0]) if "dealer_net_buy" in df.columns else None
+                    return foreign, trust, dealer
+            except Exception:
+                pass
+
+        try:
+            resp = requests.get(
+                TPEX_T86_URL,
+                params={
+                    "l": "zh-tw",
+                    "o": "json",
+                    "se": "EW",
+                    "t": "D",
+                    "d": trade_date.strftime("%Y/%m/%d"),
+                },
+                headers=_TWSE_HEADERS,
+                timeout=12,
+                verify=False,
+            )
+            resp.raise_for_status()
+            try:
+                body = resp.json()
+            except ValueError:
+                flags.append(f"TPEX_T86_RATE_LIMITED:{trade_date}")
+                return None, None, None
+
+            data = body.get("aaData") or body.get("data") or []
+            if not data:
+                return None, None, None
+
+            def _parse_shares(val: str) -> int | None:
+                val = val.replace(",", "").replace("+", "").strip()
+                try:
+                    return int(val)
+                except ValueError:
+                    return None
+
+            for row in data:
+                if len(row) < 17:
+                    continue
+                code = str(row[0]).strip()
+                if code == ticker:
+                    # Foreign: index 4 (外資買賣超)
+                    # Trust:   index 10 (投信買賣超)
+                    # Dealer:  index 16 (自營商合計買賣超)
+                    foreign_val = _parse_shares(str(row[4]))
+                    trust_val = _parse_shares(str(row[10])) if len(row) > 10 else None
+                    dealer_val = _parse_shares(str(row[16])) if len(row) > 16 else None
+
+                    cache_row: dict = {}
+                    if foreign_val is not None:
+                        cache_row["foreign_net_buy"] = foreign_val
+                    if trust_val is not None:
+                        cache_row["trust_net_buy"] = trust_val
+                    if dealer_val is not None:
+                        cache_row["dealer_net_buy"] = dealer_val
+                    if cache_row:
+                        pd.DataFrame([cache_row]).to_parquet(cache, index=False)
+                        flags.append(f"TPEX_T86:{ticker}")
+
+                    return foreign_val, trust_val, dealer_val
+
+            return None, None, None
+
+        except Exception as e:
+            logger.warning(
+                "ChipProxyFetcher: TPEx T86 fetch failed for %s %s: %s", ticker, trade_date, e
+            )
+            flags.append(f"TPEX_T86_ERROR:{type(e).__name__}")
             return None, None, None
 
     def _fetch_margin_row_openapi(

@@ -9,7 +9,7 @@ Score breakdown (max 100 pts before risk deductions):
     Cond 4: 5d_stock_return > 5d_taiex_return  (only when taiex data available)
     Fail: action=CAUTION, confidence=0, data_quality_flags=["NO_SETUP"]
 
-  Pillar 1: Momentum (max 35 pts)
+  Pillar 1: Momentum (max 39 pts)
     volume_ratio_pts:     0/4/8   — vol/20d_avg < 1.2 → 0, 1.2–1.8 → 4, >1.8 → 8
     price_direction_pts:  0/3     — close >= prev_close → +3
     close_strength_pts:   0/2/4   — (close-low)/(high-low); ≥0.7 → 4, 0.5–0.7 → 2, <0.5 → 0
@@ -17,6 +17,7 @@ Score breakdown (max 100 pts before risk deductions):
     vwap_advantage_pts:   0/6     — close > 5d_avg_vwap → +6 (intraday VWAP unavailable on T+1)
     trend_continuity_pts: 0/3/5   — 3 consec up → 3; 4-of-5 up → 5
     volume_escalation_pts:0/3/5   — T-3<T-2<T-1 → 3; + today>T-1 → 5
+    rsi_momentum_pts:     0/4     — RSI(14) 55–70 → +4 (healthy momentum, not overbought)
 
   Pillar 2A: Chip paid (max 40 pts)
     breadth_pts:          0/5/10  — net_buyer_diff ≤0 → 0, 1–10 → 5, >10 → 10
@@ -36,10 +37,11 @@ Score breakdown (max 100 pts before risk deductions):
     margin_utilization_pts:  -4/0/+4    — <20% → +4, >80% → -4
     sbl_pressure_pts:         0/-4/-8   — sbl_ratio 5–10% → -4, >10% → -8
 
-  Pillar 3: Structure/Space (max 35 pts)
+  Pillar 3: Structure/Space (max 38 pts)
     breakout_20d_pts:     0/8    — close ≥ twenty_day_high × 0.99 (only when > 0) → +8
     breakout_60d_pts:     0/5    — close ≥ sixty_day_high × 0.99 → +5 (≥40 sessions)
     breakout_quality_pts: 0/2    — breakout + close_strength ≥ 0.7 → +2
+    breakout_volume_pts:  0/3    — breakout_20d + volume > 20d_avg × 1.5 → +3 (confirms breakout)
     ma_alignment_pts:     0/5    — MA5 > MA10 > MA20 → +5 (≥20 sessions)
     ma20_slope_pts:       0/5    — MA20 rising vs 5d ago → +5 (≥25 sessions)
     relative_strength_pts:0/3/5  — stock 5d return vs TAIEX; 0–20% outperform → 3, >20% → 5
@@ -182,13 +184,14 @@ class _ScoreBreakdown:
     """
     scoring_version: str = "v2"
 
-    # --- Pillar 1: Momentum (max _PILLAR1_MAX = 35) ---
+    # --- Pillar 1: Momentum (max _PILLAR1_MAX = 39) ---
     volume_ratio_pts: int = 0         # 0/4/8
     price_direction_pts: int = 0      # 0/3
     close_strength_pts: int = 0       # 0/2/4
     vwap_advantage_pts: int = 0       # 0/6
     trend_continuity_pts: int = 0     # 0/3/5
     volume_escalation_pts: int = 0    # 0/3/5
+    rsi_momentum_pts: int = 0         # 0/4 — RSI(14) 55–70
 
     # --- Pillar 2A: Chip paid (max _PILLAR2_PAID_MAX = 40) ---
     breadth_pts: int = 0              # 0/5/10
@@ -207,10 +210,11 @@ class _ScoreBreakdown:
     margin_utilization_pts: int = 0       # -4/0/+4
     sbl_pressure_pts: int = 0             # 0/-4/-8
 
-    # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 35) ---
+    # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 38) ---
     breakout_20d_pts: int = 0         # 0/8
     breakout_60d_pts: int = 0         # 0/5
     breakout_quality_pts: int = 0     # 0/2
+    breakout_volume_pts: int = 0      # 0/3 — breakout_20d + volume > 1.5× avg
     ma_alignment_pts: int = 0         # 0/5
     ma20_slope_pts: int = 0           # 0/5
     relative_strength_pts: int = 0    # 0/3/5
@@ -238,6 +242,7 @@ class _ScoreBreakdown:
             + self.vwap_advantage_pts
             + self.trend_continuity_pts
             + self.volume_escalation_pts
+            + self.rsi_momentum_pts
             # Pillar 2A paid
             + self.breadth_pts
             + self.concentration_pts
@@ -257,6 +262,7 @@ class _ScoreBreakdown:
             + self.breakout_20d_pts
             + self.breakout_60d_pts
             + self.breakout_quality_pts
+            + self.breakout_volume_pts
             + self.ma_alignment_pts
             + self.ma20_slope_pts
             + self.relative_strength_pts
@@ -303,6 +309,7 @@ class _ScoreBreakdown:
             + self.vwap_advantage_pts
             + self.trend_continuity_pts
             + self.volume_escalation_pts
+            + self.rsi_momentum_pts
         )
 
     @property
@@ -312,6 +319,7 @@ class _ScoreBreakdown:
             self.breakout_20d_pts
             + self.breakout_60d_pts
             + self.breakout_quality_pts
+            + self.breakout_volume_pts
             + self.ma_alignment_pts
             + self.ma20_slope_pts
             + self.relative_strength_pts
@@ -528,6 +536,7 @@ class TripleConfirmationEngine:
 
         bd.trend_continuity_pts = self._trend_continuity_score(ohlcv, ohlcv_history)
         bd.volume_escalation_pts = self._volume_escalation_score(ohlcv, ohlcv_history)
+        bd.rsi_momentum_pts = self._rsi_momentum_score(ohlcv_history)
 
         # --- Pillar 2: Chip (paid vs free-tier, mutually exclusive) ---
         if chip_report.net_buyer_count_diff != 0 or chip_report.active_branch_count > 0:
@@ -556,6 +565,14 @@ class TripleConfirmationEngine:
             if cs_ratio is not None and cs_ratio >= 0.7:
                 bd.breakout_quality_pts = 2
 
+        # Breakout volume confirmation: breakout + volume > 1.5× 20d avg
+        # Rationale: high-volume breakouts signal real demand, not just thin-market drift.
+        if b20_pts > 0:
+            vol_20ma = self._volume_20ma(ohlcv_history)
+            if vol_20ma is not None and vol_20ma > 0 and ohlcv.volume > vol_20ma * 1.5:
+                bd.breakout_volume_pts = 3
+                bd.flags.append("BREAKOUT_WITH_VOL")
+
         ma_align_pts, ma_align_flag = self._ma_alignment_score(ohlcv_history)
         bd.ma_alignment_pts = ma_align_pts
         if ma_align_flag:
@@ -583,7 +600,7 @@ class TripleConfirmationEngine:
             "p1=%d+%d+%d+%d+%d+%d "
             "p2_paid=%d+%d+%d+%d+%d "
             "p2_free=%d+%d+%d+%d+%d+%d+%d+%d "
-            "p3=%d+%d+%d+%d+%d+%d+%d "
+            "p3=%d+%d+%d+%d+%d+%d+%d+%d "
             "risk=-%d-%d-%d-%d-%d-%d-%d "
             "flags=%s → total=%d",
             ohlcv.ticker,
@@ -595,6 +612,7 @@ class TripleConfirmationEngine:
             bd.institution_continuity_pts, bd.institution_consensus_pts,
             bd.margin_structure_pts, bd.margin_utilization_pts, bd.sbl_pressure_pts,
             bd.breakout_20d_pts, bd.breakout_60d_pts, bd.breakout_quality_pts,
+            bd.breakout_volume_pts,
             bd.ma_alignment_pts, bd.ma20_slope_pts, bd.relative_strength_pts, bd.upside_space_pts,
             bd.daytrade_risk, bd.long_upper_shadow, bd.overheat_ma20, bd.overheat_ma60,
             bd.daytrade_heat, bd.sbl_breakout_fail, bd.margin_chase_heat,
@@ -688,6 +706,25 @@ class TripleConfirmationEngine:
         if consec >= 3:
             return 3
         return 0
+
+    def _rsi_momentum_score(self, history: list[DailyOHLCV]) -> int:
+        """RSI(14) momentum zone: 55 ≤ RSI < 70 → +4.
+
+        Rationale: this range indicates healthy upward momentum — stock has been
+        outperforming over the past 14 days but has not yet entered overbought territory.
+        RSI ≥ 70 is already addressed by overheat risk deductions; no double-penalizing.
+        RSI < 55 means momentum is neutral/weak — no bonus.
+
+        Requires ≥ 16 sessions (14-period RSI + 2 for delta computation).
+        """
+        recent = sorted(history, key=lambda x: x.trade_date)
+        if len(recent) < 16:
+            return 0
+        closes = pd.Series([d.close for d in recent])
+        rsi = self._rsi(closes, period=14)
+        if rsi is None:
+            return 0
+        return 4 if 55.0 <= rsi < 70.0 else 0
 
     def _volume_escalation_score(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]

@@ -148,9 +148,10 @@ class FinMindClient:
     ) -> pd.DataFrame:
         """Fetch daily OHLCV.
 
-        Uses TaiwanStockPriceAdj (dividend/split-adjusted) for all historical
-        and backtest work. Raw TaiwanStockPrice is intentionally NOT exposed here
-        to prevent accidentally mixing adjusted and unadjusted series.
+        Priority:
+          1. TaiwanStockPriceAdj (FinMind, adjusted, paid plan)
+          2. TaiwanStockPrice    (FinMind, unadjusted, free plan)
+          3. yfinance            (free fallback when FinMind returns 402)
 
         Columns returned: trade_date, ticker, open, high, low, close, volume
         """
@@ -163,6 +164,7 @@ class FinMindClient:
             if cached is not None:
                 return cached
 
+        df: pd.DataFrame | None = None
         try:
             df = self._fetch(
                 dataset=dataset,
@@ -171,20 +173,36 @@ class FinMindClient:
                 end_date=end_date,
             )
         except Exception as e:
-            # TaiwanStockPriceAdj requires a paid plan; fall back to raw price.
-            if adjusted and ("400" in str(e) or "register" in str(e).lower()):
+            err_str = str(e)
+            # TaiwanStockPriceAdj requires paid plan → try unadjusted first
+            if adjusted and ("400" in err_str or "register" in err_str.lower()):
                 logger.warning(
                     "TaiwanStockPriceAdj unavailable (plan restriction); "
                     "falling back to TaiwanStockPrice (unadjusted)."
                 )
-                df = self._fetch(
-                    dataset="TaiwanStockPrice",
-                    stock_id=ticker,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
+                try:
+                    df = self._fetch(
+                        dataset="TaiwanStockPrice",
+                        stock_id=ticker,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                except Exception as e2:
+                    if "402" in str(e2) or "Payment Required" in str(e2):
+                        df = None  # fall through to yfinance
+                    else:
+                        raise
+            elif "402" in err_str or "Payment Required" in err_str:
+                df = None  # fall through to yfinance
             else:
                 raise
+
+        if df is None:
+            df = self._fetch_ohlcv_yfinance(ticker, start_date, end_date)
+
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["trade_date", "ticker", "open", "high", "low", "close", "volume"])
+
         df = df.rename(
             columns={
                 "date": "trade_date",
@@ -197,11 +215,59 @@ class FinMindClient:
             }
         )
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+        cols = [c for c in ["trade_date", "ticker", "open", "high", "low", "close", "volume"] if c in df.columns]
+        df = df[cols]
+        for col in ["trade_date", "ticker", "open", "high", "low", "close", "volume"]:
+            if col not in df.columns:
+                df[col] = None
         df = df[["trade_date", "ticker", "open", "high", "low", "close", "volume"]]
 
         if use_cache:
             self._save_cache(df, cache_key, ticker, start_date, end_date)
         return df
+
+    @staticmethod
+    def _fetch_ohlcv_yfinance(
+        ticker: str,
+        start_date: date,
+        end_date: date,
+    ) -> pd.DataFrame | None:
+        """Fallback OHLCV fetch via yfinance (.TW then .TWO suffixes)."""
+        try:
+            import yfinance as yf  # optional dependency
+        except ImportError:
+            logger.warning("yfinance not installed; cannot fall back for %s", ticker)
+            return None
+
+        for suffix in (".TW", ".TWO"):
+            symbol = f"{ticker}{suffix}"
+            try:
+                raw = yf.download(
+                    symbol,
+                    start=str(start_date),
+                    end=str(end_date + timedelta(days=1)),  # yfinance end is exclusive
+                    auto_adjust=True,
+                    progress=False,
+                    multi_level_index=False,
+                )
+            except Exception as exc:
+                logger.debug("yfinance %s failed: %s", symbol, exc)
+                continue
+
+            if raw is None or raw.empty:
+                continue
+
+            raw = raw.reset_index()
+            raw.columns = [c.lower() for c in raw.columns]
+            raw = raw.rename(columns={"date": "trade_date"})
+            raw["trade_date"] = pd.to_datetime(raw["trade_date"]).dt.date
+            raw["ticker"] = ticker
+            raw = raw.rename(columns={"adj close": "close"} if "adj close" in raw.columns else {})
+            logger.info("yfinance fallback OK: %s (%d rows)", symbol, len(raw))
+            return raw
+
+        logger.warning("yfinance fallback failed for %s (tried .TW and .TWO)", ticker)
+        return None
 
     def fetch_taiex_history(
         self,
