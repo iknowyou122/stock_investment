@@ -172,14 +172,16 @@ class FinMindClient:
         cache_key = f"ohlcv_{'adj' if adjusted else 'raw'}"
 
         # 0. In-memory superset cache — fastest path (covers backtest pre-warm use case)
+        # Only check that data reaches the end_date (analysis date). The start_date
+        # may precede the earliest available trading day — that's fine, we'll just
+        # get fewer rows (engine handles INSUFFICIENT_HISTORY gracefully).
         if ticker in self._ohlcv_mem:
             mem = self._ohlcv_mem[ticker]
-            if not mem.empty:
-                mem_min = mem["trade_date"].min()
-                mem_max = mem["trade_date"].max()
-                if mem_min <= start_date and mem_max >= end_date:
-                    mask = (mem["trade_date"] >= start_date) & (mem["trade_date"] <= end_date)
-                    return mem[mask].reset_index(drop=True).copy()
+            if not mem.empty and mem["trade_date"].max() >= end_date:
+                mask = (mem["trade_date"] >= start_date) & (mem["trade_date"] <= end_date)
+                result = mem[mask]
+                if not result.empty:
+                    return result.reset_index(drop=True).copy()
 
         if use_cache:
             cached = self._load_cache(cache_key, ticker, start_date, end_date)
