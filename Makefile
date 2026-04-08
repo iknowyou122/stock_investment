@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: run scan api test test-unit test-integration install install-gemini install-openai build-labels analyze setup migrate backtest daily settle factor-report tune-review test-factor optimize
+.PHONY: run scan precheck api test test-unit test-integration install install-gemini install-openai build-labels analyze setup migrate backtest daily settle factor-report tune-review test-factor optimize
 
 # ── 分析股票 ─────────────────────────────────────────────────────────────────
 # 用法: make run DATE=2026-03-27 TICKERS="2330 2317 2454"
@@ -46,6 +46,21 @@ ifeq ($(DATE),$(_TODAY))
 else
 	$(PYTHON) scripts/batch_scan.py --date $(DATE) $(if $(LLM),--llm $(LLM)) $(if $(SECTORS),--sectors $(SECTORS))
 endif
+
+# ── 盤前/盤中確認 ────────────────────────────────────────────────────────────
+# 讀取昨日 scan CSV → 抓即時報價 → 確認哪些還能進場
+# 用法: make precheck
+#       make precheck TOP=10
+#       make precheck CSV=data/scans/scan_2026-04-07.csv
+TOP ?= 20
+CSV ?=
+MIN_CONF ?= 40
+
+precheck:
+	$(PYTHON) scripts/precheck.py \
+		--top $(TOP) \
+		--min-confidence $(MIN_CONF) \
+		$(if $(CSV),--csv $(CSV))
 
 # ── API server ───────────────────────────────────────────────────────────────
 api:

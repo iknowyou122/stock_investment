@@ -45,6 +45,8 @@ you will create drift that is expensive to fix.
 | 產業排名後處理加分 | ✅ | — | 本機 industry_map cache |
 | 信號持續加分 | ✅ | — | 前日 `--save-csv` 輸出 |
 
+| Phase 4.14 | ✅ Done | `make scan` 共用客戶端優化（shared FinMindClient + ChipProxyFetcher，日期級快取跨 worker 共享）✅ · `make precheck` 盤前/盤中確認（TWSE MIS 即時報價 → 確認 entry±3%、量能、大盤）✅ · 197 unit tests passing ✅ |
+
 **Phase 5 (next):**
 - Real Stripe webhook handling (requires production Stripe account + deployment)
 - Community reputation scoring and spam/bot filtering

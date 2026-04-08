@@ -369,30 +369,31 @@ def _default_date() -> date:
     return candidate
 
 
-def _make_agent(llm_provider=None, no_llm: bool = False, label_repo=None) -> StrategistAgent:
-    """Create a thread-local agent with its own FinMind + TWSE clients.
+def _make_agent(llm_provider=None, no_llm: bool = False, label_repo=None,
+                finmind: "FinMindClient | None" = None,
+                chip_fetcher: "ChipProxyFetcher | None" = None) -> StrategistAgent:
+    """Create an agent, optionally reusing shared client instances.
 
-    Each worker thread gets independent HTTP sessions and Parquet cache file
-    handles, avoiding lock contention and race conditions on shared state.
-    no_llm=True forces LLM off even if ANTHROPIC_API_KEY is in env (Phase 1 use).
-    label_repo: BrokerLabelRepository instance (shared across threads — read-only during scan).
+    When finmind/chip_fetcher are provided, the agent shares their in-memory
+    caches (OHLCV superset, T86/Margin/SBL/DayTrade date caches) across all
+    tickers — dramatically reducing API calls in batch scans.
     """
     agent = StrategistAgent(
-        FinMindClient(),
+        finmind or FinMindClient(),
         label_repo or _EmptyLabelRepo(),
-        chip_proxy_fetcher=ChipProxyFetcher(),
+        chip_proxy_fetcher=chip_fetcher or ChipProxyFetcher(),
         llm_provider=llm_provider,
     )
     if no_llm:
-        agent._llm_provider = None  # override auto-detection in StrategistAgent.__init__
+        agent._llm_provider = None
     return agent
 
 
-def _scan_one(ticker: str, analysis_date: date, llm_provider=None, no_llm: bool = False, label_repo=None) -> dict:
-    """Run pipeline for one ticker; return result dict."""
+def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent) -> dict:
+    """Run pipeline for one ticker using a shared agent; return result dict."""
     t0 = time.time()
     try:
-        signal = _make_agent(llm_provider, no_llm=no_llm, label_repo=label_repo).run(ticker, analysis_date)
+        signal = agent.run(ticker, analysis_date)
         elapsed = time.time() - t0
         return {
             "ticker": ticker,
@@ -574,9 +575,28 @@ def _run_phase(
     label_repo=None,
 ) -> list[dict]:
     """執行一批 ticker 的掃描，回傳 results list（順序不保證）。
+
+    共用一組 FinMindClient + ChipProxyFetcher 實例，讓所有 worker 共享
+    日期級快取（T86/Margin/SBL/DayTrade/TPEx + OHLCV superset）。
+    第一個 ticker 填充快取後，後續 ticker 直接命中記憶體 — 大幅減少 API 呼叫。
+
+    CPython GIL 保證 dict 寫入原子性，最壞情況是前幾個 ticker 重複呼叫 API，
+    不會資料錯亂。
+
     no_llm=True 強制關閉 LLM（Phase 1 deterministc 用，避免 StrategistAgent 自動偵測 API key）。
     label_repo: shared BrokerLabelRepository instance（read-only，多執行緒安全）。
     """
+    # 建立共用客戶端 — 所有 worker 共享快取
+    shared_finmind = FinMindClient()
+    shared_chip = ChipProxyFetcher()
+    shared_agent = _make_agent(
+        llm_provider=llm_provider,
+        no_llm=no_llm,
+        label_repo=label_repo,
+        finmind=shared_finmind,
+        chip_fetcher=shared_chip,
+    )
+
     results: list[dict] = []
     total = len(tickers)
     with Progress(
@@ -591,7 +611,7 @@ def _run_phase(
         task = progress.add_task(f"掃描 {total} 檔", total=total)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_scan_one, ticker, analysis_date, llm_provider, no_llm, label_repo): ticker
+                pool.submit(_scan_one, ticker, analysis_date, shared_agent): ticker
                 for ticker in tickers
             }
             for future in as_completed(futures):
