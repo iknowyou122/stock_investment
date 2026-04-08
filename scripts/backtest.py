@@ -37,6 +37,8 @@ from taiwan_stock_agent.infrastructure.signal_recorder import record_signal
 from taiwan_stock_agent.infrastructure.db import init_pool, get_connection
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+# Suppress noisy yfinance "possibly delisted" errors — handled gracefully by fallback logic
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 logger = logging.getLogger(__name__)
 
 _console = Console()
@@ -133,7 +135,7 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]]) -> None:
                     p3 = get_offset(3)
                     p5 = get_offset(5)
                     entry = closes.get(signal_date)
-                    if entry is None:
+                    if entry is None or entry == 0:
                         skipped += 1
                         continue
 
@@ -141,9 +143,9 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]]) -> None:
                         cur.execute("""
                             UPDATE signal_outcomes
                             SET price_1d = %s, price_3d = %s, price_5d = %s,
-                                outcome_1d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / %s ELSE NULL END,
-                                outcome_3d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / %s ELSE NULL END,
-                                outcome_5d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / %s ELSE NULL END
+                                outcome_1d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / NULLIF(%s, 0) ELSE NULL END,
+                                outcome_3d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / NULLIF(%s, 0) ELSE NULL END,
+                                outcome_5d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / NULLIF(%s, 0) ELSE NULL END
                             WHERE signal_id = %s
                         """, (
                             p1, p3, p5,
