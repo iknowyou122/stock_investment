@@ -83,6 +83,9 @@ class FinMindClient:
         # Short-circuit flag: if broker_trades returns 422 (paid feature), skip all
         # future calls. Saves ~11K useless HTTP round trips in free-tier backtest.
         self._broker_trades_unavailable = False
+        # Suppress repeated warnings after the first occurrence
+        self._warned_adj_unavailable = False
+        self._warned_ohlcv_402 = False
 
     # ------------------------------------------------------------------
     # Public interface
@@ -201,10 +204,11 @@ class FinMindClient:
             err_str = str(e)
             # TaiwanStockPriceAdj requires paid plan → try unadjusted first
             if adjusted and ("400" in err_str or "register" in err_str.lower()):
-                logger.warning(
-                    "[權限限制] 目前 API 權限無法讀取「還原股價」。"
-                    "將改用「一般股價」代替（注意：若遇到除權息，技術指標可能會失真）。"
-                )
+                if not self._warned_adj_unavailable:
+                    self._warned_adj_unavailable = True
+                    logger.warning(
+                        "[權限限制] 還原股價不可用，改用一般股價（後續不再重複提示）"
+                    )
                 try:
                     df = self._fetch(
                         dataset="TaiwanStockPrice",

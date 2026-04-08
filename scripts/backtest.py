@@ -63,57 +63,107 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]]) -> None:
     signal_ids: list of (signal_id, ticker, signal_date)
     """
     finmind = FinMindClient()
+    total = len(signal_ids)
+    settled = 0
+    skipped = 0
+    no_data = 0
 
-    # Reuse single connection across all updates for this batch.
-    # get_connection() auto-commits on clean exit.
-    with get_connection() as conn:
-        for signal_id, ticker, signal_date in signal_ids:
-            end = signal_date + timedelta(days=14)
-            try:
-                df = finmind.fetch_ohlcv(ticker, signal_date, end)
-            except Exception as e:
-                logger.warning("settle %s %s: %s", ticker, signal_date, e)
-                continue
-            if df.empty:
-                continue
+    # Group signals by ticker to fetch OHLCV once per ticker (not once per signal)
+    from collections import defaultdict
+    ticker_signals: dict[str, list[tuple[str, date]]] = defaultdict(list)
+    for signal_id, ticker, signal_date in signal_ids:
+        ticker_signals[ticker].append((signal_id, signal_date))
 
-            closes: dict[date, float] = {}
-            for _, row in df.iterrows():
-                closes[row["trade_date"]] = float(row["close"])
+    unique_tickers = len(ticker_signals)
+    _console.print(f"\n[bold cyan]Settlement[/bold cyan] {total:,} 訊號 / {unique_tickers:,} tickers")
 
-            trading_days = sorted(closes.keys())
-            if signal_date not in trading_days:
-                continue
-            signal_idx = trading_days.index(signal_date)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan]{task.fields[ticker]}[/cyan]"),
+        BarColumn(bar_width=30),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+        console=_console,
+        transient=False,
+    ) as progress:
+        task_id = progress.add_task("settle", total=unique_tickers, ticker="")
 
-            def get_offset(n: int) -> float | None:
-                idx = signal_idx + n
-                if 0 <= idx < len(trading_days):
-                    return closes[trading_days[idx]]
-                return None
+        with get_connection() as conn:
+            for ticker, sigs in ticker_signals.items():
+                progress.update(task_id, ticker=ticker)
 
-            p1 = get_offset(1)
-            p3 = get_offset(3)
-            p5 = get_offset(5)
-            entry = closes.get(signal_date)
-            if entry is None:
-                continue
+                # Fetch OHLCV once per ticker covering all signal dates
+                all_dates = [d for _, d in sigs]
+                ohlcv_start = min(all_dates)
+                ohlcv_end = max(all_dates) + timedelta(days=14)
+                try:
+                    df = finmind.fetch_ohlcv(ticker, ohlcv_start, ohlcv_end)
+                except Exception as e:
+                    logger.debug("settle ohlcv %s: %s", ticker, e)
+                    skipped += len(sigs)
+                    progress.advance(task_id)
+                    continue
 
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE signal_outcomes
-                    SET price_1d = %s, price_3d = %s, price_5d = %s,
-                        outcome_1d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / %s ELSE NULL END,
-                        outcome_3d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / %s ELSE NULL END,
-                        outcome_5d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / %s ELSE NULL END
-                    WHERE signal_id = %s
-                """, (
-                    p1, p3, p5,
-                    p1, p1, entry, entry,
-                    p3, p3, entry, entry,
-                    p5, p5, entry, entry,
-                    signal_id,
-                ))
+                if df.empty:
+                    no_data += len(sigs)
+                    progress.advance(task_id)
+                    continue
+
+                closes: dict[date, float] = {}
+                for _, row in df.iterrows():
+                    closes[row["trade_date"]] = float(row["close"])
+                trading_days = sorted(closes.keys())
+
+                for signal_id, signal_date in sigs:
+                    if signal_date not in trading_days:
+                        skipped += 1
+                        continue
+                    signal_idx = trading_days.index(signal_date)
+
+                    def get_offset(n: int) -> float | None:
+                        idx = signal_idx + n
+                        if 0 <= idx < len(trading_days):
+                            return closes[trading_days[idx]]
+                        return None
+
+                    p1 = get_offset(1)
+                    p3 = get_offset(3)
+                    p5 = get_offset(5)
+                    entry = closes.get(signal_date)
+                    if entry is None:
+                        skipped += 1
+                        continue
+
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE signal_outcomes
+                            SET price_1d = %s, price_3d = %s, price_5d = %s,
+                                outcome_1d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / %s ELSE NULL END,
+                                outcome_3d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / %s ELSE NULL END,
+                                outcome_5d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / %s ELSE NULL END
+                            WHERE signal_id = %s
+                        """, (
+                            p1, p3, p5,
+                            p1, p1, entry, entry,
+                            p3, p3, entry, entry,
+                            p5, p5, entry, entry,
+                            signal_id,
+                        ))
+                    settled += 1
+
+                progress.advance(task_id)
+
+    _console.print(Panel(
+        f"[bold green]Settlement 完成[/bold green]\n"
+        f"  已結算  [green]{settled:,}[/green] 筆\n"
+        f"  無資料  [yellow]{no_data:,}[/yellow] 筆\n"
+        f"  跳過    [dim]{skipped:,}[/dim] 筆",
+        border_style="green",
+        padding=(0, 2),
+    ))
 
 
 def _load_industry_map(analysis_date: date, data_dir: Path) -> dict[str, str]:
