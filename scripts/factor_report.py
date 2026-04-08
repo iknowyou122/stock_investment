@@ -265,39 +265,85 @@ def _save_recommendations(lift_results: list[dict], grid_results: list[dict], re
     return out_path
 
 
+_FLAG_ZH: dict[str, str] = {
+    "GATE_PASS:VOL": "✅ 量能充足（今量 > 1.2倍均量）",
+    "GATE_FAIL:VOL": "❌ 量能不足",
+    "GATE_PASS:VWAP": "✅ 收盤站上 5日均價",
+    "GATE_FAIL:VWAP": "❌ 收盤跌破 5日均價",
+    "GATE_PASS:HIGH20": "✅ 突破 20 日新高",
+    "GATE_FAIL:HIGH20": "❌ 未突破 20 日新高",
+    "GATE_PASS:RS": "✅ 強於大盤",
+    "GATE_FAIL:RS": "❌ 弱於大盤",
+    "GATE_MET:0": "門檻通過 0/4（全沒過）",
+    "GATE_MET:1": "門檻通過 1/4",
+    "GATE_MET:2": "門檻通過 2/4",
+    "GATE_MET:3": "門檻通過 3/4",
+    "GATE_MET:4": "門檻通過 4/4（全過）",
+    "GATE_AVAILABLE:4": "4 項門檻資料完整",
+    "GATE_SKIP:RS": "⏭ 相對強弱無資料（跳過）",
+    "NO_SETUP": "不符合進場條件（分數太低）",
+    "NO_CHIP_DATA": "無籌碼資料（TWSE 無回傳）",
+    "BREAKOUT_WITH_VOL": "突破新高 + 量能確認",
+    "LONG_UPPER_SHADOW": "長上影線（盤中賣壓重）",
+    "DOJI_OR_HALT": "十字線或漲跌停鎖死",
+    "OHLCV_PROXY:yfinance": "OHLCV 由 yfinance 提供",
+}
+
+
+def _translate_flag(flag: str) -> str:
+    if flag in _FLAG_ZH:
+        return _FLAG_ZH[flag]
+    # GATE_SKIP:X pattern
+    if flag.startswith("GATE_SKIP:"):
+        gate = flag.split(":")[1]
+        return f"⏭ {gate} 門檻無資料（跳過）"
+    return flag
+
+
 def _print_report(lift_results: list[dict], grid_results: list[dict], residual: list[str], n_rows: int) -> None:
     if _HAS_RICH and _console:
-        _console.print(Panel(f"[bold cyan]Factor Report[/bold cyan]  {n_rows} 筆已結算訊號", border_style="cyan"))
+        _console.print(Panel(f"[bold cyan]因子分析報告[/bold cyan]  {n_rows} 筆已結算訊號", border_style="cyan"))
 
-        tbl = Table(title="因子 Lift 分析", box=box.ROUNDED, header_style="bold white on dark_blue")
-        tbl.add_column("Flag", width=25)
-        tbl.add_column("N (有)", justify="right", width=8)
-        tbl.add_column("有 Flag 勝率", justify="right", width=12)
-        tbl.add_column("無 Flag 勝率", justify="right", width=12)
-        tbl.add_column("Lift", justify="right", width=10)
+        tbl = Table(
+            title="因子有效性分析（Lift = 有此特徵的勝率 - 無此特徵的勝率）",
+            box=box.ROUNDED,
+            header_style="bold white on dark_blue",
+        )
+        tbl.add_column("特徵", width=35)
+        tbl.add_column("出現次數", justify="right", width=8)
+        tbl.add_column("有此特徵勝率", justify="right", width=12)
+        tbl.add_column("無此特徵勝率", justify="right", width=12)
+        tbl.add_column("影響", justify="right", width=10)
         for r in lift_results:
             color = "green" if r["lift"] > 0.05 else ("yellow" if r["lift"] > -0.03 else "red")
+            label = _translate_flag(r["flag"])
             tbl.add_row(
-                r["flag"], str(r["n_with"]),
+                label, str(r["n_with"]),
                 f"{r['win_with']:.1%}", f"{r['win_without']:.1%}",
                 f"[{color}]{r['lift']:+.1%}[/{color}]",
             )
         _console.print(tbl)
 
-        if grid_results:
-            _console.print("\n[bold]Grid Search Top 建議（walk-forward 驗證通過）:[/bold]")
-            for i, g in enumerate(grid_results, 1):
-                _console.print(f"  {i}. lift=+{g['avg_test_lift']:.1%}  params={g['params']}")
-        else:
-            _console.print("\n[dim]Grid Search: 無通過 walk-forward 驗證的參數組合（樣本可能不足）[/dim]")
+        _console.print()
+        _console.print("[bold]怎麼看這張表：[/bold]")
+        _console.print("  [green]影響 > +5%[/green]  → 好訊號，出現這個特徵的股票更容易漲")
+        _console.print("  [red]影響 < -3%[/red]  → 壞訊號，出現這個特徵的股票更容易跌")
+        _console.print("  [yellow]中間地帶[/yellow]    → 對漲跌沒有明顯影響")
 
-        _console.print("\n[bold]殘差分析建議:[/bold]")
+        if grid_results:
+            _console.print("\n[bold]參數優化建議（歷史驗證通過）:[/bold]")
+            for i, g in enumerate(grid_results, 1):
+                _console.print(f"  {i}. 預期提升 +{g['avg_test_lift']:.1%}  參數={g['params']}")
+        else:
+            _console.print("\n[dim]參數優化：樣本不足，無法產生建議[/dim]")
+
+        _console.print("\n[bold]誤判分析：[/bold]")
         for s in residual:
             _console.print(f"  • {s}")
     else:
         print(f"\n=== Factor Report ({n_rows} signals) ===")
         for r in lift_results:
-            print(f"  {r['flag']}: lift={r['lift']:+.1%} (n={r['n_with']})")
+            print(f"  {_translate_flag(r['flag'])}: 影響={r['lift']:+.1%} (n={r['n_with']})")
 
 
 def run_report(days: int, min_samples: int, scoring_version: str | None) -> Path | None:
