@@ -114,8 +114,8 @@ class FinMindClient:
             err_str = str(exc)
             if "422" in err_str or "Unprocessable Entity" in err_str:
                 logger.warning(
-                    "TaiwanStockBrokerTradingStatement unavailable (plan restriction) "
-                    "for %s; returning empty DataFrame — free_tier_mode will activate.",
+                    "[權限限制] 目前 API Key 無法讀取 %s 的「券商分點明細」。"
+                    "系統自動啟動「免費模式」：將跳過精準籌碼分析，改用大盤數據估算。",
                     ticker,
                 )
                 return pd.DataFrame(columns=_BROKER_COLS)
@@ -177,8 +177,8 @@ class FinMindClient:
             # TaiwanStockPriceAdj requires paid plan → try unadjusted first
             if adjusted and ("400" in err_str or "register" in err_str.lower()):
                 logger.warning(
-                    "TaiwanStockPriceAdj unavailable (plan restriction); "
-                    "falling back to TaiwanStockPrice (unadjusted)."
+                    "[權限限制] 目前 API 權限無法讀取「還原股價」。"
+                    "將改用「一般股價」代替（注意：若遇到除權息，技術指標可能會失真）。"
                 )
                 try:
                     df = self._fetch(

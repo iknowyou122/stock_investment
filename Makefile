@@ -79,12 +79,12 @@ build-labels:
 # 用法: make analyze
 #       make analyze DAYS=60
 #       make analyze SCORING_VERSION=v2
-DAYS ?= 90
+DAYS ?=
 SCORING_VERSION ?=
 
 analyze:
 	$(PYTHON) scripts/analyze_outcomes.py \
-		--days $(DAYS) \
+		$(if $(DAYS),--days $(DAYS)) \
 		$(if $(SCORING_VERSION),--scoring-version $(SCORING_VERSION))
 
 # ── 環境初始化（第一次使用）────────────────────────────────────────────────────
@@ -99,17 +99,21 @@ migrate:
 	$(PYTHON) scripts/migrate.py $(if $(DRY_RUN),--dry-run)
 
 # ── 歷史回測 ──────────────────────────────────────────────────────────────────
-# 用法: make backtest DATE_FROM=2025-10-01 DATE_TO=2026-03-31
-#       make backtest DATE_FROM=2026-01-15 DATE_TO=2026-01-15 BACKTEST_TICKERS="2330 2317"
-DATE_FROM ?= $(shell date -v-180d +%Y-%m-%d 2>/dev/null || date -d '180 days ago' +%Y-%m-%d)
-DATE_TO   ?= $(_TODAY)
+# 優化迴路起點：撈過去歷史資料 → 產生訊號存 DB → settle → analyze → optimize
+# 用法: make backtest                        # 全互動
+#       make backtest DATE_FROM=2025-10-01 DATE_TO=2026-03-31
+#       make backtest SECTORS="5 31" LLM=none
+DATE_FROM ?=
+DATE_TO   ?=
 BACKTEST_TICKERS ?=
 
 backtest:
 	$(PYTHON) scripts/backtest.py \
-		--date-from $(DATE_FROM) \
-		--date-to $(DATE_TO) \
-		$(if $(BACKTEST_TICKERS),--tickers $(BACKTEST_TICKERS))
+		$(if $(DATE_FROM),--date-from $(DATE_FROM)) \
+		$(if $(DATE_TO),--date-to $(DATE_TO)) \
+		$(if $(LLM),--llm $(LLM)) \
+		$(if $(BACKTEST_TICKERS),--tickers $(BACKTEST_TICKERS)) \
+		$(if $(SECTORS),--sectors $(SECTORS))
 
 # ── 每日真實訊號 ──────────────────────────────────────────────────────────────
 daily:
@@ -127,10 +131,10 @@ else
 endif
 
 # ── 因子分析 ──────────────────────────────────────────────────────────────────
-FACTOR_DAYS ?= 180
+FACTOR_DAYS ?=
 
 factor-report:
-	$(PYTHON) scripts/factor_report.py --days $(FACTOR_DAYS)
+	$(PYTHON) scripts/factor_report.py $(if $(FACTOR_DAYS),--days $(FACTOR_DAYS))
 
 # ── 調參 ──────────────────────────────────────────────────────────────────────
 AUTO_APPROVE ?=
@@ -151,7 +155,7 @@ optimize:
 		$(if $(AUTO_APPROVE),--auto-approve) \
 		$(if $(DRY_RUN),--dry-run) \
 		$(if $(SKIP_SETTLE),--skip-settle) \
-		$(if $(FACTOR_DAYS),--days $(FACTOR_DAYS))
+		$(if $(DAYS),--days $(DAYS))
 
 # ── 實驗因子測試 ──────────────────────────────────────────────────────────────
 # 用法: make test-factor FACTOR=my_factor_name

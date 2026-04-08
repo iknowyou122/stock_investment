@@ -36,6 +36,9 @@ logger = logging.getLogger(__name__)
 # Minimum OHLCV history required for Pillar 1+3 calculations
 _MIN_HISTORY_SESSIONS = 20
 
+# Sentinel — pass as llm_provider to explicitly disable LLM (vs. None which triggers auto-detect)
+_LLM_DISABLED = object()
+
 
 class StrategistAgent:
     """Orchestrates data fetch → Triple Confirmation → LLM reasoning → SignalOutput.
@@ -59,11 +62,14 @@ class StrategistAgent:
         self._chip_proxy_fetcher = chip_proxy_fetcher
 
         # LLM provider resolution order:
-        #   1. explicit llm_provider= argument
-        #   2. anthropic_api_key= argument (backward compat)
-        #   3. auto-detect from env (LLM_PROVIDER / ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY)
-        if llm_provider is not None:
-            self._llm_provider: LLMProvider | None = llm_provider
+        #   1. explicit llm_provider=_LLM_DISABLED  → disabled (no LLM calls)
+        #   2. explicit llm_provider=<instance>     → use that provider
+        #   3. anthropic_api_key= argument (backward compat)
+        #   4. auto-detect from env (LLM_PROVIDER / ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY)
+        if llm_provider is _LLM_DISABLED:
+            self._llm_provider: LLMProvider | None = None
+        elif llm_provider is not None:
+            self._llm_provider = llm_provider
         elif anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", ""):
             key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
             self._llm_provider = AnthropicProvider(key)
@@ -73,6 +79,9 @@ class StrategistAgent:
         # Engine is created per-run with the appropriate free_tier_mode
         # (kept as instance attr for backward compat but overridden in run())
         self._engine = TripleConfirmationEngine()
+        # TAIEX history cache: one fetch per date serves all tickers on that date.
+        # {analysis_date: list[DailyOHLCV] | None}
+        self._taiex_cache: dict[date, list[DailyOHLCV] | None] = {}
 
     def run(self, ticker: str, analysis_date: date) -> SignalOutput:
         """Run the full pipeline for one ticker on analysis_date.
@@ -123,11 +132,15 @@ class StrategistAgent:
 
         engine = TripleConfirmationEngine(free_tier_mode=free_tier_mode)
 
-        # --- TAIEX history for RS vs 大盤 (Factor 6) ---
-        taiex_df = self._finmind.fetch_taiex_history(analysis_date, lookback_days=35)
-        taiex_history: list[DailyOHLCV] | None = None
-        if not taiex_df.empty:
-            taiex_history = self._df_to_ohlcv_list(taiex_df, "TAIEX")
+        # --- TAIEX history for RS vs 大盤 (Factor 6) — cached per date ---
+        if analysis_date in self._taiex_cache:
+            taiex_history = self._taiex_cache[analysis_date]
+        else:
+            taiex_df = self._finmind.fetch_taiex_history(analysis_date, lookback_days=35)
+            taiex_history: list[DailyOHLCV] | None = None
+            if not taiex_df.empty:
+                taiex_history = self._df_to_ohlcv_list(taiex_df, "TAIEX")
+            self._taiex_cache[analysis_date] = taiex_history
 
         # --- Enrich TWSEChipProxy with avg_20d_volume from OHLCV ---
         # avg_20d_volume is required for ratio-based institution strength scoring

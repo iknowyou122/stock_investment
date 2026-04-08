@@ -322,7 +322,7 @@ def analyze(days: int, min_samples: int, scoring_version: str | None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="分析 signal_outcomes 勝率")
-    parser.add_argument("--days", type=int, default=90, help="回溯天數（預設: 90）")
+    parser.add_argument("--days", type=int, default=None, help="回溯天數（預設: 90）")
     parser.add_argument(
         "--min-samples", type=int, default=5,
         help="每個區間最低樣本數（預設: 5）",
@@ -333,10 +333,73 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # ----------------------------------------------------------------
+    # 互動式輸入（未傳 CLI 參數時）
+    # ----------------------------------------------------------------
+    if _HAS_RICH and _console:
+        _console.print()
+        _console.print(Panel(
+            "[bold white]Signal Outcome Analyzer[/bold white]\n"
+            "[dim]分析 TripleConfirmationEngine 歷史訊號勝率[/dim]",
+            title="[bold cyan]Analyze Outcomes[/bold cyan]",
+            border_style="cyan",
+            padding=(0, 2),
+        ))
+
+    # 回溯天數
+    if args.days is None:
+        if _HAS_RICH and _console:
+            _console.print("\n[bold yellow]回溯天數[/bold yellow] [dim](預設: 90)[/dim]")
+            try:
+                raw_days = _console.input("[bold cyan]> [/bold cyan]").strip()
+            except EOFError:
+                raw_days = ""
+        else:
+            raw_days = input("回溯天數 [預設 90]: ").strip()
+        try:
+            days = int(raw_days) if raw_days else 90
+        except ValueError:
+            days = 90
+    else:
+        days = args.days
+
+    # Scoring version
+    if args.scoring_version is None:
+        _VERSIONS = [
+            (None, "全部版本"),
+            ("v2", "v2 (Phase 4.6+)"),
+        ]
+        if _HAS_RICH and _console:
+            v_table = Table(box=box.SIMPLE, show_header=False, border_style="bright_black")
+            v_table.add_column("#", style="bold cyan", justify="right", width=3)
+            v_table.add_column("版本", style="white")
+            for i, (_, label) in enumerate(_VERSIONS, 1):
+                v_table.add_row(str(i), label)
+            _console.print()
+            _console.print(Panel(v_table, title="[bold white]Scoring Version[/bold white]", border_style="bright_black"))
+            _console.print("\n[bold yellow]請輸入代號[/bold yellow]，直接 Enter 使用 [dim][1 全部版本][/dim]")
+            try:
+                raw_v = _console.input("[bold cyan]> [/bold cyan]").strip()
+            except EOFError:
+                raw_v = ""
+        else:
+            raw_v = input("Scoring version (1=全部, 2=v2) [1]: ").strip()
+
+        if raw_v.isdigit() and 1 <= int(raw_v) <= len(_VERSIONS):
+            scoring_version = _VERSIONS[int(raw_v) - 1][0]
+        else:
+            scoring_version = None
+
+        if _HAS_RICH and _console:
+            label = next(l for k, l in _VERSIONS if k == scoring_version)
+            _console.print(f"  [dim]→ {label}[/dim]")
+    else:
+        scoring_version = args.scoring_version
+
     analyze(
-        days=args.days,
+        days=days,
         min_samples=args.min_samples,
-        scoring_version=args.scoring_version,
+        scoring_version=scoring_version,
     )
 
 

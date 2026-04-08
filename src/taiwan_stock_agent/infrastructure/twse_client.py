@@ -68,6 +68,18 @@ class ChipProxyFetcher:
 
     def __init__(self, cache_dir: Path | None = None) -> None:
         self._cache_dir = cache_dir or CACHE_DIR
+        # Date-level in-memory cache: {date: {ticker: (foreign, trust, dealer)}}
+        # One T86 HTTP request per date serves ALL tickers (selectType=ALL returns full table).
+        self._t86_date_cache: dict[date, dict[str, tuple[int | None, int | None, int | None]]] = {}
+        # Margin openapi returns ALL stocks in one response — cache once per date.
+        # {date: {ticker: (today_margin, prev_margin, today_short, prev_short, margin_limit)}}
+        self._margin_date_cache: dict[date, dict[str, tuple[int | None, int | None, int | None, int | None, int | None]]] = {}
+        # SBL endpoint returns full market table — cache once per date.
+        # {date: {ticker: sbl_ratio}}
+        self._sbl_date_cache: dict[date, dict[str, float]] = {}
+        # DayTrade endpoint returns full market table — cache once per date.
+        # {date: {ticker: daytrade_ratio}}
+        self._daytrade_date_cache: dict[date, dict[str, float]] = {}
 
     def fetch(self, ticker: str, trade_date: date) -> TWSEChipProxy:
         """Fetch chip proxy data for ticker on trade_date.
@@ -163,6 +175,19 @@ class ChipProxyFetcher:
             except Exception:
                 pass
 
+        # Check date-level memory cache before making HTTP request.
+        # T86 selectType=ALL returns the full market table — one request serves all tickers.
+        if trade_date in self._t86_date_cache:
+            result = self._t86_date_cache[trade_date].get(ticker)
+            if result is not None:
+                return result
+            # Date is cached but ticker not found on TWSE → try TPEx
+            tpex_result = self._fetch_tpex_t86_data(ticker, trade_date, flags)
+            if any(v is not None for v in tpex_result):
+                return tpex_result
+            flags.append(f"TWSE_T86_TICKER_NOT_FOUND:{ticker}")
+            return None, None, None
+
         try:
             body = None
             for _attempt in range(3):
@@ -174,7 +199,7 @@ class ChipProxyFetcher:
                         "response": "json",
                     },
                     headers=_TWSE_HEADERS,
-                    timeout=10,
+                    timeout=5,
                     verify=False,  # TWSE CA cert missing Subject Key Identifier (OpenSSL 3.x strict)
                 )
                 resp.raise_for_status()
@@ -190,10 +215,12 @@ class ChipProxyFetcher:
             if body is None:
                 logger.debug("T86 unavailable for %s %s after retries — 籌碼資料缺失", ticker, trade_date)
                 flags.append(f"TWSE_T86_RATE_LIMITED:{trade_date}")
+                self._t86_date_cache[trade_date] = {}  # mark date as fetched (empty)
                 return None, None, None
 
             if body.get("stat") != "OK" or not body.get("data"):
                 flags.append(f"TWSE_T86_NO_DATA:{trade_date}")
+                self._t86_date_cache[trade_date] = {}
                 return None, None, None
 
             fields = body.get("fields", [])
@@ -208,35 +235,49 @@ class ChipProxyFetcher:
             trust_idx: int | None = fields.index("投信買賣超股數") if "投信買賣超股數" in fields else None
             dealer_idx: int | None = fields.index("自營商買賣超股數") if "自營商買賣超股數" in fields else None
 
+            # Parse ALL rows into date-level cache and write per-ticker parquet files.
+            date_map: dict[str, tuple[int | None, int | None, int | None]] = {}
             for row in body["data"]:
-                if row[code_idx].strip() == ticker:
-                    foreign_raw = row[foreign_idx].replace(",", "").replace("+", "").strip()
-                    foreign_val = int(foreign_raw)
+                t = row[code_idx].strip()
+                try:
+                    f_val = int(row[foreign_idx].replace(",", "").replace("+", "").strip())
+                except (ValueError, IndexError):
+                    continue
 
-                    trust_val: int | None = None
-                    if trust_idx is not None:
-                        trust_raw = row[trust_idx].replace(",", "").replace("+", "").strip()
-                        try:
-                            trust_val = int(trust_raw)
-                        except ValueError:
-                            flags.append("TWSE_T86_TRUST_PARSE_ERROR")
+                tr_val: int | None = None
+                if trust_idx is not None:
+                    try:
+                        tr_val = int(row[trust_idx].replace(",", "").replace("+", "").strip())
+                    except (ValueError, IndexError):
+                        pass
 
-                    dealer_val: int | None = None
-                    if dealer_idx is not None:
-                        dealer_raw = row[dealer_idx].replace(",", "").replace("+", "").strip()
-                        try:
-                            dealer_val = int(dealer_raw)
-                        except ValueError:
-                            flags.append("TWSE_T86_DEALER_PARSE_ERROR")
+                d_val: int | None = None
+                if dealer_idx is not None:
+                    try:
+                        d_val = int(row[dealer_idx].replace(",", "").replace("+", "").strip())
+                    except (ValueError, IndexError):
+                        pass
 
-                    # Cache all three values
-                    cache_row: dict = {"foreign_net_buy": foreign_val}
-                    if trust_val is not None:
-                        cache_row["trust_net_buy"] = trust_val
-                    if dealer_val is not None:
-                        cache_row["dealer_net_buy"] = dealer_val
-                    pd.DataFrame([cache_row]).to_parquet(cache, index=False)
-                    return foreign_val, trust_val, dealer_val
+                date_map[t] = (f_val, tr_val, d_val)
+
+                # Write per-ticker parquet so future runs skip HTTP entirely
+                t_cache = self._cache_dir / f"twse_t86_{t}_{trade_date}.parquet"
+                if not t_cache.exists():
+                    cache_row: dict = {"foreign_net_buy": f_val}
+                    if tr_val is not None:
+                        cache_row["trust_net_buy"] = tr_val
+                    if d_val is not None:
+                        cache_row["dealer_net_buy"] = d_val
+                    try:
+                        pd.DataFrame([cache_row]).to_parquet(t_cache, index=False)
+                    except Exception:
+                        pass
+
+            self._t86_date_cache[trade_date] = date_map
+
+            result = date_map.get(ticker)
+            if result is not None:
+                return result
 
             # Ticker not found on TWSE — try TPEx (上櫃 stocks)
             tpex_result = self._fetch_tpex_t86_data(ticker, trade_date, flags)
@@ -359,10 +400,13 @@ class ChipProxyFetcher:
         The openapi endpoint always returns today's data (date param is ignored).
         Both today and previous day values are embedded in a single response row.
 
+        Uses date-level in-memory cache: one HTTP request per date serves ALL tickers.
+
         Returns:
             (today_margin, prev_margin, today_short, prev_short, margin_limit)
             Any value may be None if the field is absent or an empty string.
         """
+        # 1. Per-ticker parquet cache (survives across process restarts)
         cache = self._cache_dir / f"twse_margin_row_{ticker}_{trade_date}.parquet"
         if cache.exists():
             try:
@@ -383,17 +427,24 @@ class ChipProxyFetcher:
             except Exception:
                 pass
 
+        # 2. Date-level memory cache (one HTTP request per date for all tickers)
+        if trade_date in self._margin_date_cache:
+            return self._margin_date_cache[trade_date].get(
+                ticker, (None, None, None, None, None)
+            )
+
         try:
             resp = requests.get(
                 TWSE_MARGIN_OPENAPI_URL,
                 timeout=10,
-                verify=False,  # openapi.twse.com.tw shares same CA cert issue (Missing Subject Key Identifier)
+                verify=False,
             )
             resp.raise_for_status()
             rows = resp.json()
 
             if not isinstance(rows, list):
                 flags.append("TWSE_MARGN_ERROR:UnexpectedFormat")
+                self._margin_date_cache[trade_date] = {}
                 return (None, None, None, None, None)
 
             def _parse_int(val: str) -> int | None:
@@ -404,25 +455,36 @@ class ChipProxyFetcher:
                 except ValueError:
                     return None
 
+            # Parse ALL rows into date-level cache + write per-ticker parquets
+            date_map: dict[str, tuple[int | None, int | None, int | None, int | None, int | None]] = {}
             for row in rows:
-                if row.get("股票代號", "").strip() == ticker:
-                    today_margin = _parse_int(row.get("融資今日餘額", ""))
-                    prev_margin = _parse_int(row.get("融資前日餘額", ""))
-                    today_short = _parse_int(row.get("融券今日餘額", ""))
-                    prev_short = _parse_int(row.get("融券前日餘額", ""))
-                    margin_limit = _parse_int(row.get("融資限額", ""))
+                t = row.get("股票代號", "").strip()
+                if not t:
+                    continue
+                today_margin = _parse_int(row.get("融資今日餘額", ""))
+                prev_margin = _parse_int(row.get("融資前日餘額", ""))
+                today_short = _parse_int(row.get("融券今日餘額", ""))
+                prev_short = _parse_int(row.get("融券前日餘額", ""))
+                margin_limit = _parse_int(row.get("融資限額", ""))
 
-                    pd.DataFrame([{
-                        "today_margin": today_margin,
-                        "prev_margin": prev_margin,
-                        "today_short": today_short,
-                        "prev_short": prev_short,
-                        "margin_limit": margin_limit,
-                    }]).to_parquet(cache, index=False)
-                    return today_margin, prev_margin, today_short, prev_short, margin_limit
+                date_map[t] = (today_margin, prev_margin, today_short, prev_short, margin_limit)
 
-            # Ticker not in response — stock may not be margin-eligible
-            return (None, None, None, None, None)
+                # Write per-ticker parquet for future runs
+                t_cache = self._cache_dir / f"twse_margin_row_{t}_{trade_date}.parquet"
+                if not t_cache.exists():
+                    try:
+                        pd.DataFrame([{
+                            "today_margin": today_margin,
+                            "prev_margin": prev_margin,
+                            "today_short": today_short,
+                            "prev_short": prev_short,
+                            "margin_limit": margin_limit,
+                        }]).to_parquet(t_cache, index=False)
+                    except Exception:
+                        pass
+
+            self._margin_date_cache[trade_date] = date_map
+            return date_map.get(ticker, (None, None, None, None, None))
 
         except Exception as e:
             logger.warning(
@@ -430,6 +492,7 @@ class ChipProxyFetcher:
                 ticker, trade_date, e,
             )
             flags.append(f"TWSE_MARGN_ERROR:{type(e).__name__}")
+            self._margin_date_cache[trade_date] = {}
             return (None, None, None, None, None)
 
     def _fetch_margin_balance_change(
@@ -539,8 +602,10 @@ class ChipProxyFetcher:
         """Fetch 借券賣出占成交量比重 from TWSE TWT93U SBL endpoint.
 
         Returns sbl_ratio (0.0–1.0) or None if unavailable/error.
+        Uses date-level in-memory cache: one HTTP request per date serves ALL tickers.
         Cache key: twse_sbl_{ticker}_{date}.parquet
         """
+        # 1. Per-ticker parquet cache
         cache = self._cache_dir / f"twse_sbl_{ticker}_{trade_date}.parquet"
         if cache.exists():
             try:
@@ -549,6 +614,10 @@ class ChipProxyFetcher:
                     return float(df["sbl_ratio"].iloc[0])
             except Exception:
                 pass
+
+        # 2. Date-level memory cache
+        if trade_date in self._sbl_date_cache:
+            return self._sbl_date_cache[trade_date].get(ticker)
 
         try:
             resp = requests.get(
@@ -567,9 +636,11 @@ class ChipProxyFetcher:
                 body = resp.json()
             except ValueError:
                 flags.append(f"TWSE_SBL_RATE_LIMITED:{trade_date}")
+                self._sbl_date_cache[trade_date] = {}
                 return None
 
             if body.get("stat") != "OK" or not body.get("data"):
+                self._sbl_date_cache[trade_date] = {}
                 return None
 
             fields = body.get("fields", [])
@@ -577,9 +648,9 @@ class ChipProxyFetcher:
                 code_idx = fields.index("證券代號")
             except ValueError:
                 flags.append("TWSE_SBL_SCHEMA_CHANGED")
+                self._sbl_date_cache[trade_date] = {}
                 return None
 
-            # Find 借券賣出成交股數 and 當日成交股數 columns (dynamic lookup)
             sbl_sell_idx: int | None = None
             total_vol_idx: int | None = None
             for candidate in ("借券賣出成交股數", "借券賣出張數"):
@@ -593,31 +664,41 @@ class ChipProxyFetcher:
 
             if sbl_sell_idx is None or total_vol_idx is None:
                 flags.append("TWSE_SBL_SCHEMA_CHANGED")
+                self._sbl_date_cache[trade_date] = {}
                 return None
 
+            # Parse ALL rows into date-level cache + write per-ticker parquets
+            date_map: dict[str, float] = {}
             for row in body["data"]:
-                if row[code_idx].strip() == ticker:
-                    sbl_raw = row[sbl_sell_idx].replace(",", "").strip()
-                    vol_raw = row[total_vol_idx].replace(",", "").strip()
-                    try:
-                        sbl_shares = int(sbl_raw)
-                        total_shares = int(vol_raw)
-                    except ValueError:
-                        flags.append("TWSE_SBL_PARSE_ERROR")
-                        return None
-                    if total_shares <= 0:
-                        return None
-                    ratio = sbl_shares / total_shares
-                    pd.DataFrame([{"sbl_ratio": ratio}]).to_parquet(cache, index=False)
-                    return ratio
+                t = row[code_idx].strip()
+                sbl_raw = row[sbl_sell_idx].replace(",", "").strip()
+                vol_raw = row[total_vol_idx].replace(",", "").strip()
+                try:
+                    sbl_shares = int(sbl_raw)
+                    total_shares = int(vol_raw)
+                except ValueError:
+                    continue
+                if total_shares <= 0:
+                    continue
+                ratio = sbl_shares / total_shares
+                date_map[t] = ratio
 
-            return None
+                t_cache = self._cache_dir / f"twse_sbl_{t}_{trade_date}.parquet"
+                if not t_cache.exists():
+                    try:
+                        pd.DataFrame([{"sbl_ratio": ratio}]).to_parquet(t_cache, index=False)
+                    except Exception:
+                        pass
+
+            self._sbl_date_cache[trade_date] = date_map
+            return date_map.get(ticker)
 
         except Exception as e:
             logger.warning(
                 "ChipProxyFetcher: SBL fetch failed for %s %s: %s", ticker, trade_date, e
             )
             flags.append(f"TWSE_SBL_ERROR:{type(e).__name__}")
+            self._sbl_date_cache[trade_date] = {}
             return None
 
     def _fetch_margin_utilization(
@@ -655,8 +736,10 @@ class ChipProxyFetcher:
 
         Returns daytrade_ratio (0.0–1.0) or None if unavailable/error.
         Non-scoring: value is for LLM hint only.
+        Uses date-level in-memory cache: one HTTP request per date serves ALL tickers.
         Cache key: twse_daytrade_{ticker}_{date}.parquet
         """
+        # 1. Per-ticker parquet cache
         cache = self._cache_dir / f"twse_daytrade_{ticker}_{trade_date}.parquet"
         if cache.exists():
             try:
@@ -666,6 +749,10 @@ class ChipProxyFetcher:
                     return None if pd.isna(val) else float(val)
             except Exception:
                 pass
+
+        # 2. Date-level memory cache
+        if trade_date in self._daytrade_date_cache:
+            return self._daytrade_date_cache[trade_date].get(ticker)
 
         try:
             resp = requests.get(
@@ -683,42 +770,54 @@ class ChipProxyFetcher:
             try:
                 body = resp.json()
             except ValueError:
+                self._daytrade_date_cache[trade_date] = {}
                 return None  # TWSE rate-limited — daytrade is hint-only, skip silently
 
             if body.get("stat") != "OK" or not body.get("data"):
+                self._daytrade_date_cache[trade_date] = {}
                 return None
 
             fields = body.get("fields", [])
             try:
                 code_idx = fields.index("證券代號")
             except ValueError:
+                self._daytrade_date_cache[trade_date] = {}
                 return None
 
-            # Find 當沖占比 column (dynamic lookup across naming variants)
             ratio_idx: int | None = None
             for candidate in ("當沖占成交量比重", "當沖比率", "當沖比例"):
                 if candidate in fields:
                     ratio_idx = fields.index(candidate)
                     break
             if ratio_idx is None:
+                self._daytrade_date_cache[trade_date] = {}
                 return None
 
+            # Parse ALL rows into date-level cache + write per-ticker parquets
+            date_map: dict[str, float] = {}
             for row in body["data"]:
-                if row[code_idx].strip() == ticker:
-                    raw = row[ratio_idx].replace(",", "").replace("%", "").strip()
-                    try:
-                        pct = float(raw)
-                        # Value may be expressed as percentage (e.g. 23.5) or ratio (0.235)
-                        ratio = pct / 100.0 if pct > 1.0 else pct
-                        pd.DataFrame([{"daytrade_ratio": ratio}]).to_parquet(cache, index=False)
-                        return ratio
-                    except ValueError:
-                        return None
+                t = row[code_idx].strip()
+                raw = row[ratio_idx].replace(",", "").replace("%", "").strip()
+                try:
+                    pct = float(raw)
+                    ratio = pct / 100.0 if pct > 1.0 else pct
+                except ValueError:
+                    continue
+                date_map[t] = ratio
 
-            return None
+                t_cache = self._cache_dir / f"twse_daytrade_{t}_{trade_date}.parquet"
+                if not t_cache.exists():
+                    try:
+                        pd.DataFrame([{"daytrade_ratio": ratio}]).to_parquet(t_cache, index=False)
+                    except Exception:
+                        pass
+
+            self._daytrade_date_cache[trade_date] = date_map
+            return date_map.get(ticker)
 
         except Exception as e:
             logger.warning(
                 "ChipProxyFetcher: daytrade fetch failed for %s %s: %s", ticker, trade_date, e
             )
+            self._daytrade_date_cache[trade_date] = {}
             return None
