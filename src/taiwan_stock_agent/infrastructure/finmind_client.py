@@ -80,6 +80,9 @@ class FinMindClient:
         # Allows backtest to pre-fetch the full date range once per ticker, then serve
         # all per-day slices from memory — eliminates 99% of OHLCV API calls in backtest.
         self._ohlcv_mem: dict[str, pd.DataFrame] = {}
+        # Short-circuit flag: if broker_trades returns 422 (paid feature), skip all
+        # future calls. Saves ~11K useless HTTP round trips in free-tier backtest.
+        self._broker_trades_unavailable = False
 
     # ------------------------------------------------------------------
     # Public interface
@@ -98,13 +101,19 @@ class FinMindClient:
         Columns (subset used downstream):
           date, stock_id, branch_broker_id, buy, sell
         """
+        _BROKER_COLS = ["trade_date", "ticker", "branch_code", "branch_name", "buy_volume", "sell_volume"]
+
         self._check_halt()
+
+        # Short-circuit: once we know broker trades is a paid feature, skip all future calls.
+        if self._broker_trades_unavailable:
+            return pd.DataFrame(columns=_BROKER_COLS)
+
         if use_cache:
             cached = self._load_cache("broker_trades", ticker, start_date, end_date)
             if cached is not None:
                 return cached
 
-        _BROKER_COLS = ["trade_date", "ticker", "branch_code", "branch_name", "buy_volume", "sell_volume"]
         try:
             df = self._fetch(
                 dataset="TaiwanStockBrokerTradingStatement",
@@ -117,10 +126,9 @@ class FinMindClient:
             # can activate free_tier_mode gracefully.
             err_str = str(exc)
             if "422" in err_str or "Unprocessable Entity" in err_str:
-                logger.warning(
-                    "[權限限制] 目前 API Key 無法讀取 %s 的「券商分點明細」。"
-                    "系統自動啟動「免費模式」：將跳過精準籌碼分析，改用大盤數據估算。",
-                    ticker,
+                self._broker_trades_unavailable = True
+                logger.info(
+                    "[權限限制] 券商分點明細為付費功能 — 後續所有 ticker 自動跳過（免費模式）"
                 )
                 return pd.DataFrame(columns=_BROKER_COLS)
             raise

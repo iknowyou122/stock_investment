@@ -153,6 +153,19 @@ class ChipProxyFetcher:
         Returns (foreign_net_buy, trust_net_buy, dealer_net_buy) in shares;
         any value may be None if unavailable.
         """
+        # 1. Date-level memory cache — fastest path (dict lookup, ~0.001ms)
+        if trade_date in self._t86_date_cache:
+            result = self._t86_date_cache[trade_date].get(ticker)
+            if result is not None:
+                return result
+            # Date is cached but ticker not found on TWSE → try TPEx
+            tpex_result = self._fetch_tpex_t86_data(ticker, trade_date, flags)
+            if any(v is not None for v in tpex_result):
+                return tpex_result
+            flags.append(f"TWSE_T86_TICKER_NOT_FOUND:{ticker}")
+            return None, None, None
+
+        # 2. Per-ticker parquet cache (survives across process restarts)
         cache = self._cache_dir / f"twse_t86_{ticker}_{trade_date}.parquet"
         if cache.exists():
             try:
@@ -175,19 +188,7 @@ class ChipProxyFetcher:
             except Exception:
                 pass
 
-        # Check date-level memory cache before making HTTP request.
-        # T86 selectType=ALL returns the full market table — one request serves all tickers.
-        if trade_date in self._t86_date_cache:
-            result = self._t86_date_cache[trade_date].get(ticker)
-            if result is not None:
-                return result
-            # Date is cached but ticker not found on TWSE → try TPEx
-            tpex_result = self._fetch_tpex_t86_data(ticker, trade_date, flags)
-            if any(v is not None for v in tpex_result):
-                return tpex_result
-            flags.append(f"TWSE_T86_TICKER_NOT_FOUND:{ticker}")
-            return None, None, None
-
+        # 3. API call (slowest — fetches full market table, populates date cache)
         try:
             body = None
             for _attempt in range(3):
@@ -406,7 +407,13 @@ class ChipProxyFetcher:
             (today_margin, prev_margin, today_short, prev_short, margin_limit)
             Any value may be None if the field is absent or an empty string.
         """
-        # 1. Per-ticker parquet cache (survives across process restarts)
+        # 1. Date-level memory cache — fastest path
+        if trade_date in self._margin_date_cache:
+            return self._margin_date_cache[trade_date].get(
+                ticker, (None, None, None, None, None)
+            )
+
+        # 2. Per-ticker parquet cache (survives across process restarts)
         cache = self._cache_dir / f"twse_margin_row_{ticker}_{trade_date}.parquet"
         if cache.exists():
             try:
@@ -427,12 +434,7 @@ class ChipProxyFetcher:
             except Exception:
                 pass
 
-        # 2. Date-level memory cache (one HTTP request per date for all tickers)
-        if trade_date in self._margin_date_cache:
-            return self._margin_date_cache[trade_date].get(
-                ticker, (None, None, None, None, None)
-            )
-
+        # 3. API call (fetches full market table, populates date cache)
         try:
             resp = requests.get(
                 TWSE_MARGIN_OPENAPI_URL,
@@ -605,7 +607,11 @@ class ChipProxyFetcher:
         Uses date-level in-memory cache: one HTTP request per date serves ALL tickers.
         Cache key: twse_sbl_{ticker}_{date}.parquet
         """
-        # 1. Per-ticker parquet cache
+        # 1. Date-level memory cache — fastest path
+        if trade_date in self._sbl_date_cache:
+            return self._sbl_date_cache[trade_date].get(ticker)
+
+        # 2. Per-ticker parquet cache
         cache = self._cache_dir / f"twse_sbl_{ticker}_{trade_date}.parquet"
         if cache.exists():
             try:
@@ -615,10 +621,7 @@ class ChipProxyFetcher:
             except Exception:
                 pass
 
-        # 2. Date-level memory cache
-        if trade_date in self._sbl_date_cache:
-            return self._sbl_date_cache[trade_date].get(ticker)
-
+        # 3. API call
         try:
             resp = requests.get(
                 TWSE_SBL_URL,
@@ -739,7 +742,11 @@ class ChipProxyFetcher:
         Uses date-level in-memory cache: one HTTP request per date serves ALL tickers.
         Cache key: twse_daytrade_{ticker}_{date}.parquet
         """
-        # 1. Per-ticker parquet cache
+        # 1. Date-level memory cache — fastest path
+        if trade_date in self._daytrade_date_cache:
+            return self._daytrade_date_cache[trade_date].get(ticker)
+
+        # 2. Per-ticker parquet cache
         cache = self._cache_dir / f"twse_daytrade_{ticker}_{trade_date}.parquet"
         if cache.exists():
             try:
@@ -750,10 +757,7 @@ class ChipProxyFetcher:
             except Exception:
                 pass
 
-        # 2. Date-level memory cache
-        if trade_date in self._daytrade_date_cache:
-            return self._daytrade_date_cache[trade_date].get(ticker)
-
+        # 3. API call
         try:
             resp = requests.get(
                 TWSE_DAYTRADE_URL,
