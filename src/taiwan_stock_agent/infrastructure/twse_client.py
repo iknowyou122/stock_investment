@@ -80,6 +80,9 @@ class ChipProxyFetcher:
         # DayTrade endpoint returns full market table — cache once per date.
         # {date: {ticker: daytrade_ratio}}
         self._daytrade_date_cache: dict[date, dict[str, float]] = {}
+        # TPEx T86 (上櫃三大法人) — full market table, cache once per date.
+        # {date: {ticker: (foreign, trust, dealer)}}
+        self._tpex_t86_date_cache: dict[date, dict[str, tuple[int | None, int | None, int | None]]] = {}
 
     def fetch(self, ticker: str, trade_date: date) -> TWSEChipProxy:
         """Fetch chip proxy data for ticker on trade_date.
@@ -298,6 +301,7 @@ class ChipProxyFetcher:
         """Fetch 三大法人買賣超 from TPEx (上櫃/OTC) endpoint.
 
         Fallback for stocks not found on TWSE T86 (i.e., 上櫃 stocks).
+        Uses date-level in-memory cache: one HTTP request per date serves ALL OTC tickers.
         Returns (foreign_net_buy, trust_net_buy, dealer_net_buy) in shares.
 
         TPEx field layout (25 cols):
@@ -312,6 +316,14 @@ class ChipProxyFetcher:
           23: (reserved)
           24: 三大法人買賣超股數合計
         """
+        # 1. Date-level memory cache — fastest path
+        if trade_date in self._tpex_t86_date_cache:
+            result = self._tpex_t86_date_cache[trade_date].get(ticker)
+            if result is not None:
+                return result
+            return None, None, None
+
+        # 2. Per-ticker parquet cache
         cache = self._cache_dir / f"tpex_t86_{ticker}_{trade_date}.parquet"
         if cache.exists():
             try:
@@ -324,6 +336,7 @@ class ChipProxyFetcher:
             except Exception:
                 pass
 
+        # 3. API call — fetches full OTC market table, populates date cache
         try:
             resp = requests.get(
                 TPEX_T86_URL,
@@ -343,10 +356,12 @@ class ChipProxyFetcher:
                 body = resp.json()
             except ValueError:
                 flags.append(f"TPEX_T86_RATE_LIMITED:{trade_date}")
+                self._tpex_t86_date_cache[trade_date] = {}
                 return None, None, None
 
             data = body.get("aaData") or body.get("data") or []
             if not data:
+                self._tpex_t86_date_cache[trade_date] = {}
                 return None, None, None
 
             def _parse_shares(val: str) -> int | None:
@@ -356,18 +371,20 @@ class ChipProxyFetcher:
                 except ValueError:
                     return None
 
+            # Parse ALL rows into date-level cache + write per-ticker parquets
+            date_map: dict[str, tuple[int | None, int | None, int | None]] = {}
             for row in data:
                 if len(row) < 17:
                     continue
                 code = str(row[0]).strip()
-                if code == ticker:
-                    # Foreign: index 4 (外資買賣超)
-                    # Trust:   index 10 (投信買賣超)
-                    # Dealer:  index 16 (自營商合計買賣超)
-                    foreign_val = _parse_shares(str(row[4]))
-                    trust_val = _parse_shares(str(row[10])) if len(row) > 10 else None
-                    dealer_val = _parse_shares(str(row[16])) if len(row) > 16 else None
+                foreign_val = _parse_shares(str(row[4]))
+                trust_val = _parse_shares(str(row[10])) if len(row) > 10 else None
+                dealer_val = _parse_shares(str(row[16])) if len(row) > 16 else None
+                date_map[code] = (foreign_val, trust_val, dealer_val)
 
+                # Write per-ticker parquet for future runs
+                t_cache = self._cache_dir / f"tpex_t86_{code}_{trade_date}.parquet"
+                if not t_cache.exists():
                     cache_row: dict = {}
                     if foreign_val is not None:
                         cache_row["foreign_net_buy"] = foreign_val
@@ -376,11 +393,17 @@ class ChipProxyFetcher:
                     if dealer_val is not None:
                         cache_row["dealer_net_buy"] = dealer_val
                     if cache_row:
-                        pd.DataFrame([cache_row]).to_parquet(cache, index=False)
-                        flags.append(f"TPEX_T86:{ticker}")
+                        try:
+                            pd.DataFrame([cache_row]).to_parquet(t_cache, index=False)
+                        except Exception:
+                            pass
 
-                    return foreign_val, trust_val, dealer_val
+            self._tpex_t86_date_cache[trade_date] = date_map
 
+            result = date_map.get(ticker)
+            if result is not None:
+                flags.append(f"TPEX_T86:{ticker}")
+                return result
             return None, None, None
 
         except Exception as e:
@@ -388,6 +411,7 @@ class ChipProxyFetcher:
                 "ChipProxyFetcher: TPEx T86 fetch failed for %s %s: %s", ticker, trade_date, e
             )
             flags.append(f"TPEX_T86_ERROR:{type(e).__name__}")
+            self._tpex_t86_date_cache[trade_date] = {}
             return None, None, None
 
     def _fetch_margin_row_openapi(
