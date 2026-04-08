@@ -76,6 +76,10 @@ class FinMindClient:
                 "FinMind API key required. Set FINMIND_API_KEY env var or pass api_key."
             )
         self.halt_flag = False
+        # In-memory superset OHLCV cache: {ticker: DataFrame covering widest fetched range}
+        # Allows backtest to pre-fetch the full date range once per ticker, then serve
+        # all per-day slices from memory — eliminates 99% of OHLCV API calls in backtest.
+        self._ohlcv_mem: dict[str, pd.DataFrame] = {}
 
     # ------------------------------------------------------------------
     # Public interface
@@ -159,9 +163,20 @@ class FinMindClient:
         dataset = "TaiwanStockPriceAdj" if adjusted else "TaiwanStockPrice"
         cache_key = f"ohlcv_{'adj' if adjusted else 'raw'}"
 
+        # 0. In-memory superset cache — fastest path (covers backtest pre-warm use case)
+        if ticker in self._ohlcv_mem:
+            mem = self._ohlcv_mem[ticker]
+            if not mem.empty:
+                mem_min = mem["trade_date"].min()
+                mem_max = mem["trade_date"].max()
+                if mem_min <= start_date and mem_max >= end_date:
+                    mask = (mem["trade_date"] >= start_date) & (mem["trade_date"] <= end_date)
+                    return mem[mask].reset_index(drop=True).copy()
+
         if use_cache:
             cached = self._load_cache(cache_key, ticker, start_date, end_date)
             if cached is not None:
+                self._update_ohlcv_mem(ticker, cached)
                 return cached
 
         df: pd.DataFrame | None = None
@@ -224,7 +239,23 @@ class FinMindClient:
 
         if use_cache:
             self._save_cache(df, cache_key, ticker, start_date, end_date)
+        self._update_ohlcv_mem(ticker, df)
         return df
+
+    def _update_ohlcv_mem(self, ticker: str, df: pd.DataFrame) -> None:
+        """Merge df into the in-memory superset cache for ticker."""
+        if df.empty:
+            return
+        if ticker not in self._ohlcv_mem or self._ohlcv_mem[ticker].empty:
+            self._ohlcv_mem[ticker] = df.copy()
+        else:
+            combined = (
+                pd.concat([self._ohlcv_mem[ticker], df])
+                .drop_duplicates("trade_date")
+                .sort_values("trade_date")
+                .reset_index(drop=True)
+            )
+            self._ohlcv_mem[ticker] = combined
 
     @staticmethod
     def _fetch_ohlcv_yfinance(

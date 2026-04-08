@@ -290,6 +290,35 @@ def run_backtest(
             day_tickers_default = list(industry_map.keys())
             _console.print(f"  [green]全市場掃描：{len(day_tickers_default)} 隻股票[/green]")
 
+    # ----------------------------------------------------------------
+    # OHLCV Pre-warm: fetch full date range once per ticker.
+    # Without this, each (ticker, day) call fetches a slightly different 95-day
+    # window → 133,170 API calls. With pre-warm: 1,930 calls + memory slicing.
+    # ----------------------------------------------------------------
+    ohlcv_prefetch_start = date_from - timedelta(days=95)
+    _console.print(f"\n[bold cyan]Phase 1/2[/bold cyan] OHLCV pre-fetch ({len(day_tickers_default)} tickers, {ohlcv_prefetch_start} ~ {date_to})")
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan]{task.fields[ticker]}[/cyan]"),
+        BarColumn(bar_width=30),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+        console=_console,
+        transient=True,
+    ) as pre_progress:
+        pre_task = pre_progress.add_task("prefetch", total=len(day_tickers_default), ticker="")
+        for ticker in day_tickers_default:
+            pre_progress.update(pre_task, ticker=ticker)
+            try:
+                agent._finmind.fetch_ohlcv(ticker, ohlcv_prefetch_start, date_to)
+            except Exception as e:
+                logger.debug("prefetch skip %s: %s", ticker, e)
+            pre_progress.advance(pre_task)
+    _console.print(f"  [green]OHLCV pre-fetch done — 主迴路改由 memory 提供資料[/green]\n")
+
     total = 0
     recorded: list[tuple[str, str, date]] = []
     total_tasks = len(trading_days) * len(day_tickers_default)
@@ -306,6 +335,7 @@ def run_backtest(
         console=_console,
         transient=False,
     ) as progress:
+        _console.print(f"[bold cyan]Phase 2/2[/bold cyan] 計分迴路 ({len(trading_days)} 天 × {len(day_tickers_default)} tickers = {total_tasks:,} 任務)")
         task_id = progress.add_task("backtest", total=total_tasks, day="starting...")
 
         for day in trading_days:
@@ -367,8 +397,8 @@ def main() -> None:
     parser.add_argument("--sectors", nargs="*", type=int, metavar="N",
                         help="Filter by sector index numbers (same as batch_scan menu)")
     parser.add_argument("--no-settle", action="store_true", help="Skip T+N outcome settlement")
-    parser.add_argument("--delay", type=float, default=0.1,
-                        help="Seconds between requests (default: 0.1)")
+    parser.add_argument("--delay", type=float, default=0.0,
+                        help="Seconds between tickers in main loop (default: 0 — OHLCV is pre-fetched)")
     parser.add_argument("--llm", default=None,
                         help="LLM provider: auto | none | anthropic | openai | gemini (default: 互動選單)")
     args = parser.parse_args()
