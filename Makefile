@@ -103,3 +103,39 @@ migrate:
 # ── API server ───────────────────────────────────────────────────────────────
 api:
 	$(PYTHON) -m uvicorn taiwan_stock_agent.api.main:app --reload --port 8000
+
+# ── 資料庫備份與還原 ─────────────────────────────────────────────────────────
+# 從 DATABASE_URL 解析連線資訊
+_DB_URL  := $(shell grep DATABASE_URL .env 2>/dev/null | cut -d= -f2-)
+_DB_NAME := $(shell echo $(_DB_URL) | sed 's|.*\/||')
+
+DUMP_FILE ?= backup_$(shell date +%Y%m%d).dump
+
+# 完整備份（schema + 所有資料）
+db-dump:
+	@echo "備份資料庫 $(_DB_NAME) → $(DUMP_FILE)"
+	pg_dump -Fc "$(_DB_URL)" > "$(DUMP_FILE)"
+	@echo "完成：$(DUMP_FILE) ($(shell du -sh $(DUMP_FILE) | cut -f1))"
+
+# 還原（需要目標 DB 已存在且空白）
+db-restore:
+	@test -n "$(FILE)" || (echo "用法: make db-restore FILE=backup_20260409.dump" && exit 1)
+	@echo "還原 $(FILE) → $(_DB_NAME)"
+	pg_restore -d "$(_DB_URL)" --no-owner --no-privileges "$(FILE)"
+	@echo "完成"
+
+# 只備份最有價值的分析資料（signal_outcomes）
+db-dump-signals:
+	@echo "備份 signal_outcomes → signals_$(shell date +%Y%m%d).dump"
+	pg_dump -Fc -t signal_outcomes "$(_DB_URL)" > "signals_$(shell date +%Y%m%d).dump"
+	@echo "完成"
+
+# 新機器一鍵初始化（clone 之後跑這個）
+db-init:
+	@echo "1. 建立資料庫 $(_DB_NAME)..."
+	createdb "$(_DB_NAME)" 2>/dev/null || echo "  (資料庫已存在，略過)"
+	@echo "2. 執行 migrations..."
+	$(MAKE) migrate
+	@echo "3. 完成。如有備份檔請執行: make db-restore FILE=your_backup.dump"
+
+.PHONY: db-dump db-restore db-dump-signals db-init

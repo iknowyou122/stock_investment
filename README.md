@@ -129,6 +129,55 @@ make test
 
 ---
 
+## 搬移到新機器
+
+### 舊機器：匯出資料
+
+```bash
+# 完整備份（schema + 所有分析資料，推薦）
+make db-dump
+# 產出 backup_YYYYMMDD.dump（壓縮格式，通常 10-50 MB）
+
+# 或只備份訊號資料（最重要的部分）
+make db-dump-signals
+# 產出 signals_YYYYMMDD.dump
+```
+
+把以下三個東西帶走：
+1. `backup_YYYYMMDD.dump` — 資料庫備份
+2. `.env` — API keys（FinMind / LLM / DB）
+3. `data/scans/` — 歷史掃描 CSV（選擇性）
+
+### 新機器：初始化
+
+```bash
+# 1. 取得代碼
+git clone https://github.com/iknowyou122/stock_investment.git
+cd stock_investment
+
+# 2. 建 venv + 安裝依賴
+python3.11 -m venv .venv
+make install
+
+# 3. 複製 .env（含 DATABASE_URL、FINMIND_API_KEY 等）
+cp /path/to/old/.env .env
+
+# 4. 建立 DB + 跑 migrations
+make db-init
+
+# 5. 還原資料（可選，沒有也能重新跑 backtest）
+make db-restore FILE=backup_20260409.dump
+
+# 6. 確認
+make test
+```
+
+> **DATABASE_URL 格式：** `postgresql://localhost/taiwan_stock`（本機）或 `postgresql://user:pass@host:5432/taiwan_stock`（遠端）
+>
+> **沒有備份也沒關係：** `make migrate` 建好 schema 後，`make backtest` 重新跑回測即可重建分析資料。
+
+---
+
 ## 每日使用流程
 
 ### 標準三段式工作流
