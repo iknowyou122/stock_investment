@@ -195,17 +195,23 @@ class ChipProxyFetcher:
         try:
             body = None
             for _attempt in range(3):
-                resp = requests.get(
-                    TWSE_T86_URL,
-                    params={
-                        "date": trade_date.strftime("%Y%m%d"),
-                        "selectType": "ALL",
-                        "response": "json",
-                    },
-                    headers=_TWSE_HEADERS,
-                    timeout=5,
-                    verify=False,  # TWSE CA cert missing Subject Key Identifier (OpenSSL 3.x strict)
-                )
+                try:
+                    resp = requests.get(
+                        TWSE_T86_URL,
+                        params={
+                            "date": trade_date.strftime("%Y%m%d"),
+                            "selectType": "ALL",
+                            "response": "json",
+                        },
+                        headers=_TWSE_HEADERS,
+                        timeout=15,
+                        verify=False,  # TWSE CA cert missing Subject Key Identifier (OpenSSL 3.x strict)
+                    )
+                except requests.exceptions.Timeout:
+                    logger.debug("T86 timeout for %s %s (attempt %d)", ticker, trade_date, _attempt + 1)
+                    if _attempt < 2:
+                        time.sleep(3.0 + _attempt * 3.0)
+                    continue
                 resp.raise_for_status()
                 try:
                     body = resp.json()
@@ -293,6 +299,9 @@ class ChipProxyFetcher:
         except Exception as e:
             logger.warning("ChipProxyFetcher: T86 fetch failed for %s %s: %s", ticker, trade_date, e)
             flags.append(f"TWSE_T86_ERROR:{type(e).__name__}")
+            # Cache the failure so subsequent tickers skip this date immediately
+            # instead of each waiting for another timeout.
+            self._t86_date_cache[trade_date] = {}
             return None, None, None
 
     def _fetch_tpex_t86_data(

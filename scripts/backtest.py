@@ -5,8 +5,9 @@ Usage:
     python scripts/backtest.py --date-from 2026-01-15 --date-to 2026-01-15 --tickers 2330 2317
     python scripts/backtest.py --date-from 2026-03-01 --date-to 2026-03-31 --llm none
     python scripts/backtest.py --date-from 2026-03-01 --date-to 2026-03-31 --sectors 1 4 --llm none
+    python scripts/backtest.py --entry-delay 1                              # T-1 佈局驗證
     make backtest DATE_FROM=2025-10-01 DATE_TO=2026-03-31
-    make backtest DATE_FROM=2026-03-01 DATE_TO=2026-03-31 SECTORS="1 4" LLM=none
+    make backtest ENTRY_DELAY=1 SECTORS="5" LLM=none                       # T-1 佈局回測
 """
 from __future__ import annotations
 
@@ -59,10 +60,14 @@ def _date_range(start: date, end: date) -> list[date]:
     return days
 
 
-def _settle_outcomes(signal_ids: list[tuple[str, str, date]]) -> None:
-    """Backfill T+1/T+3/T+5 prices for signals we just inserted.
+def _settle_outcomes(signal_ids: list[tuple[str, str, date]], entry_delay: int = 0) -> None:
+    """Backfill T+N prices for signals we just inserted.
 
     signal_ids: list of (signal_id, ticker, signal_date)
+    entry_delay: number of trading days to shift entry forward.
+        0 (default) = enter on signal_date close (original behavior)
+        1 = enter on signal_date+1 close (T-1 佈局：T-2 計分 → T-1 進場)
+    When entry_delay=1, outcome_1d/3d/5d measure D+2/D+4/D+6 vs D+1 entry.
     """
     finmind = FinMindClient()
     total = len(signal_ids)
@@ -77,7 +82,8 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]]) -> None:
         ticker_signals[ticker].append((signal_id, signal_date))
 
     unique_tickers = len(ticker_signals)
-    _console.print(f"\n[bold cyan]Settlement[/bold cyan] {total:,} 訊號 / {unique_tickers:,} tickers")
+    delay_label = f"  [yellow](entry_delay={entry_delay})[/yellow]" if entry_delay > 0 else ""
+    _console.print(f"\n[bold cyan]Settlement[/bold cyan] {total:,} 訊號 / {unique_tickers:,} tickers{delay_label}")
 
     with Progress(
         SpinnerColumn(),
@@ -97,10 +103,10 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]]) -> None:
             for ticker, sigs in ticker_signals.items():
                 progress.update(task_id, ticker=ticker)
 
-                # Fetch OHLCV once per ticker covering all signal dates
+                # Fetch OHLCV once per ticker covering all signal dates + settlement window
                 all_dates = [d for _, d in sigs]
                 ohlcv_start = min(all_dates)
-                ohlcv_end = max(all_dates) + timedelta(days=14)
+                ohlcv_end = max(all_dates) + timedelta(days=14 + entry_delay * 2)
                 try:
                     df = finmind.fetch_ohlcv(ticker, ohlcv_start, ohlcv_end)
                 except Exception as e:
@@ -125,19 +131,28 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]]) -> None:
                         continue
                     signal_idx = trading_days.index(signal_date)
 
+                    # entry_delay shifts entry forward: delay=0 → enter on signal_date,
+                    # delay=1 → enter on signal_date+1 (T-1 佈局)
+                    entry_idx = signal_idx + entry_delay
+
                     def get_offset(n: int) -> float | None:
-                        idx = signal_idx + n
+                        idx = entry_idx + n
                         if 0 <= idx < len(trading_days):
                             return closes[trading_days[idx]]
                         return None
 
+                    if entry_idx < 0 or entry_idx >= len(trading_days):
+                        skipped += 1
+                        continue
+
+                    entry = closes[trading_days[entry_idx]]
+                    if entry == 0:
+                        skipped += 1
+                        continue
+
                     p1 = get_offset(1)
                     p3 = get_offset(3)
                     p5 = get_offset(5)
-                    entry = closes.get(signal_date)
-                    if entry is None or entry == 0:
-                        skipped += 1
-                        continue
 
                     with conn.cursor() as cur:
                         cur.execute("""
@@ -295,6 +310,7 @@ def run_backtest(
     delay: float,
     llm: str | None = "auto",
     sectors: list[int] | None = None,
+    entry_delay: int = 0,
 ) -> None:
     init_pool()
 
@@ -419,8 +435,9 @@ def run_backtest(
     ))
 
     if settle and recorded:
-        _console.print(f"  [dim]Settling {len(recorded)} signals (T+1/T+3/T+5)...[/dim]")
-        _settle_outcomes(recorded)
+        offset_label = f"T+{entry_delay+1}/T+{entry_delay+3}/T+{entry_delay+5}" if entry_delay else "T+1/T+3/T+5"
+        _console.print(f"  [dim]Settling {len(recorded)} signals ({offset_label})...[/dim]")
+        _settle_outcomes(recorded, entry_delay=entry_delay)
         _console.print("  [green]Settlement done.[/green]")
 
 
@@ -451,6 +468,8 @@ def main() -> None:
     parser.add_argument("--no-settle", action="store_true", help="Skip T+N outcome settlement")
     parser.add_argument("--delay", type=float, default=0.0,
                         help="Seconds between tickers in main loop (default: 0 — OHLCV is pre-fetched)")
+    parser.add_argument("--entry-delay", type=int, default=0, metavar="N",
+                        help="進場延遲 N 個交易日（0=當日收盤進場, 1=隔日收盤進場 T-1 佈局）")
     parser.add_argument("--llm", default=None,
                         help="LLM provider: auto | none | anthropic | openai | gemini (default: 互動選單)")
     args = parser.parse_args()
@@ -506,12 +525,14 @@ def main() -> None:
     ])
     llm_display = llm_key if llm_key else "none"
     settle_display = "是" if do_settle else "否"
+    entry_delay_display = f"D+{args.entry_delay}（T-1 佈局）" if args.entry_delay > 0 else "D+0（當日收盤）"
 
     _console.print()
     _console.print(Panel(
         f"[bold white]開始日期[/bold white]  {date_from}\n"
         f"[bold white]結束日期[/bold white]  {date_to}\n"
         f"[bold white]交易天數[/bold white]  {trading_days_count} 天\n"
+        f"[bold white]進場時點[/bold white]  {entry_delay_display}\n"
         f"[bold white]LLM 引擎[/bold white]  {llm_display}\n"
         f"[bold white]Settlement[/bold white] {settle_display}",
         title="[bold white]執行摘要[/bold white]",
@@ -528,6 +549,7 @@ def main() -> None:
         delay=args.delay,
         llm=llm_key,
         sectors=args.sectors,
+        entry_delay=args.entry_delay,
     )
 
 

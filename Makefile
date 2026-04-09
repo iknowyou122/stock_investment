@@ -34,17 +34,18 @@ else
 endif
 
 # ── 批次掃描 ─────────────────────────────────────────────────────────────────
-# 用法: make scan
-#       make scan DATE=2026-03-27
-#       make scan LLM=gemini
+# 用法: make scan                         # 預設存 CSV（precheck 用）
+#       make scan LLM=gemini              # Phase 2 互動問送幾名
+#       make scan LLM=gemini LLM_TOP=5    # 直接送前 5 名給 LLM
 #       make scan SECTORS="1 4" LLM=gemini
 SECTORS ?=
+LLM_TOP ?=
 
 scan:
 ifeq ($(DATE),$(_TODAY))
-	$(PYTHON) scripts/batch_scan.py $(if $(LLM),--llm $(LLM)) $(if $(SECTORS),--sectors $(SECTORS))
+	$(PYTHON) scripts/batch_scan.py --save-csv $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS))
 else
-	$(PYTHON) scripts/batch_scan.py --date $(DATE) $(if $(LLM),--llm $(LLM)) $(if $(SECTORS),--sectors $(SECTORS))
+	$(PYTHON) scripts/batch_scan.py --save-csv --date $(DATE) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS))
 endif
 
 # ── 盤前/盤中確認 ────────────────────────────────────────────────────────────
@@ -118,9 +119,11 @@ migrate:
 # 用法: make backtest                        # 全互動
 #       make backtest DATE_FROM=2025-10-01 DATE_TO=2026-03-31
 #       make backtest SECTORS="5 31" LLM=none
+#       make backtest ENTRY_DELAY=1           # T-1 佈局驗證
 DATE_FROM ?=
 DATE_TO   ?=
 BACKTEST_TICKERS ?=
+ENTRY_DELAY ?=
 
 backtest:
 	$(PYTHON) scripts/backtest.py \
@@ -128,7 +131,8 @@ backtest:
 		$(if $(DATE_TO),--date-to $(DATE_TO)) \
 		$(if $(LLM),--llm $(LLM)) \
 		$(if $(BACKTEST_TICKERS),--tickers $(BACKTEST_TICKERS)) \
-		$(if $(SECTORS),--sectors $(SECTORS))
+		$(if $(SECTORS),--sectors $(SECTORS)) \
+		$(if $(ENTRY_DELAY),--entry-delay $(ENTRY_DELAY))
 
 # ── 每日真實訊號 ──────────────────────────────────────────────────────────────
 daily:
