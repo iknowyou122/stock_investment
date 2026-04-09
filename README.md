@@ -180,6 +180,19 @@ make test
 
 ## 查看資料庫內容
 
+### signal_outcomes 欄位說明
+
+| 欄位 | 說明 |
+|------|------|
+| `entry_price` | `T+0 收盤價 × 0.995`（委買限價單下限，**非**收盤價本身）|
+| `price_1d/3d/5d` | T+1/3/5 收盤價（結算後填入）|
+| `outcome_1d/3d/5d` | `(price_Xd - entry_price) / entry_price`，以 entry_price 為基準的報酬率 |
+| `source` | `backtest`（歷史回測）或 `live`（當日掃描）|
+| `halt_flag` | 漲停/停牌，outcome 無意義時標記 |
+| `score_breakdown` | JSONB，各因子細項分數 |
+
+> **注意：** 如果要還原真正的 T+0 收盤價：`close_t0 = entry_price / 0.995`
+
 ### psql 命令列
 
 ```bash
@@ -195,20 +208,31 @@ psql postgresql://localhost/taiwan_stock
 -- 看欄位結構
 \d signal_outcomes
 
--- 最近 10 筆訊號
-SELECT ticker, signal_date, action, confidence_score, outcome_1d, outcome_5d
+-- 最近 10 筆（含 entry_price 與收盤還原）
+SELECT ticker, signal_date, action, confidence_score,
+       entry_price,
+       ROUND((entry_price / 0.995)::numeric, 2) AS close_t0,
+       price_1d, price_3d, price_5d,
+       outcome_1d, outcome_3d, outcome_5d
 FROM signal_outcomes
 ORDER BY signal_date DESC
 LIMIT 10;
 
--- 各 action 數量
-SELECT action, COUNT(*) FROM signal_outcomes GROUP BY action;
+-- 查特定日期
+SELECT ticker, signal_date, action, confidence_score,
+       entry_price,
+       ROUND((entry_price / 0.995)::numeric, 2) AS close_t0,
+       price_1d, price_5d, outcome_1d, outcome_5d
+FROM signal_outcomes
+WHERE signal_date = '2026-04-07'
+ORDER BY confidence_score DESC;
 
--- 結算率（有 outcome_5d 的比例）
-SELECT
-  COUNT(*) FILTER (WHERE outcome_5d IS NOT NULL) AS settled,
-  COUNT(*) AS total
-FROM signal_outcomes;
+-- 各 action 數量與結算率
+SELECT source, action, COUNT(*),
+       COUNT(*) FILTER (WHERE outcome_5d IS NOT NULL) AS settled
+FROM signal_outcomes
+GROUP BY source, action
+ORDER BY source, action;
 
 -- 近 30 天 LONG 訊號勝率
 SELECT
