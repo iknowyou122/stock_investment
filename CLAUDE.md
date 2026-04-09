@@ -46,6 +46,7 @@ you will create drift that is expensive to fix.
 | 信號持續加分 | ✅ | — | 前日 `--save-csv` 輸出 |
 
 | Phase 4.14 | ✅ Done | `make scan` 共用客戶端優化（shared FinMindClient + ChipProxyFetcher，日期級快取跨 worker 共享）✅ · `make precheck` 盤前/盤中確認（TWSE MIS 即時報價 → 確認 entry±3%、量能、大盤）✅ · 197 unit tests passing ✅ |
+| Phase 4.15 | ✅ Done | T-2 策略驗證（`entry_delay_analysis.py` D+2 勝率 55.6% > D+0 38.5%）✅ · 軌跡感知持續加分（RISING +7 / STABLE +5 / DECLINING +0，讀近 3 天 CSV）✅ · `EMERGING_SETUP` flag（WATCH + MA排列 + 法人買 + 未突破）✅ · `make precheck` 蓄積中監控表 ✅ · MIS API `z=-` fallback（bid→hl_mid→open）✅ · 208 unit tests passing ✅ |
 
 **Phase 5 (next):**
 - Real Stripe webhook handling (requires production Stripe account + deployment)

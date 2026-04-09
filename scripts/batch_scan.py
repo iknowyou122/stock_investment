@@ -276,53 +276,119 @@ def _apply_sector_ranks(results: list[dict], industry_map: dict[str, str]) -> in
     return boosted
 
 
+def _load_recent_csvs(
+    analysis_date: date,
+    data_dir: Path,
+    lookback: int = 3,
+    min_conf: int = 40,
+) -> list[dict[str, int]]:
+    """Load the last N trading days' scan CSVs as [{ticker: confidence}, ...].
+
+    Returns list ordered old→new (index 0 = oldest, index -1 = most recent).
+    Only includes tickers with confidence ≥ min_conf.
+    """
+    csvs: list[dict[str, int]] = []
+    candidate = analysis_date - timedelta(days=1)
+    days_checked = 0
+
+    while len(csvs) < lookback and days_checked < 10:
+        if candidate.weekday() < 5:
+            csv_path = data_dir / f"scan_{candidate}.csv"
+            if csv_path.exists():
+                try:
+                    scores: dict[str, int] = {}
+                    with csv_path.open(encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            try:
+                                conf = int(row.get("confidence", 0))
+                                if conf >= min_conf:
+                                    scores[row["ticker"]] = conf
+                            except (ValueError, KeyError):
+                                continue
+                    csvs.append(scores)
+                except Exception:
+                    pass
+        candidate -= timedelta(days=1)
+        days_checked += 1
+
+    csvs.reverse()  # old → new
+    return csvs
+
+
 def _apply_persistence_bonus(
     results: list[dict],
     analysis_date: date,
     data_dir: Path,
     min_prev_conf: int = 50,
-    bonus: int = 5,
 ) -> int:
-    """Add +5 pts for stocks that scored ≥ min_prev_conf yesterday.
+    """Trajectory-aware persistence bonus.
 
-    Looks for data/scans/scan_{prev_date}.csv.
-    Skips gracefully if the file doesn't exist or is malformed.
-    Adds PERSIST:{prev_conf} flag to boosted stocks.
+    Reads the last 3 trading days' CSVs and computes per-ticker score trajectory:
+      RISING   (3 consecutive days, each score higher than previous) → +7 pts
+      STABLE   (appeared yesterday with score ≥ min_prev_conf)      → +5 pts
+      DECLINING (appeared yesterday but score dropped > 5 pts)       → +0 pts
+
+    Adds PERSIST_RISING / PERSIST_STABLE flag to boosted stocks.
     Returns count of stocks boosted.
     """
-    # Walk back to find the last trading day's CSV (skip weekends)
-    prev_date = analysis_date - timedelta(days=1)
-    for _ in range(4):  # at most 4 days back (skip long weekends)
-        if prev_date.weekday() < 5:
-            break
-        prev_date -= timedelta(days=1)
-
-    prev_csv = data_dir / f"scan_{prev_date}.csv"
-    if not prev_csv.exists():
+    recent = _load_recent_csvs(analysis_date, data_dir, lookback=3, min_conf=40)
+    if not recent:
         return 0
 
-    try:
-        prev_scores: dict[str, int] = {}
-        with prev_csv.open(encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                try:
-                    conf = int(row.get("confidence", 0))
-                    if conf >= min_prev_conf:
-                        prev_scores[row["ticker"]] = conf
-                except (ValueError, KeyError):
-                    continue
-    except Exception:
-        return 0
+    # Build trajectory: for each ticker, collect [score_d-3, score_d-2, score_d-1]
+    all_tickers: set[str] = set()
+    for day_scores in recent:
+        all_tickers.update(day_scores.keys())
+
+    trajectories: dict[str, list[int | None]] = {}
+    for ticker in all_tickers:
+        traj = [day_scores.get(ticker) for day_scores in recent]
+        trajectories[ticker] = traj
 
     boosted = 0
     for r in results:
         ticker = r["ticker"]
-        if ticker in prev_scores and not r["halt"] and r["error"] is None:
-            prev_conf = prev_scores[ticker]
-            r["confidence"] = min(100, r["confidence"] + bonus)
-            r["flags"] = list(r.get("flags") or []) + [f"PERSIST:{prev_conf}"]
-            boosted += 1
+        if r["halt"] or r["error"] is not None:
+            continue
+        if ticker not in trajectories:
+            continue
+
+        traj = trajectories[ticker]
+        yesterday = traj[-1] if traj else None
+
+        if yesterday is None or yesterday < min_prev_conf:
+            continue
+
+        # Classify trajectory
+        # RISING: 3 consecutive appearances with monotonically increasing scores
+        non_none = [(i, s) for i, s in enumerate(traj) if s is not None]
+        is_rising = (
+            len(non_none) >= 3
+            and all(non_none[i + 1][1] > non_none[i][1] for i in range(len(non_none) - 1))
+        )
+
+        # DECLINING: appeared yesterday but score dropped > 5 from previous appearance
+        prev_appearances = [s for s in traj[:-1] if s is not None]
+        is_declining = (
+            bool(prev_appearances)
+            and yesterday < prev_appearances[-1] - 5
+        )
+
+        if is_rising:
+            bonus = 7
+            flag = f"PERSIST_RISING:{','.join(str(s) for s in traj if s is not None)}"
+        elif is_declining:
+            bonus = 0
+            # No flag, no bonus — silently skip declining stocks
+            continue
+        else:
+            bonus = 5
+            flag = f"PERSIST_STABLE:{yesterday}"
+
+        r["confidence"] = min(100, r["confidence"] + bonus)
+        r["flags"] = list(r.get("flags") or []) + [flag]
+        boosted += 1
 
     return boosted
 
@@ -740,7 +806,7 @@ def run_batch(
 
     n_persist = _apply_persistence_bonus(results, analysis_date, scan_data_dir)
     if n_persist:
-        _console.print(f"  [dim]↑ 前日持續訊號加分: {n_persist} 檔 (+5 pts each)[/dim]")
+        _console.print(f"  [dim]↑ 持續訊號加分: {n_persist} 檔 (RISING +7 / STABLE +5)[/dim]")
 
     # --- Optional: record to DB (source=live) for factor analysis ---
     if save_db:

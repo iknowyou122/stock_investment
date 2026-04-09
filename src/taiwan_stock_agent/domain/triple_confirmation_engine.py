@@ -1245,6 +1245,19 @@ class TripleConfirmationEngine:
         data_quality_flags.extend(volume_profile.data_quality_flags)
         data_quality_flags.append("scoring_version:v2")
 
+        # EMERGING_SETUP: WATCH stocks with pre-breakout characteristics
+        # MA aligned + MA20 slope up + institutional buying + no breakout yet
+        if action == "WATCH":
+            has_ma_setup = (breakdown.ma_alignment_pts > 0 and breakdown.ma20_slope_pts > 0)
+            has_institutional = (
+                breakdown.foreign_strength_pts > 0
+                or breakdown.trust_strength_pts > 0
+                or breakdown.institution_continuity_pts >= 4
+            )
+            no_breakout_yet = (breakdown.breakout_20d_pts == 0)
+            if has_ma_setup and has_institutional and no_breakout_yet:
+                data_quality_flags.append("EMERGING_SETUP")
+
         return SignalOutput(
             ticker=ohlcv.ticker,
             date=ohlcv.trade_date,

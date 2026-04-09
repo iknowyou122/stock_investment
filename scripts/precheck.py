@@ -93,15 +93,56 @@ def _fetch_realtime_batch(mis_keys: list[str]) -> dict[str, dict]:
 
         for item in data.get("msgArray", []):
             ticker = item.get("c", "")  # stock code
-            # z = 最新成交價, v = 累積成交量(張), y = 昨收
-            price_str = item.get("z", "-")
+            if not ticker:
+                continue
+            # z = 最新成交價（盤中常為 "-"）
+            # fallback 順序: z → best bid(b) → (h+l)/2 → open(o) → yesterday(y)
+            price: float | None = None
+            price_source = ""
+            z_str = item.get("z", "-")
+            if z_str not in ("-", ""):
+                try:
+                    price = float(z_str)
+                    price_source = "last"
+                except ValueError:
+                    pass
+            if price is None:
+                # best bid = b 欄位第一個值（以 _ 分隔）
+                b_str = item.get("b", "-")
+                if b_str not in ("-", ""):
+                    try:
+                        price = float(b_str.split("_")[0])
+                        price_source = "bid"
+                    except ValueError:
+                        pass
+            if price is None:
+                # high/low midpoint
+                h_str = item.get("h", "-")
+                l_str = item.get("l", "-")
+                if h_str not in ("-", "") and l_str not in ("-", ""):
+                    try:
+                        price = (float(h_str) + float(l_str)) / 2
+                        price_source = "hl_mid"
+                    except ValueError:
+                        pass
+            if price is None:
+                # open price
+                o_str = item.get("o", "-")
+                if o_str not in ("-", ""):
+                    try:
+                        price = float(o_str)
+                        price_source = "open"
+                    except ValueError:
+                        pass
+            if price is None:
+                continue  # truly no data
+
             vol_str = item.get("v", "0")
             yesterday_str = item.get("y", "0")
-            if price_str == "-" or not ticker:
-                continue
             try:
                 results[ticker] = {
-                    "price": float(price_str),
+                    "price": price,
+                    "price_source": price_source,
                     "volume": int(vol_str.replace(",", "")),  # 成交張數
                     "yesterday_close": float(yesterday_str),
                     "timestamp": item.get("t", ""),
@@ -166,30 +207,41 @@ def _find_latest_scan_csv(scan_dir: Path) -> Path | None:
     return None
 
 
-def _load_watchlist(csv_path: Path, min_confidence: int) -> list[dict]:
-    """Load scan CSV and return rows sorted by confidence desc."""
-    rows = []
+def _load_watchlist(csv_path: Path, min_confidence: int) -> tuple[list[dict], list[dict]]:
+    """Load scan CSV. Returns (actionable, emerging).
+
+    actionable: LONG stocks with confidence >= min_confidence
+    emerging:   WATCH stocks with EMERGING_SETUP flag (T-2 monitoring candidates)
+    """
+    actionable = []
+    emerging = []
     with csv_path.open(encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             try:
                 conf = int(row.get("confidence", 0))
                 halt = row.get("halt", "").lower() in ("true", "1", "yes")
-                if halt or conf < min_confidence:
+                if halt:
                     continue
-                rows.append({
+                flags_str = row.get("data_quality_flags", "")
+                parsed = {
                     "ticker": row["ticker"],
                     "action": row.get("action", ""),
                     "confidence": conf,
                     "entry_bid": float(row.get("entry_bid", 0)),
                     "stop_loss": float(row.get("stop_loss", 0)),
                     "target": float(row.get("target", 0)),
-                    "flags": row.get("data_quality_flags", ""),
-                })
+                    "flags": flags_str,
+                }
+                if conf >= min_confidence:
+                    actionable.append(parsed)
+                elif "EMERGING_SETUP" in flags_str:
+                    emerging.append(parsed)
             except (ValueError, KeyError):
                 continue
-    rows.sort(key=lambda r: r["confidence"], reverse=True)
-    return rows
+    actionable.sort(key=lambda r: r["confidence"], reverse=True)
+    emerging.sort(key=lambda r: r["confidence"], reverse=True)
+    return actionable, emerging
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +314,7 @@ def _print_results(
     taiex: dict | None,
     csv_path: Path,
     t_ratio: float,
+    emerging: list[dict] | None = None,
 ) -> None:
     """Rich formatted output."""
     now = datetime.now()
@@ -300,7 +353,7 @@ def _print_results(
         tbl.add_column("#", justify="center", style="dim", width=4)
         tbl.add_column("股票", style="bold white", width=8)
         tbl.add_column("信心", justify="right", width=6)
-        tbl.add_column("現價", justify="right", style="cyan", width=9)
+        tbl.add_column("現價", justify="right", style="cyan", width=10)
         tbl.add_column("建議買入", justify="right", style="green", width=9)
         tbl.add_column("停損", justify="right", style="red", width=9)
         tbl.add_column("目標", justify="right", style="yellow", width=9)
@@ -313,11 +366,16 @@ def _print_results(
             diff_pct = ((price - entry) / entry * 100) if entry > 0 else 0
             diff_color = "green" if diff_pct <= 0 else "yellow"
 
+            # Show price source hint when not from last trade
+            src = q.get("price_source", "last")
+            _SRC_LABEL = {"bid": "買", "hl_mid": "中", "open": "開"}
+            src_hint = f" ({_SRC_LABEL[src]})" if src in _SRC_LABEL else ""
+
             tbl.add_row(
                 str(i),
                 r["ticker"],
                 str(r["confidence"]),
-                f"{price:.1f}" if price else "-",
+                f"{price:.1f}{src_hint}" if price else "-",
                 f"{entry:.1f}",
                 f"{r['stop_loss']:.1f}",
                 f"{r['target']:.1f}",
@@ -342,10 +400,14 @@ def _print_results(
 
         for r in warnings:
             q = r["quote"] or {}
+            price = q.get("price", 0)
+            src = q.get("price_source", "last")
+            _SRC_LABEL_W = {"bid": "買", "hl_mid": "中", "open": "開"}
+            src_hint = f" ({_SRC_LABEL_W[src]})" if src in _SRC_LABEL_W else ""
             tbl.add_row(
                 r["ticker"],
                 str(r["confidence"]),
-                f"{q.get('price', 0):.1f}" if q.get("price") else "-",
+                f"{price:.1f}{src_hint}" if price else "-",
                 f"{r['entry_bid']:.1f}",
                 "；".join(r["reasons"]),
             )
@@ -358,16 +420,68 @@ def _print_results(
         more = f" ...+{len(skipped)-10}" if len(skipped) > 10 else ""
         _console.print(f"\n  [dim]略過 {len(skipped)} 檔: {tickers_str}{more}[/dim]")
 
+    # Emerging monitoring table (T-2 candidates)
+    if emerging:
+        tbl = Table(
+            title="🌱 蓄積中（WATCH + EMERGING_SETUP — 1~2 日後可能晉升 LONG）",
+            box=box.ROUNDED,
+            header_style="bold white on dark_magenta",
+            border_style="magenta",
+        )
+        tbl.add_column("股票", style="white", width=8)
+        tbl.add_column("信心", justify="right", width=6)
+        tbl.add_column("現價", justify="right", width=10)
+        tbl.add_column("昨收", justify="right", style="dim", width=9)
+        tbl.add_column("漲跌", justify="right", width=8)
+        tbl.add_column("累計量", justify="right", width=8)
+
+        for e in emerging:
+            q = e.get("quote") or {}
+            price = q.get("price", 0)
+            yclose = q.get("yesterday_close", 0)
+            vol = q.get("volume", 0)
+            src = q.get("price_source", "last")
+            _SRC_LABEL_E = {"bid": "買", "hl_mid": "中", "open": "開"}
+            src_hint = f" ({_SRC_LABEL_E[src]})" if src in _SRC_LABEL_E else ""
+
+            if price and yclose:
+                chg = (price - yclose) / yclose * 100
+                chg_color = "green" if chg >= 0 else "red"
+                chg_str = f"[{chg_color}]{chg:+.1f}%[/{chg_color}]"
+            else:
+                chg_str = "-"
+
+            tbl.add_row(
+                e["ticker"],
+                str(e["confidence"]),
+                f"{price:.1f}{src_hint}" if price else "-",
+                f"{yclose:.1f}" if yclose else "-",
+                chg_str,
+                f"{vol:,}" if vol else "-",
+            )
+        _console.print()
+        _console.print(tbl)
+        _console.print("  [dim magenta]→ 尚未達到 LONG 門檻，觀察用。可在昨收附近掛限價單被動佈局。[/dim magenta]")
+
     # Summary
+    n_emerging = len(emerging) if emerging else 0
     _console.print()
-    if not actionable and not warnings:
+    if not actionable and not warnings and not n_emerging:
         _console.print(Panel("[yellow]今日無可執行標的[/yellow]", border_style="yellow"))
     else:
+        summary_parts = []
+        if actionable:
+            summary_parts.append(f"[bold green]可執行[/bold green] {len(actionable)} 檔")
+        if warnings:
+            summary_parts.append(f"[bold yellow]注意[/bold yellow] {len(warnings)} 檔")
+        if n_emerging:
+            summary_parts.append(f"[bold magenta]蓄積中[/bold magenta] {n_emerging} 檔")
+        if skipped:
+            summary_parts.append(f"[dim]略過 {len(skipped)} 檔[/dim]")
+
         _console.print(Panel(
-            f"[bold green]可執行[/bold green] {len(actionable)} 檔  "
-            f"[bold yellow]注意[/bold yellow] {len(warnings)} 檔  "
-            f"[dim]略過 {len(skipped)} 檔[/dim]",
-            border_style="green",
+            "  ".join(summary_parts),
+            border_style="green" if actionable else "yellow",
             padding=(0, 2),
         ))
         if actionable:
@@ -375,6 +489,10 @@ def _print_results(
             _console.print("  1. 以 [cyan]建議買入價[/cyan] 掛限價單")
             _console.print("  2. 同時設定 [red]停損[/red] 觸價單")
             _console.print("  3. 到 [yellow]目標價[/yellow] 分批出場")
+        if n_emerging:
+            _console.print("\n[bold magenta]蓄積中標的操作：[/bold magenta]")
+            _console.print("  • 在昨收價附近掛[cyan]限價買單[/cyan]（被動佈局）")
+            _console.print("  • 若明日 scan 晉升 LONG → 轉為積極進場")
 
 
 # ---------------------------------------------------------------------------
@@ -413,27 +531,35 @@ def run_precheck(csv_path: Path | None, min_confidence: int, top: int) -> None:
         return
 
     # 2. Load watchlist
-    watchlist = _load_watchlist(csv_path, min_confidence)
-    if not watchlist:
+    watchlist, emerging_raw = _load_watchlist(csv_path, min_confidence)
+    if not watchlist and not emerging_raw:
         _console.print(f"[yellow]CSV 中無符合條件的標的 (min_confidence={min_confidence})[/yellow]")
         return
 
     if top:
         watchlist = watchlist[:top]
 
-    _console.print(f"[dim]載入 {len(watchlist)} 檔 watchlist（{csv_path.name}）[/dim]")
+    _console.print(f"[dim]載入 {len(watchlist)} 檔 watchlist + {len(emerging_raw)} 檔蓄積中（{csv_path.name}）[/dim]")
 
-    # 3. Fetch real-time quotes
-    tickers = [r["ticker"] for r in watchlist]
+    # 3. Fetch real-time quotes (include emerging tickers)
+    all_tickers = [r["ticker"] for r in watchlist] + [r["ticker"] for r in emerging_raw]
+    # deduplicate while preserving order
+    seen: set[str] = set()
+    unique_tickers = []
+    for t in all_tickers:
+        if t not in seen:
+            unique_tickers.append(t)
+            seen.add(t)
+
     with Progress(SpinnerColumn(), TextColumn("[cyan]抓取即時報價..."), console=_console, transient=True) as p:
         p.add_task("", total=None)
-        quotes = _fetch_realtime_with_otc_fallback(tickers)
+        quotes = _fetch_realtime_with_otc_fallback(unique_tickers)
         taiex = _fetch_taiex_realtime()
 
-    found = len([t for t in tickers if t in quotes])
-    _console.print(f"[dim]即時報價: {found}/{len(tickers)} 檔成功[/dim]")
+    found = len([t for t in unique_tickers if t in quotes])
+    _console.print(f"[dim]即時報價: {found}/{len(unique_tickers)} 檔成功[/dim]")
 
-    # 4. Check conditions
+    # 4. Check conditions (LONG stocks)
     t_ratio = _time_ratio()
     taiex_ok = True
     if taiex:
@@ -445,8 +571,12 @@ def run_precheck(csv_path: Path | None, min_confidence: int, top: int) -> None:
         for w in watchlist
     ]
 
+    # Enrich emerging stocks with quotes
+    for e in emerging_raw:
+        e["quote"] = quotes.get(e["ticker"])
+
     # 5. Output
-    _print_results(checked, taiex, csv_path, t_ratio)
+    _print_results(checked, taiex, csv_path, t_ratio, emerging=emerging_raw)
 
 
 def main() -> None:

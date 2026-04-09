@@ -85,6 +85,14 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]], entry_delay: int =
     delay_label = f"  [yellow](entry_delay={entry_delay})[/yellow]" if entry_delay > 0 else ""
     _console.print(f"\n[bold cyan]Settlement[/bold cyan] {total:,} 訊號 / {unique_tickers:,} tickers{delay_label}")
 
+    _COMMIT_EVERY = 50  # commit every N tickers to keep transaction size manageable
+    _UPDATE_SQL = """
+        UPDATE signal_outcomes
+        SET price_1d = %s, price_3d = %s, price_5d = %s,
+            outcome_1d = %s, outcome_3d = %s, outcome_5d = %s
+        WHERE signal_id = %s
+    """
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[cyan]{task.fields[ticker]}[/cyan]"),
@@ -100,6 +108,7 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]], entry_delay: int =
         task_id = progress.add_task("settle", total=unique_tickers, ticker="")
 
         with get_connection() as conn:
+            ticker_count = 0
             for ticker, sigs in ticker_signals.items():
                 progress.update(task_id, ticker=ticker)
 
@@ -125,22 +134,18 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]], entry_delay: int =
                     closes[row["trade_date"]] = float(row["close"])
                 trading_days = sorted(closes.keys())
 
+                # Build index lookup for O(1) access instead of repeated .index()
+                day_idx = {d: i for i, d in enumerate(trading_days)}
+
+                # Compute all outcomes for this ticker in Python, then batch UPDATE
+                batch_params: list[tuple] = []
                 for signal_id, signal_date in sigs:
-                    if signal_date not in trading_days:
+                    sig_idx = day_idx.get(signal_date)
+                    if sig_idx is None:
                         skipped += 1
                         continue
-                    signal_idx = trading_days.index(signal_date)
 
-                    # entry_delay shifts entry forward: delay=0 → enter on signal_date,
-                    # delay=1 → enter on signal_date+1 (T-1 佈局)
-                    entry_idx = signal_idx + entry_delay
-
-                    def get_offset(n: int) -> float | None:
-                        idx = entry_idx + n
-                        if 0 <= idx < len(trading_days):
-                            return closes[trading_days[idx]]
-                        return None
-
+                    entry_idx = sig_idx + entry_delay
                     if entry_idx < 0 or entry_idx >= len(trading_days):
                         skipped += 1
                         continue
@@ -150,28 +155,35 @@ def _settle_outcomes(signal_ids: list[tuple[str, str, date]], entry_delay: int =
                         skipped += 1
                         continue
 
-                    p1 = get_offset(1)
-                    p3 = get_offset(3)
-                    p5 = get_offset(5)
+                    def _price_at(offset: int) -> float | None:
+                        idx = entry_idx + offset
+                        if 0 <= idx < len(trading_days):
+                            return closes[trading_days[idx]]
+                        return None
 
+                    def _ret(price: float | None) -> float | None:
+                        return (price - entry) / entry if price is not None else None
+
+                    p1, p3, p5 = _price_at(1), _price_at(3), _price_at(5)
+                    batch_params.append((
+                        p1, p3, p5,
+                        _ret(p1), _ret(p3), _ret(p5),
+                        signal_id,
+                    ))
+
+                if batch_params:
                     with conn.cursor() as cur:
-                        cur.execute("""
-                            UPDATE signal_outcomes
-                            SET price_1d = %s, price_3d = %s, price_5d = %s,
-                                outcome_1d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / NULLIF(%s, 0) ELSE NULL END,
-                                outcome_3d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / NULLIF(%s, 0) ELSE NULL END,
-                                outcome_5d = CASE WHEN %s IS NOT NULL THEN (%s - %s) / NULLIF(%s, 0) ELSE NULL END
-                            WHERE signal_id = %s
-                        """, (
-                            p1, p3, p5,
-                            p1, p1, entry, entry,
-                            p3, p3, entry, entry,
-                            p5, p5, entry, entry,
-                            signal_id,
-                        ))
-                    settled += 1
+                        cur.executemany(_UPDATE_SQL, batch_params)
+                    settled += len(batch_params)
+
+                ticker_count += 1
+                if ticker_count % _COMMIT_EVERY == 0:
+                    conn.commit()
 
                 progress.advance(task_id)
+
+            # Final commit for remaining
+            conn.commit()
 
     _console.print(Panel(
         f"[bold green]Settlement 完成[/bold green]\n"

@@ -287,6 +287,9 @@ _FLAG_ZH: dict[str, str] = {
     "LONG_UPPER_SHADOW": "長上影線（盤中賣壓重）",
     "DOJI_OR_HALT": "十字線或漲跌停鎖死",
     "OHLCV_PROXY:yfinance": "OHLCV 由 yfinance 提供",
+    "PERSIST_RISING": "📈 連續上升訊號（+7 分）",
+    "PERSIST_STABLE": "📊 持續訊號（+5 分）",
+    "EMERGING_SETUP": "🌱 蓄積中（MA排列+法人買+未突破）",
 }
 
 
@@ -297,6 +300,16 @@ def _translate_flag(flag: str) -> str:
     if flag.startswith("GATE_SKIP:"):
         gate = flag.split(":")[1]
         return f"⏭ {gate} 門檻無資料（跳過）"
+    # PERSIST_RISING:50,55,60 pattern
+    if flag.startswith("PERSIST_RISING:"):
+        scores = flag.split(":")[1]
+        return f"📈 連續上升訊號 [{scores}]（+7 分）"
+    # PERSIST_STABLE:55 pattern
+    if flag.startswith("PERSIST_STABLE:"):
+        return f"📊 持續訊號（+5 分）"
+    # Legacy PERSIST:55 pattern
+    if flag.startswith("PERSIST:"):
+        return f"📊 前日持續訊號（+5 分）"
     return flag
 
 
