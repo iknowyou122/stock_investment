@@ -2,9 +2,9 @@
 
 台股籌碼面信號系統。每日收盤後分析指定股票，輸出 **LONG / WATCH / CAUTION** 三級信號，幫助判斷主力是否在進場。
 
-> **Last updated:** 2026-04-02
-> **Current focus:** Phase 5（Stripe 付款整合 + 社群信譽評分）
-> **Tests:** 185 unit passed（214 integration skipped，需 DB）
+> **Last updated:** 2026-04-09
+> **Current focus:** Phase 4.15 完成（T-2 策略驗證 + 軌跡感知加分 + EMERGING_SETUP）
+> **Tests:** 208 unit passed（214 integration skipped，需 DB）
 > **Scan watchlist:** 全市場上市+上櫃（每日自動更新），互動式選擇產業 + LLM 兩階段優化
 
 ---
@@ -45,12 +45,16 @@
 
 | Flag | 意思 | 影響 |
 |------|------|------|
-| `NO_BROKER_DATA` | FinMind 分點資料需付費 | 切換免費模式（TWSE proxy） |
 | `NO_SETUP` | Gate 層未通過（2-of-4 條件不足） | 強制 CAUTION，confidence=0 |
+| `GATE_PASS:VOL` / `GATE_FAIL:VOL` | 量能門檻通過/未過 | 可觀測性 |
+| `GATE_MET:N` | N/4 門檻通過（N≥2 才評分） | 可觀測性 |
+| `EMERGING_SETUP` | WATCH + MA排列 + 法人買超 + 未突破 | precheck 蓄積監控 |
+| `PERSIST_RISING:50,55,60` | 連 3 天遞增訊號 | +7 分加成 |
+| `PERSIST_STABLE:55` | 前日持續訊號 | +5 分加成 |
+| `SECTOR_RANK:1/15` | 產業排名前 20% | +5 分加成 |
 | `DOJI_OR_HALT` | 當日 high==low（漲停/停牌） | close_strength 設為 0 |
+| `OHLCV_PROXY:yfinance` | FinMind 限額，改用 yfinance | 資料來源切換 |
 | `scoring_version:v2` | 使用 v2 引擎評分 | 正常，代表新版架構 |
-| `TWSE_T86_ERROR` | TWSE T86 被 WAF 封鎖 | 自動切換 RS proxy |
-| `free_tier_mode: true` | 使用 TWSE opendata 替代分點資料 | Pillar 2 用法人資料 |
 
 ---
 
@@ -119,80 +123,57 @@ FINMIND_API_KEY=<你的 FinMind JWT token>
 ### 3. 確認安裝正確
 
 ```bash
-make test-unit
-# 預期：185 passed
+make test
+# 預期：208 passed
 ```
 
 ---
 
 ## 每日使用流程
 
-### 基本用法 — 分析特定股票
+### 標準三段式工作流
 
-```bash
-# 分析特定股票（日期自動判斷：17:00 前用前一交易日，之後用今日）
-make run TICKERS="2330 2454 2317"
-
-# 指定歷史日期
-make run DATE=2024-03-04 TICKERS="2330"
-
-# 不要 LLM，只看分數
-PYTHONPATH=src python3 -m taiwan_stock_agent --tickers 2330 --no-llm
+```
+收盤後 (14:00+)   →  make scan          掃描 + 存 CSV + 寫 DB
+隔日盤中 (09-13:30) →  make precheck      即時報價確認 + 蓄積中監控
+週末               →  make settle        補填 T+1/3/5 結算價
 ```
 
-### 批量掃描 — 找出當日強勢股
-
-每日從 TWSE/OTC 即時抓取全市場上市+上櫃股票，cache 於 `data/watchlist_cache/industry_map_YYYY-MM-DD.json`。
-`make scan` 啟動時顯示**互動式產業選單**，接著選擇 LLM provider，掃描完成後再決定送前幾名給 LLM。
+### Step 1：收盤後掃描
 
 ```bash
-# 啟動互動式掃描
+# 互動式掃描（選產業 + LLM）
 make scan
 
-# 指定日期
+# 非互動（CI / cron 用）
+make scan SECTORS="1 5" LLM=gemini LLM_TOP=5
+
+# 指定歷史日期
 make scan DATE=2026-03-28
-
-# 非互動模式（CI/自動化）：直接傳產業代號 + LLM 設定
-.venv/bin/python scripts/batch_scan.py --sectors 1 4 --llm gemini --llm-top 5
-
-# 只掃特定標的（跳過產業選單）
-.venv/bin/python scripts/batch_scan.py --tickers 2330 2454 2317
-
-# 純 deterministic（不呼叫 LLM）
-.venv/bin/python scripts/batch_scan.py --no-llm
-
-# 掃描並存 CSV
-.venv/bin/python scripts/batch_scan.py --save-csv
 ```
 
-**互動式流程：**
+掃描輸出兩份：
+- `data/scans/scan_YYYY-MM-DD.csv` — watchlist（供 precheck 讀取）
+- DB `signal_outcomes` — 供 factor-report / backtest 分析
+
+### Step 2：隔日盤中確認
+
+```bash
+make precheck          # 預設：TOP=20, MIN_CONF=40
+make precheck TOP=10 MIN_CONF=50
 ```
-可用產業別：
-  #   產業別              檔數
-  1   半導體業              234
-  2   光電業                 89
-  ...
-請輸入產業代號（空白分隔），直接 Enter 使用預設 [1 2 3 4 5]：> 1
 
-LLM 引擎：
-  1  自動偵測（依 API key）
-  2  Google Gemini
-  3  Anthropic Claude
-  4  OpenAI
-  5  不使用 LLM（純 deterministic）
-請輸入代號，直接 Enter 使用 [1 自動偵測]：> 2
-  → gemini（前幾名送 LLM 將在 Phase 1 完成後詢問）
+輸出三個區塊：
+- **可執行**（LONG，現價在 entry ±3%）→ 積極進場
+- **注意**（LONG，量能偏低或大盤偏弱）→ 條件性進場
+- **🌱 蓄積中**（WATCH + EMERGING_SETUP）→ 掛限價單被動佈局（T-2 策略）
 
-[Phase 1] deterministic scan：234 檔
-  [  1/234] 2330     conf=72
-  ...
+> TWSE MIS 即時報價：盤中若 `z=-`（最新成交無資料），自動 fallback 到委買價 → 高低中點 → 開盤價。
 
-[Phase 1 完成] 234 檔（有效 210 檔）
-  前幾名: 2330(72), 3711(68), 2454(65)...
+### Step 3：週末結算
 
-送前幾名給 LLM [gemini]？（Enter = 不送）：> 5
-
-[Phase 2] 送前 5 名給 LLM (gemini)：2330, 3711, 2454, 6669, 2379
+```bash
+make settle
 ```
 
 ### API Server
@@ -202,26 +183,14 @@ make api
 # http://localhost:8000/docs
 ```
 
-### Demo 模式 — 不需 API key，注入合成資料驗證 pipeline
-
-```bash
-PYTHONPATH=src python3 -m taiwan_stock_agent \
-  --date 2024-03-04 --tickers 2330 2454 2317 \
-  --skip-freshness-check --no-llm --demo
-```
-
 ### 每日自動化（cron）
 
-```bash
-crontab -e
-```
-
 ```cron
-# 每日信號：20:30 CST（台灣收盤後，日期自動判斷）
-30 12 * * 1-5  cd /path/to/stock_investment && make run TICKERS="2330 2454 2317" >> logs/signal.log 2>&1
+# 收盤後掃描（非互動模式）
+30 14 * * 1-5  cd /path/to/stock_investment && make scan SECTORS="1 5" LLM=none
 
-# 批量掃描（非互動，指定產業代號）
-30 12 * * 1-5  cd /path/to/stock_investment && .venv/bin/python scripts/batch_scan.py --sectors 1 2 --save-csv >> logs/scan.log 2>&1
+# 週末結算
+0 10 * * 6    cd /path/to/stock_investment && make settle
 ```
 
 ---
@@ -377,6 +346,13 @@ python3 scripts/run_bayesian_update.py
 | Phase 4.6 | ✅ 完成 | v2 引擎：Gate 層 + 三柱重構 + 風險修正 + TAIEX regime 門檻 + migration 007 |
 | Phase 4.7 | ✅ 完成 | `make scan` 路徑修正 + T86 週末跳過 + 動態 watchlist（728 檔，每日自動更新）|
 | Phase 4.8 | ✅ 完成 | 互動式產業選單（`--sectors` 數字代號）+ 全市場 industry_map cache + 日期自動判斷（17:00 切換）+ T86 rate-limit retry |
+| Phase 4.9 | ✅ 完成 | Gate 層可觀測性（GATE_PASS/FAIL/SKIP flags）+ Gate VOL 門檻 1.3→1.2 + Flag 中文翻譯 + 兩階段 LLM |
+| Phase 4.10 | ✅ 完成 | avg_20d_volume bug 修正 + TPEx T86 fallback + RSI 計分 + 突破量確認 + 產業排名後處理 + 信號持續加分 |
+| Phase 4.11 | ✅ 完成 | Factor Optimization Loop：backtest + factor-report + optimize + scoring_replay |
+| Phase 4.12 | ✅ 完成 | Rich UI + shared clients + FinMind yfinance fallback |
+| Phase 4.13 | ✅ 完成 | backtest 效能優化：Margin/SBL/DayTrade 日期級 cache + OHLCV pre-fetch + Rich 進度條 |
+| Phase 4.14 | ✅ 完成 | `make scan` shared client + `make precheck` 即時報價確認（TWSE MIS）|
+| Phase 4.15 | ✅ 完成 | T-2 策略驗證（D+2 勝率 55.6% > D+0 38.5%）+ 軌跡感知加分（RISING+7/STABLE+5/DECLINING+0）+ EMERGING_SETUP flag + precheck 蓄積監控 + Settlement 批次優化 |
 | Phase 5 | ⏳ 規劃中 | Stripe 真實付款整合 + 社群信譽評分 + 台灣 Pay |
 
 ---
@@ -460,20 +436,21 @@ stock_investment/
 ├── frontend/
 │   └── index.html                  # Phase 3b Landing page
 ├── scripts/
-│   ├── batch_scan.py               # 批量掃描（動態 watchlist 728 檔，每日 cache）
-│   ├── settle_outcomes.py          # 每日結果回填 cron
-│   ├── fetch_watchlist.py          # 觀察名單管理
-│   ├── validate_free_tier.py       # TWSE free-tier 驗證
-│   ├── validate_sbl_endpoint.py    # TWT93U SBL 端點可用性驗證
-│   ├── validate_margin_utilization.py  # MI_MARGN 融資限額驗證
-│   └── data_alignment_check.py     # 資料日期對齊驗證
+│   ├── batch_scan.py               # 批量掃描（動態 watchlist，每日 cache，shared clients）
+│   ├── precheck.py                 # 盤中即時確認 + EMERGING_SETUP 蓄積監控
+│   ├── backtest.py                 # 歷史回測（OHLCV pre-fetch + entry-delay + 批次 settlement）
+│   ├── daily_runner.py             # 每日掃描 + 結算 runner
+│   ├── factor_report.py            # Lift 分析 + Walk-forward Grid Search + 殘差分析
+│   ├── optimize.py                 # 一鍵優化迴路
+│   ├── entry_delay_analysis.py     # T-2 策略驗證：D+0/1/2 勝率比較
+│   └── trajectory_analysis.py      # RISING/STABLE/DECLINING 軌跡勝率驗證
 ├── tests/
 │   ├── unit/
-│   │   ├── test_triple_confirmation_engine_v2.py  # 59 個 v2 新測試
-│   │   ├── test_triple_confirmation_engine_v1.py  # v1 保留（skip 標記）
-│   │   └── ...                     # 185 tests 總計，無需 DB/網路
+│   │   ├── test_triple_confirmation_engine_v2.py  # v2 引擎測試
+│   │   ├── test_persistence_bonus.py              # 軌跡感知加分測試
+│   │   └── ...                     # 208 tests 總計，無需 DB/網路
 │   └── integration/                # 需要 PostgreSQL
-├── db/migrations/                  # SQL migrations（001–007，007 新增 scoring_version）
+├── db/migrations/                  # SQL migrations（001–008）
 └── docs/design/
     ├── factor-optimization-v2-plan.md  # v2 因子完整規格
     ├── signal-engine-design.md
