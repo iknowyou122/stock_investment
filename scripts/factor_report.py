@@ -348,19 +348,30 @@ def _print_report(lift_results: list[dict], grid_results: list[dict], residual: 
 
 def run_report(days: int, min_samples: int, scoring_version: str | None) -> Path | None:
     init_pool()
-    try:
-        rows = _fetch_rows(days, scoring_version)
-    except Exception as e:
-        print(f"DB error: {e}\n請設定 DATABASE_URL")
-        return None
+
+    with _console.status("[cyan]從 DB 載入訊號資料...[/cyan]"):
+        try:
+            rows = _fetch_rows(days, scoring_version)
+        except Exception as e:
+            print(f"DB error: {e}\n請設定 DATABASE_URL")
+            return None
 
     if len(rows) < 20:
         print(f"⚠ 只有 {len(rows)} 筆資料（需要 ≥20）。請先執行 make backtest 建立基礎資料。")
         return None
 
-    lift_results = _compute_lift(rows, min_samples)
-    grid_results = _grid_search(rows)
-    residual = _residual_analysis(rows)
+    _console.print(f"[dim]載入 {len(rows)} 筆已結算訊號（{days} 天內）[/dim]")
+
+    with _console.status("[cyan]計算因子 Lift 分析...[/cyan]"):
+        lift_results = _compute_lift(rows, min_samples)
+    _console.print(f"[dim]Lift 分析完成：{len(lift_results)} 個因子[/dim]")
+
+    with _console.status("[cyan]Grid Search + Walk-forward 驗證（500 候選 × 多個時間窗口）...[/cyan]"):
+        grid_results = _grid_search(rows)
+    _console.print(f"[dim]Grid Search 完成：{len(grid_results)} 個候選參數通過驗證[/dim]")
+
+    with _console.status("[cyan]殘差分析（FP / FN 模式識別）...[/cyan]"):
+        residual = _residual_analysis(rows)
 
     _print_report(lift_results, grid_results, residual, len(rows))
 
