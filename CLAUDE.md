@@ -33,6 +33,8 @@ you will create drift that is expensive to fix.
 | Phase 4.11 | ✅ Done | Factor Optimization Loop ✅ · DB migration 008（`score_breakdown JSONB`, `source`, `factor_registry`, `engine_versions` 表）✅ · `signal_recorder.py`（寫入 DB）✅ · `scoring_replay.py`（無需重跑引擎的 Grid Search）✅ · `config/engine_params.json`（可調參數白名單）✅ · `scripts/backtest.py` + `make backtest`（歷史回測）✅ · `scripts/daily_runner.py` + `make daily` / `make settle`（每日掃描+結算）✅ · `scripts/factor_report.py` + `make factor-report`（Lift 分析 + Walk-forward Grid Search + 殘差分析）✅ · `scripts/apply_tuning.py` + `make tune-review`（互動式 Review Gate）✅ · `scripts/test_factor.py` + `make test-factor`（實驗因子 Sandbox）✅ · `scripts/optimize.py` + `make optimize`（一鍵優化迴路）✅ · 213 unit tests passing ✅ |
 | Phase 4.12 | ✅ Done | Rich UI for `batch_scan`（progress bar、Panel 掃描頭、ROUNDED 產業表、彩色 confidence）✅ · `label_repo` + `industry_map` 傳入 `run_batch`/`_run_phase`（sector rank + persistence 後處理移入 `run_batch`）✅ · `rsi_momentum_pts` +4（RSI 14, 55–70 健康動能）✅ · `breakout_volume_pts` +3（突破 + 量能 >1.5× 均量確認）✅ · Pillar 1 上限 35→39、Pillar 3 上限 35→38 ✅ · TPEx T86 fallback（上櫃三大法人）✅ · `FinMindClient.fetch_ohlcv` yfinance fallback（FinMind 402 時自動切 `.TW`/`.TWO`）✅ · `scripts/build_broker_labels.py` + `scripts/analyze_outcomes.py` ✅ |
 | Phase 4.13 | ✅ Done | `make backtest` 效能優化 ✅ · Margin/SBL/DayTrade 日期級記憶體 cache（每日各 1 次 HTTP → 服務所有 ticker）✅ · TAIEX history 同日期共用（StrategistAgent `_taiex_cache`）✅ · default delay 0.5s→0.1s ✅ · Rich 進度條 + ETA（backtest 主迴路）✅ · 全 CLI 互動式 Rich UI（backtest/daily_runner/analyze/optimize）✅ · `requirements.txt` 加入 rich + yfinance ✅ · 197 unit tests passing ✅ |
+| Phase 4.14 | ✅ Done | `make scan` 共用客戶端優化（shared FinMindClient + ChipProxyFetcher，日期級快取跨 worker 共享）✅ · `make precheck` 盤前/盤中確認（TWSE MIS 即時報價 → 確認 entry±3%、量能、大盤）✅ · 197 unit tests passing ✅ |
+| Phase 4.15 | ✅ Done | T-2 策略驗證（`entry_delay_analysis.py` D+2 勝率 55.6% > D+0 38.5%）✅ · 軌跡感知持續加分（RISING +7 / STABLE +5 / DECLINING +0，讀近 3 天 CSV）✅ · `EMERGING_SETUP` flag（WATCH + MA排列 + 法人買 + 未突破）✅ · `make precheck` 蓄積中監控表 ✅ · MIS API `z=-` fallback（bid→hl_mid→open）✅ · Settlement 批次優化（executemany）✅ · 跨機器 DB 備份還原（`make db-dump/restore`）✅ · 208 unit tests passing ✅ |
 
 **免費 vs 付費因子說明：**
 
@@ -43,10 +45,8 @@ you will create drift that is expensive to fix.
 | Pillar 2A 分點籌碼（隔日沖/波段贏家）| ✗ | ✅ | FinMind `TaiwanStockBrokerTradingStatement` |
 | Pillar 3 結構（支撐/壓力/融資融券）| ✅（部分）| — | MI_MARGN 政府資料；SBL 目前降級為 0 |
 | 產業排名後處理加分 | ✅ | — | 本機 industry_map cache |
-| 信號持續加分 | ✅ | — | 前日 `--save-csv` 輸出 |
-
-| Phase 4.14 | ✅ Done | `make scan` 共用客戶端優化（shared FinMindClient + ChipProxyFetcher，日期級快取跨 worker 共享）✅ · `make precheck` 盤前/盤中確認（TWSE MIS 即時報價 → 確認 entry±3%、量能、大盤）✅ · 197 unit tests passing ✅ |
-| Phase 4.15 | ✅ Done | T-2 策略驗證（`entry_delay_analysis.py` D+2 勝率 55.6% > D+0 38.5%）✅ · 軌跡感知持續加分（RISING +7 / STABLE +5 / DECLINING +0，讀近 3 天 CSV）✅ · `EMERGING_SETUP` flag（WATCH + MA排列 + 法人買 + 未突破）✅ · `make precheck` 蓄積中監控表 ✅ · MIS API `z=-` fallback（bid→hl_mid→open）✅ · 208 unit tests passing ✅ |
+| 信號持續加分（軌跡感知）| ✅ | — | 近 3 天 CSV；RISING +7 / STABLE +5 / DECLINING +0 |
+| EMERGING_SETUP 蓄積偵測 | ✅ | — | WATCH + MA排列 + 法人買 + 未突破 20 日高 |
 
 **Phase 5 (next):**
 - Real Stripe webhook handling (requires production Stripe account + deployment)
