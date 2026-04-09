@@ -3,41 +3,20 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: run scan daily-scan precheck api test test-unit test-integration install install-gemini install-openai build-labels analyze setup migrate backtest daily settle factor-report tune-review test-factor optimize
+.PHONY: scan precheck settle backtest factor-report optimize test setup migrate api install
 
-# ── 分析股票 ─────────────────────────────────────────────────────────────────
-# 用法: make run DATE=2026-03-27 TICKERS="2330 2317 2454"
-#       make run TICKERS="2330" LLM=gemini
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
 
 # ── 安裝依賴 ─────────────────────────────────────────────────────────────────
 install:
-	$(PYTHON) -m pip install -e "."
+	$(PYTHON) -m pip install -e ".[llm-gemini,llm-openai]"
 
-install-gemini:
-	$(PYTHON) -m pip install -e ".[llm-gemini]"
-
-install-openai:
-	$(PYTHON) -m pip install -e ".[llm-openai]"
-
-# ── 分析股票 ─────────────────────────────────────────────────────────────────
-# 用法: make run DATE=2026-03-27 TICKERS="2330 2317 2454"
-run:
-ifndef TICKERS
-	$(error 請指定 TICKERS，例如: make run TICKERS="2330 2317")
-endif
-ifeq ($(DATE),$(_TODAY))
-	LLM_PROVIDER=$(LLM) $(PYTHON) -m taiwan_stock_agent --tickers $(TICKERS) --skip-freshness-check
-else
-	LLM_PROVIDER=$(LLM) $(PYTHON) -m taiwan_stock_agent --date $(DATE) --tickers $(TICKERS) --skip-freshness-check
-endif
-
-# ── 批次掃描 ─────────────────────────────────────────────────────────────────
-# 用法: make scan                              # 掃描 + 存 CSV + 寫 DB（每日標準流程）
-#       make scan LLM=gemini LLM_TOP=5         # 前 5 名送 LLM
-#       make scan SECTORS="1 4"                # 指定產業
-# 別名: make daily-scan（同 make scan，語意更清楚）
+# ── 每日掃描（主流程）────────────────────────────────────────────────────────
+# 掃描 + 存 CSV（precheck 用）+ 寫 DB（factor-report 用）
+# 用法: make scan
+#       make scan LLM=gemini LLM_TOP=5
+#       make scan SECTORS="1 4"
 SECTORS ?=
 LLM_TOP ?=
 
@@ -48,16 +27,13 @@ else
 	$(PYTHON) scripts/batch_scan.py --save-csv --save-db --date $(DATE) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS))
 endif
 
-daily-scan: scan
-
-# ── 盤前/盤中確認 ────────────────────────────────────────────────────────────
-# 讀取昨日 scan CSV → 抓即時報價 → 確認哪些還能進場
+# ── 盤中確認 ─────────────────────────────────────────────────────────────────
+# 讀取昨日 CSV → 即時報價 → 哪些還能進場
 # 用法: make precheck
-#       make precheck TOP=10
-#       make precheck CSV=data/scans/scan_2026-04-07.csv
-TOP ?= 20
-CSV ?=
+#       make precheck TOP=10 MIN_CONF=50
+TOP     ?= 20
 MIN_CONF ?= 40
+CSV     ?=
 
 precheck:
 	$(PYTHON) scripts/precheck.py \
@@ -65,67 +41,23 @@ precheck:
 		--min-confidence $(MIN_CONF) \
 		$(if $(CSV),--csv $(CSV))
 
-# ── API server ───────────────────────────────────────────────────────────────
-api:
-	$(PYTHON) -m uvicorn taiwan_stock_agent.api.main:app --reload --port 8000
+# ── 週末結算 ─────────────────────────────────────────────────────────────────
+# 補填 T+1/T+3/T+5 漲跌幅（每週末跑一次）
+settle:
+ifeq ($(DATE),$(_TODAY))
+	$(PYTHON) scripts/daily_runner.py settle
+else
+	$(PYTHON) scripts/daily_runner.py settle --date $(DATE)
+endif
 
-# ── 測試 ─────────────────────────────────────────────────────────────────────
-test:
-	.venv/bin/pytest tests/ -q
-
-test-unit:
-	.venv/bin/pytest tests/unit/ -q
-
-test-integration:
-	.venv/bin/pytest tests/integration/ -q
-
-# ── Broker Label DB 建置 ─────────────────────────────────────────────────────
-# 第一次執行需要約 5-10 分鐘（FinMind API 抓取 + 分類）
-# 之後重跑會從 Parquet cache 讀取，速度很快
-# 用法: make build-labels
-#       make build-labels WORKERS=5
-#       make build-labels DRY_RUN=1     # 只顯示統計，不寫 DB
-BUILD_WORKERS ?= 3
-DRY_RUN ?=
-
-build-labels:
-	$(PYTHON) scripts/build_broker_labels.py \
-		--workers $(BUILD_WORKERS) \
-		$(if $(DRY_RUN),--dry-run)
-
-# ── 訊號結果回測分析 ─────────────────────────────────────────────────────────
-# 用法: make analyze
-#       make analyze DAYS=60
-#       make analyze SCORING_VERSION=v2
-DAYS ?=
-SCORING_VERSION ?=
-
-analyze:
-	$(PYTHON) scripts/analyze_outcomes.py \
-		$(if $(DAYS),--days $(DAYS)) \
-		$(if $(SCORING_VERSION),--scoring-version $(SCORING_VERSION))
-
-# ── 環境初始化（第一次使用）────────────────────────────────────────────────────
-# 自動安裝 PostgreSQL、建立 DB、設定 .env、跑所有 migrations
-setup:
-	$(PYTHON) scripts/setup.py
-
-# ── DB Migrations ────────────────────────────────────────────────────────────
-# 用法: make migrate
-#       make migrate DRY_RUN=1   # 只列出 pending，不執行
-migrate:
-	$(PYTHON) scripts/migrate.py $(if $(DRY_RUN),--dry-run)
-
-# ── 歷史回測 ──────────────────────────────────────────────────────────────────
-# 優化迴路起點：撈過去歷史資料 → 產生訊號存 DB → settle → analyze → optimize
-# 用法: make backtest                        # 全互動
-#       make backtest DATE_FROM=2025-10-01 DATE_TO=2026-03-31
-#       make backtest SECTORS="5 31" LLM=none
-#       make backtest ENTRY_DELAY=1           # T-1 佈局驗證
-DATE_FROM ?=
-DATE_TO   ?=
+# ── 歷史回測 ─────────────────────────────────────────────────────────────────
+# 用法: make backtest
+#       make backtest DATE_FROM=2025-10-01 DATE_TO=2026-03-31 LLM=none
+#       make backtest ENTRY_DELAY=1    # T-1 佈局驗證
+DATE_FROM      ?=
+DATE_TO        ?=
 BACKTEST_TICKERS ?=
-ENTRY_DELAY ?=
+ENTRY_DELAY    ?=
 
 backtest:
 	$(PYTHON) scripts/backtest.py \
@@ -136,41 +68,20 @@ backtest:
 		$(if $(SECTORS),--sectors $(SECTORS)) \
 		$(if $(ENTRY_DELAY),--entry-delay $(ENTRY_DELAY))
 
-# ── 每日真實訊號 ──────────────────────────────────────────────────────────────
-daily:
-ifeq ($(DATE),$(_TODAY))
-	$(PYTHON) scripts/daily_runner.py daily
-else
-	$(PYTHON) scripts/daily_runner.py daily --date $(DATE)
-endif
-
-settle:
-ifeq ($(DATE),$(_TODAY))
-	$(PYTHON) scripts/daily_runner.py settle
-else
-	$(PYTHON) scripts/daily_runner.py settle --date $(DATE)
-endif
-
-# ── 因子分析 ──────────────────────────────────────────────────────────────────
+# ── 因子分析 ─────────────────────────────────────────────────────────────────
 FACTOR_DAYS ?=
 
 factor-report:
 	$(PYTHON) scripts/factor_report.py $(if $(FACTOR_DAYS),--days $(FACTOR_DAYS))
 
-# ── 調參 ──────────────────────────────────────────────────────────────────────
-AUTO_APPROVE ?=
-SKIP_SETTLE ?=
-
-tune-review:
-	$(PYTHON) scripts/apply_tuning.py \
-		$(if $(AUTO_APPROVE),--auto-approve) \
-		$(if $(DRY_RUN),--dry-run)
-
-# ── 一鍵優化迴路 ──────────────────────────────────────────────────────────────
+# ── 一鍵優化迴路 ─────────────────────────────────────────────────────────────
 # 用法: make optimize
-#       make optimize AUTO_APPROVE=1      # 全自動（cron 用）
-#       make optimize DRY_RUN=1           # 只看報告
-#       make optimize SKIP_SETTLE=1       # 跳過補填步驟
+#       make optimize AUTO_APPROVE=1   # 全自動
+DAYS         ?=
+AUTO_APPROVE ?=
+DRY_RUN      ?=
+SKIP_SETTLE  ?=
+
 optimize:
 	$(PYTHON) scripts/optimize.py \
 		$(if $(AUTO_APPROVE),--auto-approve) \
@@ -178,12 +89,17 @@ optimize:
 		$(if $(SKIP_SETTLE),--skip-settle) \
 		$(if $(DAYS),--days $(DAYS))
 
-# ── 實驗因子測試 ──────────────────────────────────────────────────────────────
-# 用法: make test-factor FACTOR=my_factor_name
-FACTOR ?=
+# ── 測試 ─────────────────────────────────────────────────────────────────────
+test:
+	.venv/bin/pytest tests/unit/ -q
 
-test-factor:
-ifndef FACTOR
-	$(error 請指定 FACTOR，例如: make test-factor FACTOR=consecutive_foreign_3d)
-endif
-	$(PYTHON) scripts/test_factor.py --factor $(FACTOR)
+# ── 環境初始化 ───────────────────────────────────────────────────────────────
+setup:
+	$(PYTHON) scripts/setup.py
+
+migrate:
+	$(PYTHON) scripts/migrate.py $(if $(DRY_RUN),--dry-run)
+
+# ── API server ───────────────────────────────────────────────────────────────
+api:
+	$(PYTHON) -m uvicorn taiwan_stock_agent.api.main:app --reload --port 8000
