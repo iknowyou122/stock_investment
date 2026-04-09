@@ -382,6 +382,29 @@ def _print_results(
 # ---------------------------------------------------------------------------
 
 def run_precheck(csv_path: Path | None, min_confidence: int, top: int) -> None:
+    # 0. 只在盤中有意義（09:00–13:30）
+    now = datetime.now()
+    is_market_hours = now.weekday() < 5 and (
+        now.replace(hour=9, minute=0, second=0) <= now <= now.replace(hour=13, minute=30, second=0)
+    )
+    if not is_market_hours:
+        if now.hour < 9:
+            hint = "開盤後（09:00）再執行"
+        elif now.hour >= 14 or (now.hour == 13 and now.minute >= 30):
+            hint = "今日收盤，明日盤中（09:00–13:30）再執行"
+        else:
+            hint = "週末休市，下週一盤中再執行"
+        _console.print(Panel(
+            f"[yellow]⚠ 目前 {now.strftime('%H:%M')} 非盤中時段\n\n"
+            f"TWSE 即時報價只在 09:00–13:30 提供現價資料。\n"
+            f"盤後執行無法判斷現價是否在進場範圍內，結果沒有意義。\n\n"
+            f"→ {hint}[/yellow]",
+            title="[bold yellow]Precheck 無法執行[/bold yellow]",
+            border_style="yellow",
+            padding=(0, 2),
+        ))
+        return
+
     # 1. Find scan CSV
     if csv_path is None:
         csv_path = _find_latest_scan_csv(_SCAN_DIR)
