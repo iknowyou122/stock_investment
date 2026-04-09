@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: run scan precheck api test test-unit test-integration install install-gemini install-openai build-labels analyze setup migrate backtest daily settle factor-report tune-review test-factor optimize
+.PHONY: run scan daily-scan precheck api test test-unit test-integration install install-gemini install-openai build-labels analyze setup migrate backtest daily settle factor-report tune-review test-factor optimize
 
 # ── 分析股票 ─────────────────────────────────────────────────────────────────
 # 用法: make run DATE=2026-03-27 TICKERS="2330 2317 2454"
@@ -34,19 +34,21 @@ else
 endif
 
 # ── 批次掃描 ─────────────────────────────────────────────────────────────────
-# 用法: make scan                         # 預設存 CSV（precheck 用）
-#       make scan LLM=gemini              # Phase 2 互動問送幾名
-#       make scan LLM=gemini LLM_TOP=5    # 直接送前 5 名給 LLM
-#       make scan SECTORS="1 4" LLM=gemini
+# 用法: make scan                              # 掃描 + 存 CSV + 寫 DB（每日標準流程）
+#       make scan LLM=gemini LLM_TOP=5         # 前 5 名送 LLM
+#       make scan SECTORS="1 4"                # 指定產業
+# 別名: make daily-scan（同 make scan，語意更清楚）
 SECTORS ?=
 LLM_TOP ?=
 
 scan:
 ifeq ($(DATE),$(_TODAY))
-	$(PYTHON) scripts/batch_scan.py --save-csv $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS))
+	$(PYTHON) scripts/batch_scan.py --save-csv --save-db $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS))
 else
-	$(PYTHON) scripts/batch_scan.py --save-csv --date $(DATE) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS))
+	$(PYTHON) scripts/batch_scan.py --save-csv --save-db --date $(DATE) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS))
 endif
+
+daily-scan: scan
 
 # ── 盤前/盤中確認 ────────────────────────────────────────────────────────────
 # 讀取昨日 scan CSV → 抓即時報價 → 確認哪些還能進場

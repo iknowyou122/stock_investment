@@ -390,7 +390,11 @@ def _make_agent(llm_provider=None, no_llm: bool = False, label_repo=None,
 
 
 def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent) -> dict:
-    """Run pipeline for one ticker using a shared agent; return result dict."""
+    """Run pipeline for one ticker using a shared agent; return result dict.
+
+    The returned dict includes a '_signal' key with the raw SignalOutput object
+    (None on error or halt) so that run_batch can optionally record it to DB.
+    """
     t0 = time.time()
     try:
         signal = agent.run(ticker, analysis_date)
@@ -410,6 +414,7 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent) -> dict:
             "risk": signal.reasoning.risk_factors if signal.reasoning else "",
             "elapsed": elapsed,
             "error": None,
+            "_signal": signal,
         }
     except Exception as e:
         return {
@@ -427,6 +432,7 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent) -> dict:
             "risk": "",
             "elapsed": time.time() - t0,
             "error": str(e),
+            "_signal": None,
         }
 
 
@@ -630,6 +636,36 @@ def _run_phase(
     return results
 
 
+def _record_results(results: list[dict], analysis_date: date) -> int:
+    """Write non-halted scan results to signal_outcomes DB (source='live').
+
+    Returns count of successfully recorded signals.
+    Skips gracefully if DATABASE_URL is not set or DB is unreachable.
+    """
+    import os
+    if not os.environ.get("DATABASE_URL"):
+        return 0
+    try:
+        from taiwan_stock_agent.infrastructure.db import init_pool
+        from taiwan_stock_agent.infrastructure.signal_recorder import record_signal
+        init_pool()
+    except Exception as e:
+        logger.debug("DB init failed, skipping record: %s", e)
+        return 0
+
+    recorded = 0
+    for r in results:
+        signal = r.get("_signal")
+        if signal is None or r["halt"] or r["error"] is not None:
+            continue
+        try:
+            record_signal(signal, source="live")
+            recorded += 1
+        except Exception as e:
+            logger.debug("record_signal %s: %s", r["ticker"], e)
+    return recorded
+
+
 def run_batch(
     tickers: list[str],
     analysis_date: date,
@@ -641,6 +677,7 @@ def run_batch(
     llm_top: int | None = None,
     label_repo=None,
     industry_map: dict[str, str] | None = None,
+    save_db: bool = False,
 ) -> None:
     llm_label = getattr(llm_provider, "name", None) or "（無 LLM）"
     label_status = (
@@ -705,6 +742,14 @@ def run_batch(
     if n_persist:
         _console.print(f"  [dim]↑ 前日持續訊號加分: {n_persist} 檔 (+5 pts each)[/dim]")
 
+    # --- Optional: record to DB (source=live) for factor analysis ---
+    if save_db:
+        n_recorded = _record_results(results, analysis_date)
+        if n_recorded:
+            _console.print(f"  [dim green]✓ {n_recorded} 筆訊號已寫入 DB (source=live)[/dim green]")
+        else:
+            _console.print("  [dim yellow]⚠ DB 未設定或無法連線，略過寫入[/dim yellow]")
+
     _print_table(results, top, min_confidence)
 
     if csv_path:
@@ -754,6 +799,11 @@ def main() -> None:
         "--no-llm",
         action="store_true",
         help="關閉 LLM reasoning，只跑 deterministic scoring",
+    )
+    parser.add_argument(
+        "--save-db",
+        action="store_true",
+        help="將訊號寫入 signal_outcomes DB (source=live)，用於 factor-report 分析",
     )
     args = parser.parse_args()
 
@@ -811,6 +861,7 @@ def main() -> None:
         tickers, args.date, args.top, args.min_confidence, args.workers,
         csv_path, llm_provider, llm_top, label_repo,
         industry_map=industry_map,
+        save_db=args.save_db,
     )
 
 
