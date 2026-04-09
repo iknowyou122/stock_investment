@@ -178,6 +178,80 @@ make test
 
 ---
 
+## 查看資料庫內容
+
+### psql 命令列
+
+```bash
+psql postgresql://localhost/taiwan_stock
+```
+
+常用查詢：
+
+```sql
+-- 列出所有資料表
+\dt
+
+-- 看欄位結構
+\d signal_outcomes
+
+-- 最近 10 筆訊號
+SELECT ticker, signal_date, action, confidence_score, outcome_1d, outcome_5d
+FROM signal_outcomes
+ORDER BY signal_date DESC
+LIMIT 10;
+
+-- 各 action 數量
+SELECT action, COUNT(*) FROM signal_outcomes GROUP BY action;
+
+-- 結算率（有 outcome_5d 的比例）
+SELECT
+  COUNT(*) FILTER (WHERE outcome_5d IS NOT NULL) AS settled,
+  COUNT(*) AS total
+FROM signal_outcomes;
+
+-- 近 30 天 LONG 訊號勝率
+SELECT
+  action,
+  COUNT(*) AS n,
+  ROUND(AVG(CASE WHEN outcome_5d > 0 THEN 1 ELSE 0 END) * 100, 1) AS win_pct_5d,
+  ROUND(AVG(outcome_5d) * 100, 2) AS avg_ret_5d
+FROM signal_outcomes
+WHERE signal_date >= CURRENT_DATE - 30
+  AND outcome_5d IS NOT NULL
+  AND halt_flag = FALSE
+GROUP BY action
+ORDER BY action;
+
+-- 離開
+\q
+```
+
+### GUI 工具（TablePlus）
+
+免費版夠用。新增連線：
+- Type: `PostgreSQL`
+- Host: `localhost`，Port: `5432`
+- Database: `taiwan_stock`
+
+### 內建分析腳本
+
+```bash
+# 訊號勝率分析（按 action / confidence tier / flag 分組）
+make analyze
+
+# 因子貢獻度 + Walk-forward Grid Search
+make factor-report
+
+# 軌跡分類勝率（RISING / STABLE / FIRST / DECLINING）
+.venv/bin/python scripts/trajectory_analysis.py
+
+# T-2 佈局驗證（D+0 / D+1 / D+2 進場勝率比較）
+.venv/bin/python scripts/entry_delay_analysis.py
+```
+
+---
+
 ## 每日使用流程
 
 ### 標準三段式工作流
