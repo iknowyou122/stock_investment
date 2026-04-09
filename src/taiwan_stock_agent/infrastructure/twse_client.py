@@ -83,6 +83,10 @@ class ChipProxyFetcher:
         # TPEx T86 (上櫃三大法人) — full market table, cache once per date.
         # {date: {ticker: (foreign, trust, dealer)}}
         self._tpex_t86_date_cache: dict[date, dict[str, tuple[int | None, int | None, int | None]]] = {}
+        # Rate-limit circuit breaker: after N consecutive rate-limited T86 dates,
+        # skip ALL future T86 HTTP calls for this session. Reset on next process start.
+        self._t86_consecutive_failures: int = 0
+        self._t86_circuit_open: bool = False
 
     def fetch(self, ticker: str, trade_date: date) -> TWSEChipProxy:
         """Fetch chip proxy data for ticker on trade_date.
@@ -156,6 +160,17 @@ class ChipProxyFetcher:
         Returns (foreign_net_buy, trust_net_buy, dealer_net_buy) in shares;
         any value may be None if unavailable.
         """
+        # 0. Circuit breaker — if TWSE has been rate-limiting us, skip HTTP entirely.
+        #    After 3 consecutive rate-limited dates, assume TWSE is blocking this session.
+        if self._t86_circuit_open:
+            if trade_date not in self._t86_date_cache:
+                self._t86_date_cache[trade_date] = {}
+            # Still try TPEx for OTC stocks
+            tpex_result = self._fetch_tpex_t86_data(ticker, trade_date, flags)
+            if any(v is not None for v in tpex_result):
+                return tpex_result
+            return None, None, None
+
         # 1. Date-level memory cache — fastest path (dict lookup, ~0.001ms)
         if trade_date in self._t86_date_cache:
             result = self._t86_date_cache[trade_date].get(ticker)
@@ -226,7 +241,19 @@ class ChipProxyFetcher:
                 logger.debug("T86 unavailable for %s %s after retries — 籌碼資料缺失", ticker, trade_date)
                 flags.append(f"TWSE_T86_RATE_LIMITED:{trade_date}")
                 self._t86_date_cache[trade_date] = {}  # mark date as fetched (empty)
+                # Circuit breaker: after 3 consecutive rate-limited dates, stop all T86 HTTP
+                self._t86_consecutive_failures += 1
+                if self._t86_consecutive_failures >= 3 and not self._t86_circuit_open:
+                    self._t86_circuit_open = True
+                    logger.warning(
+                        "T86 circuit breaker OPEN — %d consecutive rate-limited dates, "
+                        "skipping all future TWSE T86 HTTP calls",
+                        self._t86_consecutive_failures,
+                    )
                 return None, None, None
+
+            # Successful fetch — reset circuit breaker counter
+            self._t86_consecutive_failures = 0
 
             if body.get("stat") != "OK" or not body.get("data"):
                 flags.append(f"TWSE_T86_NO_DATA:{trade_date}")
@@ -577,10 +604,10 @@ class ChipProxyFetcher:
 
         Returns (foreign_count, trust_count, dealer_count).
 
-        Looks back up to 14 calendar days (~7 trading days) using the T86 data
-        already fetched/cached — zero additional network calls.
-        Non-trading days (weekends/holidays) are skipped transparently.
-        Returns 0 for an institution if it has no positive net buy on trade_date.
+        Looks back up to 14 calendar days (~7 trading days) using T86 data.
+        The circuit breaker (_t86_circuit_open) limits damage when TWSE is
+        rate-limiting — after 3 consecutive failures, all lookback dates
+        resolve instantly from cache (empty) without HTTP calls.
         """
         foreign_vals: list[int] = []
         trust_vals: list[int] = []
