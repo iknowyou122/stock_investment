@@ -1,0 +1,161 @@
+{
+  "report_date": "2026-04-08",
+  "lift_analysis": [
+    {
+      "flag": "GATE_AVAILABLE:4",
+      "n_with": 3836,
+      "n_without": 3,
+      "win_with": 0.6180917622523462,
+      "win_without": 0.0,
+      "lift": 0.6180917622523462
+    },
+    {
+      "flag": "GATE_FAIL:RS",
+      "n_with": 2624,
+      "n_without": 1215,
+      "win_with": 0.6764481707317073,
+      "win_without": 0.4905349794238683,
+      "lift": 0.18591319130783895
+    },
+    {
+      "flag": "NO_SETUP",
+      "n_with": 2851,
+      "n_without": 988,
+      "win_with": 0.649245878639074,
+      "win_without": 0.5263157894736842,
+      "lift": 0.12293008916538983
+    },
+    {
+      "flag": "GATE_MET:0",
+      "n_with": 1775,
+      "n_without": 2064,
+      "win_with": 0.663661971830986,
+      "win_without": 0.5780038759689923,
+      "lift": 0.08565809586199369
+    },
+    {
+      "flag": "GATE_FAIL:VOL",
+      "n_with": 3280,
+      "n_without": 559,
+      "win_with": 0.6268292682926829,
+      "win_without": 0.5635062611806798,
+      "lift": 0.06332300711200312
+    },
+    {
+      "flag": "GATE_FAIL:HIGH20",
+      "n_with": 3680,
+      "n_without": 159,
+      "win_with": 0.6195652173913043,
+      "win_without": 0.5723270440251572,
+      "lift": 0.04723817336614711
+    },
+    {
+      "flag": "GATE_MET:1",
+      "n_with": 1076,
+      "n_without": 2763,
+      "win_with": 0.6254646840148699,
+      "win_without": 0.6145494028230185,
+      "lift": 0.010915281191851367
+    },
+    {
+      "flag": "GATE_FAIL:VWAP",
+      "n_with": 2327,
+      "n_without": 1512,
+      "win_with": 0.6214009454232918,
+      "win_without": 0.6117724867724867,
+      "lift": 0.009628458650805083
+    },
+    {
+      "flag": "GATE_PASS:VWAP",
+      "n_with": 1511,
+      "n_without": 2328,
+      "win_with": 0.6121773659827928,
+      "win_without": 0.6211340206185567,
+      "lift": -0.008956654635763894
+    },
+    {
+      "flag": "GATE_MET:4",
+      "n_with": 70,
+      "n_without": 3769,
+      "win_with": 0.5857142857142857,
+      "win_without": 0.61820111435394,
+      "lift": -0.03248682863965424
+    },
+    {
+      "flag": "GATE_PASS:HIGH20",
+      "n_with": 159,
+      "n_without": 3680,
+      "win_with": 0.5723270440251572,
+      "win_without": 0.6195652173913043,
+      "lift": -0.04723817336614711
+    },
+    {
+      "flag": "BREAKOUT_WITH_VOL",
+      "n_with": 60,
+      "n_without": 3779,
+      "win_with": 0.5666666666666667,
+      "win_without": 0.6184175707859222,
+      "lift": -0.051750904119255536
+    },
+    {
+      "flag": "GATE_PASS:VOL",
+      "n_with": 557,
+      "n_without": 3282,
+      "win_with": 0.5655296229802513,
+      "win_without": 0.6264472882388787,
+      "lift": -0.06091766525862741
+    },
+    {
+      "flag": "GATE_MET:3",
+      "n_with": 250,
+      "n_without": 3589,
+      "win_with": 0.528,
+      "win_without": 0.6238506547784898,
+      "lift": -0.09585065477848975
+    },
+    {
+      "flag": "LONG_UPPER_SHADOW",
+      "n_with": 94,
+      "n_without": 3745,
+      "win_with": 0.5212765957446809,
+      "win_without": 0.6200267022696929,
+      "lift": -0.09875010652501204
+    },
+    {
+      "flag": "GATE_MET:2",
+      "n_with": 668,
+      "n_without": 3171,
+      "win_with": 0.5194610778443114,
+      "win_without": 0.6382844528539893,
+      "lift": -0.11882337500967788
+    },
+    {
+      "flag": "NO_CHIP_DATA",
+      "n_with": 503,
+      "n_without": 3336,
+      "win_with": 0.5129224652087475,
+      "win_without": 0.6333932853717026,
+      "lift": -0.12047082016295507
+    },
+    {
+      "flag": "GATE_PASS:RS",
+      "n_with": 1215,
+      "n_without": 2624,
+      "win_with": 0.4905349794238683,
+      "win_without": 0.6764481707317073,
+      "lift": -0.18591319130783895
+    },
+    {
+      "flag": "DOJI_OR_HALT",
+      "n_with": 41,
+      "n_without": 3798,
+      "win_with": 0.3170731707317073,
+      "win_without": 0.6208530805687204,
+      "lift": -0.30377990983701303
+    }
+  ],
+  "grid_search_top5": [],
+  "residual_suggestions": [
+    "樣本量不足以識別殘差模式 (需要 FP≥5, FN≥5)"
+  ]
+}

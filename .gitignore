@@ -1,6 +1,5 @@
 .env
 data/cache/
-data/scans/
 __pycache__/
 *.pyc
 *.pyo
