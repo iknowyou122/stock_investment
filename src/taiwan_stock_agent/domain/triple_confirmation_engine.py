@@ -18,6 +18,7 @@ Score breakdown (max 100 pts before risk deductions):
     trend_continuity_pts: 0/3/5   — 3 consec up → 3; 4-of-5 up → 5
     volume_escalation_pts:0/3/5   — T-3<T-2<T-1 → 3; + today>T-1 → 5
     rsi_momentum_pts:     0/4     — RSI(14) 55–70 → +4 (healthy momentum, not overbought)
+    dmi_initiation_pts:   0/2/4/6 — DMI +DI>-DI + ADX 20–40 + rising → +6
 
   Pillar 2A: Chip paid (max 40 pts)
     breadth_pts:          0/5/10  — net_buyer_diff ≤0 → 0, 1–10 → 5, >10 → 10
@@ -46,6 +47,7 @@ Score breakdown (max 100 pts before risk deductions):
     ma20_slope_pts:       0/5    — MA20 rising vs 5d ago → +5 (≥25 sessions)
     relative_strength_pts:0/3/5  — stock 5d return vs TAIEX; 0–20% outperform → 3, >20% → 5
     upside_space_pts:     0/2/5  — distance to 120d/52w high: 3–8% → 2, >8% → 5
+    bb_squeeze_breakout_pts: 0/3/5 — BB width pct <20 + close>upper (vol confirm → 5)
 
   Risk deductions:
     daytrade_risk:        0/-25  — 隔日沖 in top3
@@ -55,6 +57,8 @@ Score breakdown (max 100 pts before risk deductions):
     daytrade_heat:        0/-5   — daytrade_ratio > 35% AND close not above 20d high
     sbl_breakout_fail:    0/-8   — sbl_ratio > 10% AND close < twenty_day_high × 0.99
     margin_chase_heat:    0/-5   — price up + 融資大增 + margin_utilization > 60%
+    adx_exhaustion:       0/-6   — ADX > 55
+    dmi_divergence:       0/-4   — +DI↓ −DI↑ + price up
 
   Thresholds (regime-adjusted):
     Uptrend   (TAIEX MA20 today > 5d ago):  LONG ≥ 63
@@ -168,6 +172,13 @@ class _AnalysisHints:
     chip_quality: str | None = None       # "法人主導" | "主力集中" | "散戶跟風" | "資料不足"
     heat_level: str | None = None         # "低" | "中" | "高"
     setup_type: str | None = None         # "初升段" | "延續段" | "高檔追價"
+    # DMI / BB hints
+    adx: float | None = None
+    plus_di: float | None = None
+    minus_di: float | None = None
+    bb_upper: float | None = None
+    bb_lower: float | None = None
+    bb_width_percentile: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +203,7 @@ class _ScoreBreakdown:
     trend_continuity_pts: int = 0     # 0/3/5
     volume_escalation_pts: int = 0    # 0/3/5
     rsi_momentum_pts: int = 0         # 0/4 — RSI(14) 55–70
+    dmi_initiation_pts: int = 0      # 0/2/4/6 — DMI trend initiation
 
     # --- Pillar 2A: Chip paid (max _PILLAR2_PAID_MAX = 40) ---
     breadth_pts: int = 0              # 0/5/10
@@ -219,6 +231,7 @@ class _ScoreBreakdown:
     ma20_slope_pts: int = 0           # 0/5
     relative_strength_pts: int = 0    # 0/3/5
     upside_space_pts: int = 0         # 0/2/5
+    bb_squeeze_breakout_pts: int = 0  # 0/3/5 — BB squeeze + breakout confirmation
 
     # --- Risk deductions (stored as non-negative values; subtracted in total) ---
     daytrade_risk: int = 0            # 0 or 25
@@ -228,6 +241,8 @@ class _ScoreBreakdown:
     daytrade_heat: int = 0            # 0 or 5
     sbl_breakout_fail: int = 0        # 0 or 8
     margin_chase_heat: int = 0        # 0 or 5
+    adx_exhaustion_deduction: int = 0   # 0 or 6 — ADX > 55
+    dmi_divergence_deduction: int = 0   # 0 or 4 — +DI falling while -DI rising
 
     flags: list[str] = field(default_factory=list)
 
@@ -243,6 +258,7 @@ class _ScoreBreakdown:
             + self.trend_continuity_pts
             + self.volume_escalation_pts
             + self.rsi_momentum_pts
+            + self.dmi_initiation_pts
             # Pillar 2A paid
             + self.breadth_pts
             + self.concentration_pts
@@ -267,6 +283,7 @@ class _ScoreBreakdown:
             + self.ma20_slope_pts
             + self.relative_strength_pts
             + self.upside_space_pts
+            + self.bb_squeeze_breakout_pts
             # Risk deductions
             - self.daytrade_risk
             - self.long_upper_shadow
@@ -275,6 +292,8 @@ class _ScoreBreakdown:
             - self.daytrade_heat
             - self.sbl_breakout_fail
             - self.margin_chase_heat
+            - self.adx_exhaustion_deduction
+            - self.dmi_divergence_deduction
         )
         return max(0, min(100, raw))
 
@@ -310,6 +329,7 @@ class _ScoreBreakdown:
             + self.trend_continuity_pts
             + self.volume_escalation_pts
             + self.rsi_momentum_pts
+            + self.dmi_initiation_pts
         )
 
     @property
@@ -324,6 +344,7 @@ class _ScoreBreakdown:
             + self.ma20_slope_pts
             + self.relative_strength_pts
             + self.upside_space_pts
+            + self.bb_squeeze_breakout_pts
         )
 
 
