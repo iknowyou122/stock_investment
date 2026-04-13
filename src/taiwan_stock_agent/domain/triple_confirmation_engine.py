@@ -18,7 +18,7 @@ Score breakdown (max 100 pts before risk deductions):
     trend_continuity_pts: 0/3/5   — 3 consec up → 3; 4-of-5 up → 5
     volume_escalation_pts:0/3/5   — T-3<T-2<T-1 → 3; + today>T-1 → 5
     rsi_momentum_pts:     0/4     — RSI(14) 55–70 → +4 (healthy momentum, not overbought)
-    dmi_initiation_pts:   0/2/4/6 — DMI +DI>-DI + ADX 20–40 + rising → +6
+    dmi_initiation_pts:   0/2/4/6 — DMI +DI>-DI + ADX≥20; fresh cross/ADX rising → +6
 
   Pillar 2A: Chip paid (max 40 pts)
     breadth_pts:          0/5/10  — net_buyer_diff ≤0 → 0, 1–10 → 5, >10 → 10
@@ -47,7 +47,7 @@ Score breakdown (max 100 pts before risk deductions):
     ma20_slope_pts:       0/5    — MA20 rising vs 5d ago → +5 (≥25 sessions)
     relative_strength_pts:0/3/5  — stock 5d return vs TAIEX; 0–20% outperform → 3, >20% → 5
     upside_space_pts:     0/2/5  — distance to 120d/52w high: 3–8% → 2, >8% → 5
-    bb_squeeze_breakout_pts: 0/3/5 — BB width pct <20 + close>upper (vol confirm → 5)
+    bb_squeeze_breakout_pts: 0/2/3/5 — BB squeeze: setup 2, breakout 3, +vol confirm 5
 
   Risk deductions:
     daytrade_risk:        0/-25  — 隔日沖 in top3
@@ -203,7 +203,7 @@ class _ScoreBreakdown:
     trend_continuity_pts: int = 0     # 0/3/5
     volume_escalation_pts: int = 0    # 0/3/5
     rsi_momentum_pts: int = 0         # 0/4 — RSI(14) 55–70
-    dmi_initiation_pts: int = 0      # 0/2/4/6 — DMI trend initiation
+    dmi_initiation_pts: int = 0      # 0/2/4/6 — DMI: fresh cross/rising ADX → 6
 
     # --- Pillar 2A: Chip paid (max _PILLAR2_PAID_MAX = 40) ---
     breadth_pts: int = 0              # 0/5/10
@@ -222,7 +222,7 @@ class _ScoreBreakdown:
     margin_utilization_pts: int = 0       # -4/0/+4
     sbl_pressure_pts: int = 0             # 0/-4/-8
 
-    # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 38) ---
+    # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 40) ---
     breakout_20d_pts: int = 0         # 0/8
     breakout_60d_pts: int = 0         # 0/5
     breakout_quality_pts: int = 0     # 0/2
@@ -231,7 +231,7 @@ class _ScoreBreakdown:
     ma20_slope_pts: int = 0           # 0/5
     relative_strength_pts: int = 0    # 0/3/5
     upside_space_pts: int = 0         # 0/2/5
-    bb_squeeze_breakout_pts: int = 0  # 0/3/5 — BB squeeze + breakout confirmation
+    bb_squeeze_breakout_pts: int = 0  # 0/2/3/5 — BB squeeze setup/breakout/+vol
 
     # --- Risk deductions (stored as non-negative values; subtracted in total) ---
     daytrade_risk: int = 0            # 0 or 25
@@ -558,7 +558,17 @@ class TripleConfirmationEngine:
         bd.trend_continuity_pts = self._trend_continuity_score(ohlcv, ohlcv_history)
         bd.volume_escalation_pts = self._volume_escalation_score(ohlcv, ohlcv_history)
         bd.rsi_momentum_pts = self._rsi_momentum_score(ohlcv_history)
-        dmi_pts, dmi_flag = self._dmi_initiation_score(ohlcv_history)
+
+        # Pre-compute DMI once — shared by initiation score + risk deductions
+        sorted_hist = sorted(ohlcv_history, key=lambda x: x.trade_date)
+        dmi_now = self._calculate_dmi(sorted_hist)
+        dmi_5d_ago = (
+            self._calculate_dmi(sorted_hist[:-5])
+            if len(sorted_hist) >= 34
+            else (None, None, None)
+        )
+
+        dmi_pts, dmi_flag = self._dmi_initiation_score_cached(dmi_now, dmi_5d_ago)
         bd.dmi_initiation_pts = dmi_pts
         if dmi_flag:
             bd.flags.append(dmi_flag)
@@ -622,19 +632,23 @@ class TripleConfirmationEngine:
             bd.flags.append(bb_flag)
 
         # --- Risk deductions ---
-        self._apply_risk_deductions(bd, ohlcv, ohlcv_history, volume_profile, twse_proxy)
+        self._apply_risk_deductions(
+            bd, ohlcv, ohlcv_history, volume_profile, twse_proxy,
+            dmi_now=dmi_now, dmi_5d_ago=dmi_5d_ago,
+        )
 
         logger.debug(
             "v2 score breakdown for %s: "
-            "p1=%d+%d+%d+%d+%d+%d "
+            "p1=%d+%d+%d+%d+%d+%d+%d+%d "
             "p2_paid=%d+%d+%d+%d+%d "
             "p2_free=%d+%d+%d+%d+%d+%d+%d+%d "
-            "p3=%d+%d+%d+%d+%d+%d+%d+%d "
-            "risk=-%d-%d-%d-%d-%d-%d-%d "
+            "p3=%d+%d+%d+%d+%d+%d+%d+%d+%d "
+            "risk=-%d-%d-%d-%d-%d-%d-%d-%d-%d "
             "flags=%s → total=%d",
             ohlcv.ticker,
             bd.volume_ratio_pts, bd.price_direction_pts, bd.close_strength_pts,
             bd.vwap_advantage_pts, bd.trend_continuity_pts, bd.volume_escalation_pts,
+            bd.rsi_momentum_pts, bd.dmi_initiation_pts,
             bd.breadth_pts, bd.concentration_pts, bd.continuity_pts,
             bd.daytrade_filter_pts, bd.foreign_broker_pts,
             bd.foreign_strength_pts, bd.trust_strength_pts, bd.dealer_strength_pts,
@@ -642,9 +656,11 @@ class TripleConfirmationEngine:
             bd.margin_structure_pts, bd.margin_utilization_pts, bd.sbl_pressure_pts,
             bd.breakout_20d_pts, bd.breakout_60d_pts, bd.breakout_quality_pts,
             bd.breakout_volume_pts,
-            bd.ma_alignment_pts, bd.ma20_slope_pts, bd.relative_strength_pts, bd.upside_space_pts,
+            bd.ma_alignment_pts, bd.ma20_slope_pts, bd.relative_strength_pts,
+            bd.upside_space_pts, bd.bb_squeeze_breakout_pts,
             bd.daytrade_risk, bd.long_upper_shadow, bd.overheat_ma20, bd.overheat_ma60,
             bd.daytrade_heat, bd.sbl_breakout_fail, bd.margin_chase_heat,
+            bd.adx_exhaustion_deduction, bd.dmi_divergence_deduction,
             bd.flags, bd.total,
         )
         return bd
@@ -1122,21 +1138,57 @@ class TripleConfirmationEngine:
     def _dmi_initiation_score(
         self, history: list[DailyOHLCV]
     ) -> tuple[int, str | None]:
-        plus_di, minus_di, adx = self._calculate_dmi(history)
+        """Legacy entry point — computes DMI from scratch."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        dmi_now = self._calculate_dmi(sorted_h)
+        dmi_5d = (
+            self._calculate_dmi(sorted_h[:-5])
+            if len(sorted_h) >= 34
+            else (None, None, None)
+        )
+        return self._dmi_initiation_score_cached(dmi_now, dmi_5d)
+
+    @staticmethod
+    def _dmi_initiation_score_cached(
+        dmi_now: tuple[float | None, float | None, float | None],
+        dmi_5d_ago: tuple[float | None, float | None, float | None],
+    ) -> tuple[int, str | None]:
+        """Score DMI trend initiation from pre-computed DMI values.
+
+        Scoring:
+          +DI <= -DI OR ADX < 20       → 0
+          ADX >= 20 + fresh DI cross    → 6 (DMI_FRESH_CROSS)
+          ADX >= 20 + ADX rising        → 6 (DMI_TREND_INIT)
+          ADX 20-55 + stale cross       → 4 (DMI_TREND_CONT)
+          ADX > 55 (near exhaustion)    → 2 (DMI_TREND_CONT)
+        """
+        plus_di, minus_di, adx = dmi_now
         if plus_di is None or minus_di is None or adx is None:
             return 0, None
         if plus_di <= minus_di:
             return 0, None
         if adx < 20:
             return 0, None
-        if adx > 40:
-            return 2, None
-        sorted_h = sorted(history, key=lambda x: x.trade_date)
-        if len(sorted_h) >= 19:
-            _, _, adx_5d_ago = self._calculate_dmi(sorted_h[:-5])
-            if adx_5d_ago is not None and adx > adx_5d_ago:
-                return 6, "DMI_TREND_INIT"
-        return 4, "DMI_TREND_INIT"
+
+        # ADX > 55: trend likely near exhaustion (also gets -6 risk deduction)
+        if adx > 55:
+            return 2, "DMI_TREND_CONT"
+
+        plus_di_5d, minus_di_5d, adx_5d = dmi_5d_ago
+
+        # Fresh crossover: 5 days ago +DI was NOT above -DI → cross within 5d
+        if (
+            plus_di_5d is not None
+            and minus_di_5d is not None
+            and plus_di_5d <= minus_di_5d
+        ):
+            return 6, "DMI_FRESH_CROSS"
+
+        # ADX rising = trend strengthening
+        if adx_5d is not None and adx > adx_5d:
+            return 6, "DMI_TREND_INIT"
+
+        return 4, "DMI_TREND_CONT"
 
     def _bb_squeeze_breakout_score(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
@@ -1147,7 +1199,7 @@ class TripleConfirmationEngine:
         if bb_width_pct >= 20:
             return 0, None
         if ohlcv.close <= bb_upper:
-            return 0, "BB_SQUEEZE_SETUP"
+            return 2, "BB_SQUEEZE_SETUP"
         vol_20ma = self._volume_20ma(history)
         if vol_20ma is not None and vol_20ma > 0 and ohlcv.volume > vol_20ma * 1.5:
             return 5, "BB_SQUEEZE_BREAKOUT"
@@ -1164,6 +1216,9 @@ class TripleConfirmationEngine:
         history: list[DailyOHLCV],
         volume_profile: VolumeProfile,
         twse_proxy: TWSEChipProxy | None,
+        *,
+        dmi_now: tuple[float | None, float | None, float | None] | None = None,
+        dmi_5d_ago: tuple[float | None, float | None, float | None] | None = None,
     ) -> None:
         """Compute and apply all risk deductions to breakdown (in-place)."""
         vol_20ma = self._volume_20ma(history)
@@ -1224,21 +1279,35 @@ class TripleConfirmationEngine:
                 bd.flags.append("MARGIN_CHASE_HEAT")
 
         # 6. ADX 過熱耗竭: ADX > 55 (trend likely exhausted)
-        sorted_hist = sorted(history, key=lambda x: x.trade_date)
-        plus_di, minus_di, adx = self._calculate_dmi(sorted_hist)
+        # Use cached DMI if provided, otherwise compute from scratch
+        if dmi_now is not None:
+            plus_di, minus_di, adx = dmi_now
+        else:
+            sorted_hist = sorted(history, key=lambda x: x.trade_date)
+            plus_di, minus_di, adx = self._calculate_dmi(sorted_hist)
         if adx is not None and adx > 55:
             bd.adx_exhaustion_deduction = 6
             bd.flags.append(f"ADX_EXHAUSTION:{adx:.1f}")
 
         # 7. DMI 背離: +DI falling while -DI rising (momentum weakening)
-        if plus_di is not None and minus_di is not None and len(sorted_hist) >= 20:
-            plus_di_5d, minus_di_5d, _ = self._calculate_dmi(sorted_hist[:-5])
+        if plus_di is not None and minus_di is not None:
+            if dmi_5d_ago is not None:
+                plus_di_5d, minus_di_5d, _ = dmi_5d_ago
+            else:
+                sorted_hist = sorted(history, key=lambda x: x.trade_date)
+                plus_di_5d, minus_di_5d, _ = (
+                    self._calculate_dmi(sorted_hist[:-5])
+                    if len(sorted_hist) >= 34
+                    else (None, None, None)
+                )
+            sorted_for_prev = sorted(history, key=lambda x: x.trade_date)
             if (
                 plus_di_5d is not None
                 and minus_di_5d is not None
                 and plus_di < plus_di_5d       # +DI declining
                 and minus_di > minus_di_5d     # -DI rising
-                and ohlcv.close >= sorted_hist[-2].close  # but price still up
+                and len(sorted_for_prev) >= 2
+                and ohlcv.close >= sorted_for_prev[-2].close  # but price still up
             ):
                 bd.dmi_divergence_deduction = 4
                 bd.flags.append("DMI_DIVERGENCE")

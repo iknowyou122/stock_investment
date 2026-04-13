@@ -1088,6 +1088,63 @@ class TestDMIInitiationScore:
         pts, flag = engine._dmi_initiation_score(_make_history(10))
         assert pts == 0
 
+    def test_cached_returns_zero_when_none(self):
+        pts, flag = TripleConfirmationEngine._dmi_initiation_score_cached(
+            (None, None, None), (None, None, None)
+        )
+        assert pts == 0 and flag is None
+
+    def test_cached_zero_when_minus_di_dominant(self):
+        pts, flag = TripleConfirmationEngine._dmi_initiation_score_cached(
+            (10.0, 20.0, 30.0), (None, None, None)
+        )
+        assert pts == 0
+
+    def test_cached_zero_when_adx_below_20(self):
+        pts, flag = TripleConfirmationEngine._dmi_initiation_score_cached(
+            (25.0, 15.0, 18.0), (None, None, None)
+        )
+        assert pts == 0
+
+    def test_cached_2pts_when_adx_above_55(self):
+        pts, flag = TripleConfirmationEngine._dmi_initiation_score_cached(
+            (30.0, 15.0, 58.0), (25.0, 18.0, 50.0)
+        )
+        assert pts == 2
+        assert flag == "DMI_TREND_CONT"
+
+    def test_cached_6pts_fresh_cross(self):
+        # 5 days ago +DI was below -DI → fresh crossover
+        pts, flag = TripleConfirmationEngine._dmi_initiation_score_cached(
+            (25.0, 18.0, 28.0), (15.0, 20.0, 22.0)
+        )
+        assert pts == 6
+        assert flag == "DMI_FRESH_CROSS"
+
+    def test_cached_6pts_adx_rising(self):
+        # +DI was already dominant 5d ago, but ADX is rising
+        pts, flag = TripleConfirmationEngine._dmi_initiation_score_cached(
+            (25.0, 18.0, 35.0), (22.0, 16.0, 30.0)
+        )
+        assert pts == 6
+        assert flag == "DMI_TREND_INIT"
+
+    def test_cached_4pts_stale_cross_adx_flat(self):
+        # +DI was already dominant, ADX NOT rising → continuation
+        pts, flag = TripleConfirmationEngine._dmi_initiation_score_cached(
+            (25.0, 18.0, 30.0), (22.0, 16.0, 32.0)
+        )
+        assert pts == 4
+        assert flag == "DMI_TREND_CONT"
+
+    def test_cached_4pts_adx_40_to_55_not_penalized(self):
+        """ADX in 40-55 range should still get 4 pts (strong continuation)."""
+        pts, flag = TripleConfirmationEngine._dmi_initiation_score_cached(
+            (30.0, 15.0, 45.0), (28.0, 16.0, 47.0)  # ADX falling slightly
+        )
+        assert pts == 4
+        assert flag == "DMI_TREND_CONT"
+
     def test_dmi_hints_populated_in_score_full(self):
         engine = TripleConfirmationEngine()
         history = _make_history(80)
@@ -1106,6 +1163,7 @@ class TestBBSqueezeBreakoutScore:
         ohlcv = _make_history(10)[-1]
         pts, flag = engine._bb_squeeze_breakout_score(ohlcv, _make_history(10))
         assert pts == 0
+
 
     def test_bb_hints_populated_in_score_full(self):
         engine = TripleConfirmationEngine()

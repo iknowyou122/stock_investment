@@ -89,8 +89,8 @@ _FALLBACK_TICKERS = [
 ]
 
 
-def _fetch_isin_tickers(url: str) -> dict[str, str]:
-    """Parse TWSE/OTC ISIN page; return {ticker: industry} for ALL valid stocks."""
+def _fetch_isin_tickers(url: str) -> dict[str, tuple[str, str]]:
+    """Parse TWSE/OTC ISIN page; return {ticker: (industry, name)} for ALL valid stocks."""
     import requests
     resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20, verify=False)
     resp.raise_for_status()
@@ -98,7 +98,7 @@ def _fetch_isin_tickers(url: str) -> dict[str, str]:
     cells = re.findall(r"<td[^>]*>(.*?)</td>", html, re.DOTALL)
     cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
 
-    mapping: dict[str, str] = {}
+    mapping: dict[str, tuple[str, str]] = {}
     for i in range(len(cells) - 6):
         industry = cells[i + 5]
         code_name = cells[i + 1]
@@ -106,14 +106,14 @@ def _fetch_isin_tickers(url: str) -> dict[str, str]:
             code = code_name[:4]
             name = code_name[5:].strip()
             if "*" not in name and "DR" not in name:
-                mapping[code] = industry
+                mapping[code] = (industry, name)
     return mapping
 
 
 def _build_industry_map() -> dict[str, str]:
     """Load or fetch full ticker→industry map (ALL sectors), cached daily.
 
-    Cache file: data/watchlist_cache/industry_map_YYYY-MM-DD.json
+    Cache files: industry_map_YYYY-MM-DD.json + name_map_YYYY-MM-DD.json
     Returns empty dict if fetch fails (caller handles fallback).
     """
     from collections import Counter
@@ -129,23 +129,40 @@ def _build_industry_map() -> dict[str, str]:
             pass
 
     _console.print("[dim]正在從 TWSE/OTC 抓取完整產業清單...[/dim]")
-    all_map: dict[str, str] = {}
+    all_raw: dict[str, tuple[str, str]] = {}  # {ticker: (industry, name)}
     for market, url in _ISIN_URLS.items():
         try:
             m = _fetch_isin_tickers(url)
             _console.print(f"  [dim]{market.upper()}: {len(m)} 檔[/dim]")
-            all_map.update(m)
+            all_raw.update(m)
         except Exception as e:
             logger.warning("Failed to fetch %s: %s", market, e)
 
-    if all_map:
+    if all_raw:
+        all_map = {k: v[0] for k, v in all_raw.items()}
+        all_names = {k: v[1] for k, v in all_raw.items()}
         counts = Counter(all_map.values())
         total_sectors = len(counts)
         cache_file.write_text(json.dumps(all_map, ensure_ascii=False))
+        name_cache = _CACHE_DIR / f"name_map_{date.today()}.json"
+        name_cache.write_text(json.dumps(all_names, ensure_ascii=False))
         _console.print(f"  [dim]合計: {len(all_map)} 檔，{total_sectors} 個產業（已快取至 {cache_file.name}）[/dim]\n")
         return all_map
 
     logger.warning("TWSE/OTC fetch failed; using fallback watchlist")
+    return {}
+
+
+def _build_name_map() -> dict[str, str]:
+    """Load ticker→company name map from daily cache (built alongside industry_map)."""
+    name_cache = _CACHE_DIR / f"name_map_{date.today()}.json"
+    if name_cache.exists():
+        try:
+            data = json.loads(name_cache.read_text())
+            if data:
+                return data
+        except Exception:
+            pass
     return {}
 
 
@@ -185,12 +202,12 @@ def _select_sectors(
     rows: list[tuple[int, str, int]],
     default_names: set[str],
 ) -> set[str]:
-    """Prompt user to pick sectors by number. Enter → use defaults."""
-    default_indices = " ".join(str(i) for i, name, _ in rows if name in default_names)
-    _console.print(f"\n[bold yellow]請輸入產業代號[/bold yellow]（空白分隔），直接 Enter 使用預設 [dim][{default_indices}][/dim]")
+    """Prompt user to pick sectors by number. Enter → scan ALL sectors."""
+    all_names = {name for _, name, _ in rows}
+    _console.print(f"\n[bold yellow]請輸入產業代號[/bold yellow]（空白分隔），直接 Enter 掃全部 [dim]({len(all_names)} 個產業)[/dim]")
     raw = _console.input("[bold cyan]> [/bold cyan]").strip()
     if not raw:
-        return default_names
+        return all_names
     idx_map = {i: name for i, name, _ in rows}
     selected: set[str] = set()
     for token in raw.split():
@@ -198,7 +215,7 @@ def _select_sectors(
             selected.add(idx_map[int(token)])
         except (ValueError, KeyError):
             _console.print(f"  [red]忽略無效代號: {token}[/red]")
-    return selected or default_names
+    return selected or all_names
 
 
 def _llm_menu() -> tuple:
@@ -568,7 +585,13 @@ def _conf_bar(conf: int) -> str:
     return f"[{color}]{bar}[/{color}] [dim]{conf}[/dim]"
 
 
-def _print_table(results: list[dict], top: int, min_confidence: int, scan_date: str = "") -> None:
+def _print_table(
+    results: list[dict],
+    top: int,
+    min_confidence: int,
+    scan_date: str = "",
+    name_map: dict[str, str] | None = None,
+) -> None:
     valid = [r for r in results if not r["halt"] and r["error"] is None]
     halted = [r for r in results if r["halt"] or r["error"] is not None]
 
@@ -590,7 +613,7 @@ def _print_table(results: list[dict], top: int, min_confidence: int, scan_date: 
         show_lines=True,
     )
     table.add_column("Rank", justify="center", style="dim", width=5)
-    table.add_column("Ticker", style="bold white", width=8)
+    table.add_column("Ticker", style="bold white", width=11)
     table.add_column("Action", width=12)
     table.add_column("Confidence", width=18)
     table.add_column("Entry", justify="right", style="cyan", width=9)
@@ -602,9 +625,15 @@ def _print_table(results: list[dict], top: int, min_confidence: int, scan_date: 
         action = r["action"] + ("*" if r["free_tier"] else "")
         action_text = Text(action, style=_action_style(r["action"]))
         upside_pct = (r["target"] / r["entry_bid"] - 1) * 100 if r["entry_bid"] > 0 else 0
+        ticker = r["ticker"]
+        if name_map:
+            short_name = name_map.get(ticker, "")
+            ticker_cell = f"{ticker}\n[dim]{short_name}[/dim]" if short_name else ticker
+        else:
+            ticker_cell = ticker
         table.add_row(
             str(i),
-            r["ticker"],
+            ticker_cell,
             action_text,
             _conf_bar(r["confidence"]),
             f"{r['entry_bid']:.1f}",
@@ -751,6 +780,7 @@ def run_batch(
     label_repo=None,
     industry_map: dict[str, str] | None = None,
     save_db: bool = False,
+    name_map: dict[str, str] | None = None,
 ) -> None:
     llm_label = getattr(llm_provider, "name", None) or "（無 LLM）"
     label_status = (
@@ -823,7 +853,7 @@ def run_batch(
         else:
             _console.print("  [dim yellow]⚠ DB 未設定或無法連線，略過寫入[/dim yellow]")
 
-    _print_table(results, top, min_confidence, scan_date=str(analysis_date))
+    _print_table(results, top, min_confidence, scan_date=str(analysis_date), name_map=name_map)
 
     if csv_path:
         _save_csv(results, analysis_date, csv_path)
@@ -968,7 +998,7 @@ def main() -> None:
             }
             for r in seen.values()
         ]
-        _print_table(results, args.top, args.min_confidence, scan_date=show_date)
+        _print_table(results, args.top, args.min_confidence, scan_date=show_date, name_map=_build_name_map())
         return
 
     csv_path: Path | None = None
@@ -1022,11 +1052,14 @@ def main() -> None:
     # 嘗試載入 BrokerLabelRepository（需要 DATABASE_URL + build-labels 已執行）
     label_repo = _make_label_repo()
 
+    name_map = _build_name_map()
+
     run_batch(
         tickers, args.date, args.top, args.min_confidence, args.workers,
         csv_path, llm_provider, llm_top, label_repo,
         industry_map=industry_map,
         save_db=args.save_db,
+        name_map=name_map,
     )
 
 
