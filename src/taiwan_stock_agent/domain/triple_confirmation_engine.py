@@ -1528,14 +1528,16 @@ class TripleConfirmationEngine:
             denom = p + n
             dx_series.append(100 * abs(p - n) / denom if denom > 0 else 0.0)
 
-        adx_series = _wilder_smooth(dx_series, period)
-        if not adx_series:
+        if len(dx_series) < period:
             return None, None, None
+        adx_val = sum(dx_series[:period]) / period
+        for dx in dx_series[period:]:
+            adx_val = adx_val - adx_val / period + dx / period
 
         return (
             round(plus_di_series[-1], 2),
             round(minus_di_series[-1], 2),
-            round(adx_series[-1], 2),
+            round(adx_val, 2),
         )
 
     @staticmethod

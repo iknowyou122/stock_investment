@@ -1033,3 +1033,98 @@ class TestSBLPressure:
         proxy = _make_twse_proxy(sbl_ratio=0.15, sbl_available=False)
         engine._apply_free_chip(bd, proxy)
         assert bd.sbl_pressure_pts == 0
+
+
+# ---------------------------------------------------------------------------
+# BB / DMI indicator tests (v2.1)
+# ---------------------------------------------------------------------------
+
+class TestCalculateDMI:
+    def test_returns_none_with_insufficient_history(self):
+        engine = TripleConfirmationEngine()
+        short = _make_history(10)
+        plus_di, minus_di, adx = engine._calculate_dmi(short)
+        assert plus_di is None and minus_di is None and adx is None
+
+    def test_returns_floats_with_sufficient_history(self):
+        engine = TripleConfirmationEngine()
+        history = _make_history(60)
+        plus_di, minus_di, adx = engine._calculate_dmi(history)
+        assert plus_di is not None
+        assert minus_di is not None
+        assert adx is not None
+        assert 0 <= plus_di <= 100
+        assert 0 <= minus_di <= 100
+        assert 0 <= adx <= 100
+
+
+class TestCalculateBB:
+    def test_returns_none_with_insufficient_history(self):
+        engine = TripleConfirmationEngine()
+        short = _make_history(10)
+        bb_upper, bb_lower, bb_width, bb_pct = engine._calculate_bb(short)
+        assert bb_upper is None
+
+    def test_returns_values_with_sufficient_history(self):
+        engine = TripleConfirmationEngine()
+        history = _make_history(80)
+        bb_upper, bb_lower, bb_width, bb_pct = engine._calculate_bb(history)
+        assert bb_upper is not None
+        assert bb_lower is not None
+        assert bb_upper > bb_lower
+        assert bb_pct is not None
+        assert 0 <= bb_pct <= 100
+
+    def test_bb_pct_none_when_fewer_than_60_sessions(self):
+        engine = TripleConfirmationEngine()
+        history = _make_history(30)
+        _, _, _, bb_pct = engine._calculate_bb(history)
+        assert bb_pct is None
+
+
+class TestDMIInitiationScore:
+    def test_zero_with_short_history(self):
+        engine = TripleConfirmationEngine()
+        pts, flag = engine._dmi_initiation_score(_make_history(10))
+        assert pts == 0
+
+    def test_dmi_hints_populated_in_score_full(self):
+        engine = TripleConfirmationEngine()
+        history = _make_history(80)
+        ohlcv = history[-1]
+        chip = _make_chip_report()
+        vp = _make_volume_profile(twenty_day_high=ohlcv.close * 0.95)
+        _, _, hints = engine.score_full(ohlcv, history, chip, vp)
+        assert hints.adx is not None
+        assert hints.plus_di is not None
+        assert hints.minus_di is not None
+
+
+class TestBBSqueezeBreakoutScore:
+    def test_zero_with_short_history(self):
+        engine = TripleConfirmationEngine()
+        ohlcv = _make_history(10)[-1]
+        pts, flag = engine._bb_squeeze_breakout_score(ohlcv, _make_history(10))
+        assert pts == 0
+
+    def test_bb_hints_populated_in_score_full(self):
+        engine = TripleConfirmationEngine()
+        history = _make_history(80)
+        ohlcv = history[-1]
+        chip = _make_chip_report()
+        vp = _make_volume_profile(twenty_day_high=ohlcv.close * 0.95)
+        _, _, hints = engine.score_full(ohlcv, history, chip, vp)
+        assert hints.bb_upper is not None
+        assert hints.bb_lower is not None
+        assert hints.bb_width_percentile is not None
+
+
+class TestADXExhaustionDeduction:
+    def test_no_deduction_with_short_history(self):
+        engine = TripleConfirmationEngine()
+        history = _make_history(10)
+        ohlcv = history[-1]
+        chip = _make_chip_report()
+        vp = _make_volume_profile(twenty_day_high=ohlcv.close * 0.95)
+        _, bd = engine.score_with_breakdown(ohlcv, history, chip, vp)
+        assert bd.adx_exhaustion_deduction == 0
