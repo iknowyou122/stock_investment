@@ -558,6 +558,10 @@ class TripleConfirmationEngine:
         bd.trend_continuity_pts = self._trend_continuity_score(ohlcv, ohlcv_history)
         bd.volume_escalation_pts = self._volume_escalation_score(ohlcv, ohlcv_history)
         bd.rsi_momentum_pts = self._rsi_momentum_score(ohlcv_history)
+        dmi_pts, dmi_flag = self._dmi_initiation_score(ohlcv_history)
+        bd.dmi_initiation_pts = dmi_pts
+        if dmi_flag:
+            bd.flags.append(dmi_flag)
 
         # --- Pillar 2: Chip (paid vs free-tier, mutually exclusive) ---
         if chip_report.net_buyer_count_diff != 0 or chip_report.active_branch_count > 0:
@@ -612,6 +616,10 @@ class TripleConfirmationEngine:
                 bd.flags.append(rs_flag)
 
         bd.upside_space_pts = self._upside_space_score(ohlcv, volume_profile)
+        bb_pts, bb_flag = self._bb_squeeze_breakout_score(ohlcv, ohlcv_history)
+        bd.bb_squeeze_breakout_pts = bb_pts
+        if bb_flag:
+            bd.flags.append(bb_flag)
 
         # --- Risk deductions ---
         self._apply_risk_deductions(bd, ohlcv, ohlcv_history, volume_profile, twse_proxy)
@@ -1111,6 +1119,40 @@ class TripleConfirmationEngine:
             return 2
         return 0
 
+    def _dmi_initiation_score(
+        self, history: list[DailyOHLCV]
+    ) -> tuple[int, str | None]:
+        plus_di, minus_di, adx = self._calculate_dmi(history)
+        if plus_di is None or minus_di is None or adx is None:
+            return 0, None
+        if plus_di <= minus_di:
+            return 0, None
+        if adx < 20:
+            return 0, None
+        if adx > 40:
+            return 2, None
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        if len(sorted_h) >= 19:
+            _, _, adx_5d_ago = self._calculate_dmi(sorted_h[:-5])
+            if adx_5d_ago is not None and adx > adx_5d_ago:
+                return 6, "DMI_TREND_INIT"
+        return 4, "DMI_TREND_INIT"
+
+    def _bb_squeeze_breakout_score(
+        self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
+    ) -> tuple[int, str | None]:
+        bb_upper, bb_lower, bb_width, bb_width_pct = self._calculate_bb(history)
+        if bb_upper is None or bb_width_pct is None:
+            return 0, None
+        if bb_width_pct >= 20:
+            return 0, None
+        if ohlcv.close <= bb_upper:
+            return 0, "BB_SQUEEZE_SETUP"
+        vol_20ma = self._volume_20ma(history)
+        if vol_20ma is not None and vol_20ma > 0 and ohlcv.volume > vol_20ma * 1.5:
+            return 5, "BB_SQUEEZE_BREAKOUT"
+        return 3, "BB_SQUEEZE_BREAKOUT"
+
     # ------------------------------------------------------------------
     # Risk deductions
     # ------------------------------------------------------------------
@@ -1180,6 +1222,26 @@ class TripleConfirmationEngine:
             ):
                 bd.margin_chase_heat = 5
                 bd.flags.append("MARGIN_CHASE_HEAT")
+
+        # 6. ADX 過熱耗竭: ADX > 55 (trend likely exhausted)
+        sorted_hist = sorted(history, key=lambda x: x.trade_date)
+        plus_di, minus_di, adx = self._calculate_dmi(sorted_hist)
+        if adx is not None and adx > 55:
+            bd.adx_exhaustion_deduction = 6
+            bd.flags.append(f"ADX_EXHAUSTION:{adx:.1f}")
+
+        # 7. DMI 背離: +DI falling while -DI rising (momentum weakening)
+        if plus_di is not None and minus_di is not None and len(sorted_hist) >= 20:
+            plus_di_5d, minus_di_5d, _ = self._calculate_dmi(sorted_hist[:-5])
+            if (
+                plus_di_5d is not None
+                and minus_di_5d is not None
+                and plus_di < plus_di_5d       # +DI declining
+                and minus_di > minus_di_5d     # -DI rising
+                and ohlcv.close >= sorted_hist[-2].close  # but price still up
+            ):
+                bd.dmi_divergence_deduction = 4
+                bd.flags.append("DMI_DIVERGENCE")
 
     # ------------------------------------------------------------------
     # Signal building
@@ -1344,6 +1406,16 @@ class TripleConfirmationEngine:
                         break
             hints.ma20_streak = streak
 
+        plus_di, minus_di, adx = self._calculate_dmi(sorted_history)
+        hints.adx = adx
+        hints.plus_di = plus_di
+        hints.minus_di = minus_di
+
+        bb_upper, bb_lower, _, bb_width_pct = self._calculate_bb(sorted_history)
+        hints.bb_upper = bb_upper
+        hints.bb_lower = bb_lower
+        hints.bb_width_percentile = bb_width_pct
+
         if len(sorted_history) >= 2:
             prev_close = sorted_history[-2].close
             if prev_close > 0:
@@ -1409,6 +1481,97 @@ class TripleConfirmationEngine:
         if pd.isna(ma20_today) or pd.isna(ma20_prev) or ma20_prev == 0:
             return None
         return (ma20_today - ma20_prev) / ma20_prev
+
+    @staticmethod
+    def _calculate_dmi(
+        history: list[DailyOHLCV],
+        period: int = 14,
+    ) -> tuple[float | None, float | None, float | None]:
+        if len(history) < period * 2 + 1:
+            return None, None, None
+
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        highs = [d.high for d in sorted_h]
+        lows = [d.low for d in sorted_h]
+        closes = [d.close for d in sorted_h]
+
+        tr_list, pdm_list, ndm_list = [], [], []
+        for i in range(1, len(sorted_h)):
+            high, low, prev_close = highs[i], lows[i], closes[i - 1]
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            up_move = highs[i] - highs[i - 1]
+            down_move = lows[i - 1] - lows[i]
+            pdm_list.append(up_move if up_move > down_move and up_move > 0 else 0.0)
+            ndm_list.append(down_move if down_move > up_move and down_move > 0 else 0.0)
+            tr_list.append(float(tr))
+
+        def _wilder_smooth(values: list[float], p: int) -> list[float]:
+            if len(values) < p:
+                return []
+            result = [sum(values[:p])]
+            for v in values[p:]:
+                result.append(result[-1] - result[-1] / p + v)
+            return result
+
+        atr = _wilder_smooth(tr_list, period)
+        pdi_raw = _wilder_smooth(pdm_list, period)
+        ndi_raw = _wilder_smooth(ndm_list, period)
+
+        if not atr or len(atr) != len(pdi_raw) or len(atr) != len(ndi_raw):
+            return None, None, None
+
+        plus_di_series = [100 * p / a if a > 0 else 0.0 for p, a in zip(pdi_raw, atr)]
+        minus_di_series = [100 * n / a if a > 0 else 0.0 for n, a in zip(ndi_raw, atr)]
+
+        dx_series = []
+        for p, n in zip(plus_di_series, minus_di_series):
+            denom = p + n
+            dx_series.append(100 * abs(p - n) / denom if denom > 0 else 0.0)
+
+        adx_series = _wilder_smooth(dx_series, period)
+        if not adx_series:
+            return None, None, None
+
+        return (
+            round(plus_di_series[-1], 2),
+            round(minus_di_series[-1], 2),
+            round(adx_series[-1], 2),
+        )
+
+    @staticmethod
+    def _calculate_bb(
+        history: list[DailyOHLCV],
+        period: int = 20,
+        num_std: float = 2.0,
+        percentile_window: int = 60,
+    ) -> tuple[float | None, float | None, float | None, float | None]:
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        closes = pd.Series([d.close for d in sorted_h])
+
+        if len(closes) < period:
+            return None, None, None, None
+
+        ma = closes.rolling(period).mean()
+        std = closes.rolling(period).std(ddof=0)
+        upper = ma + num_std * std
+        lower = ma - num_std * std
+        width = (upper - lower) / ma.replace(0, float("nan"))
+
+        bb_upper = upper.iloc[-1]
+        bb_lower = lower.iloc[-1]
+        bb_width_now = width.iloc[-1]
+
+        if pd.isna(bb_upper) or pd.isna(bb_lower) or pd.isna(bb_width_now):
+            return None, None, None, None
+
+        bb_width_pct: float | None = None
+        width_vals = width.dropna()
+        if len(width_vals) >= percentile_window:
+            recent_widths = width_vals.iloc[-percentile_window:]
+            rank = (recent_widths < bb_width_now).sum()
+            bb_width_pct = round(float(rank) / len(recent_widths) * 100, 1)
+
+        return round(float(bb_upper), 4), round(float(bb_lower), 4), round(float(bb_width_now), 6), bb_width_pct
 
     @staticmethod
     def _rsi(closes: pd.Series, period: int) -> float | None:
