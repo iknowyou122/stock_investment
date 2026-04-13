@@ -281,11 +281,26 @@ make factor-report
 ### 標準每日工作流
 
 ```
-收盤後 (14:00+)     →  make daily        掃描 + 盤後復盤（一鍵）
-  ├─ make scan       掃描 + 存 CSV + 寫 DB
-  └─ make review     T+1 結算 + 14日滾動勝率 + A/B 競賽管理
-隔日盤中 (09-13:30) →  make precheck      即時報價確認 + 蓄積中監控
-週末               →  make settle        補填 T+3/5 結算價（長期）
+收盤後 (14:00+)     →  make daily           掃描 + 盤後復盤（一鍵）
+  ├─ make scan        掃描 + 存 CSV + 寫 DB
+  └─ make review      T+1 結算 + 14日滾動勝率 + A/B 競賽管理
+隔日盤中 (09-13:30) →  make precheck         T+1 確認（昨日訊號 + 即時報價）
+                    →  make precheck-t2      T+2 確認（2日前訊號，最佳勝率窗口）
+週末               →  make settle           補填 T+3/5 結算價（長期）
+```
+
+**T+2 進場策略說明**
+
+根據 `entry_delay_analysis.py` 的回測：訊號出現當天（D+0）直接進場勝率只有 **38.5%**，
+等到 **D+2**（2 個交易日後）進場勝率提升至 **55.6%**。
+
+原因：FinMind T+1 才發布籌碼資料，D+0 進場看不到完整籌碼；D+2 訊號已被市場消化，
+追買亂流降低，趨勢持續者才會留在進場區間。
+
+```
+T+0（訊號日）   →  make scan             掃描、存 CSV（勝率 38.5% ← 不建議直接進場）
+T+1（隔日）     →  make precheck         看昨日訊號即時報價（觀察用）
+T+2（後天）     →  make precheck-t2      ← 最佳進場窗口（勝率 55.6%）
 ```
 
 ### Step 1：收盤後掃描 + 復盤
@@ -327,14 +342,22 @@ BATCH SCAN RESULTS 欄位：
 ### Step 2：隔日盤中確認
 
 ```bash
-make precheck          # 預設：TOP=20, MIN_CONF=40
+# T+1 確認（昨日訊號，觀察用）
+make precheck
 make precheck TOP=10 MIN_CONF=50
+
+# T+2 確認（2 個交易日前的訊號，最佳進場窗口）
+make precheck-t2
+make precheck-t2 TOP=10 MIN_CONF=50
 ```
 
-輸出三個區塊：
+precheck 輸出三個區塊：
 - **可執行**（LONG，現價在 entry ±3%）→ 積極進場
 - **注意**（LONG，量能偏低或大盤偏弱）→ 條件性進場
-- **🌱 蓄積中**（WATCH + EMERGING_SETUP）→ 掛限價單被動佈局（T-2 策略）
+- **🌱 蓄積中**（WATCH + EMERGING_SETUP）→ 掛限價單被動佈局，等候晉升 LONG
+
+`make precheck-t2` 自動往回找 2 個交易日的 CSV（跳過週末），不需要手動指定日期。
+若該日期沒有 CSV（未執行 `make scan`），會顯示提示說明。
 
 > TWSE MIS 即時報價：盤中若 `z=-`（最新成交無資料），自動 fallback 到委買價 → 高低中點 → 開盤價。
 

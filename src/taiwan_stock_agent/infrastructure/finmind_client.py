@@ -284,17 +284,26 @@ class FinMindClient:
             logger.warning("yfinance not installed; cannot fall back for %s", ticker)
             return None
 
+        import logging as _logging
         for suffix in (".TW", ".TWO"):
             symbol = f"{ticker}{suffix}"
             try:
-                raw = yf.download(
-                    symbol,
-                    start=str(start_date),
-                    end=str(end_date + timedelta(days=1)),  # yfinance end is exclusive
-                    auto_adjust=True,
-                    progress=False,
-                    multi_level_index=False,
-                )
+                # Suppress yfinance's noisy ERROR logs for delisted/not-found tickers;
+                # we handle empty DataFrames gracefully below.
+                _yf_logger = _logging.getLogger("yfinance")
+                _prev_level = _yf_logger.level
+                _yf_logger.setLevel(_logging.CRITICAL)
+                try:
+                    raw = yf.download(
+                        symbol,
+                        start=str(start_date),
+                        end=str(end_date + timedelta(days=1)),  # yfinance end is exclusive
+                        auto_adjust=True,
+                        progress=False,
+                        multi_level_index=False,
+                    )
+                finally:
+                    _yf_logger.setLevel(_prev_level)
             except Exception as exc:
                 logger.debug("yfinance %s failed: %s", symbol, exc)
                 continue

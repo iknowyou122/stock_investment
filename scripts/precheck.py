@@ -216,6 +216,25 @@ def _find_latest_scan_csv(scan_dir: Path) -> Path | None:
     return None
 
 
+def _find_t2_scan_csv(scan_dir: Path) -> Path | None:
+    """Return the scan CSV from exactly 2 trading days ago (T+2 entry window).
+
+    T+2 is the earliest actionable entry day: D+2 win rate 55.6% vs D+0 38.5%.
+    Returns None if that CSV was never saved.
+    """
+    today = date.today()
+    count = 0
+    candidate = today - timedelta(days=1)
+    for _ in range(10):
+        if candidate.weekday() < 5:
+            count += 1
+            if count == 2:
+                csv_path = scan_dir / f"scan_{candidate}.csv"
+                return csv_path if csv_path.exists() else None
+        candidate -= timedelta(days=1)
+    return None
+
+
 def _load_watchlist(csv_path: Path, min_confidence: int) -> tuple[list[dict], list[dict]]:
     """Load scan CSV. Returns (actionable, emerging).
 
@@ -536,7 +555,7 @@ def run_precheck(csv_path: Path | None, min_confidence: int, top: int) -> None:
     if csv_path is None:
         csv_path = _find_latest_scan_csv(_SCAN_DIR)
     if csv_path is None or not csv_path.exists():
-        _console.print("[red]找不到 scan CSV。請先執行 make scan --save-csv[/red]")
+        _console.print("[red]找不到 scan CSV。請先執行 make scan[/red]")
         return
 
     # 2. Load watchlist
@@ -591,10 +610,28 @@ def run_precheck(csv_path: Path | None, min_confidence: int, top: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="盤前/盤中確認 — 即時報價 vs 昨日 watchlist")
     parser.add_argument("--csv", type=Path, default=None, help="指定 scan CSV 路徑（預設: 自動找最近的）")
+    parser.add_argument("--t2", action="store_true", help="T+2 進場模式：自動載入 2 個交易日前的 CSV（D+2 勝率 55.6%%）")
     parser.add_argument("--min-confidence", type=int, default=40, help="最低信心分數門檻（預設: 40）")
     parser.add_argument("--top", type=int, default=20, help="只檢查前 N 名（預設: 20）")
     args = parser.parse_args()
-    run_precheck(args.csv, args.min_confidence, args.top)
+
+    csv_path = args.csv
+    if args.t2:
+        csv_path = _find_t2_scan_csv(_SCAN_DIR)
+        if csv_path is None:
+            from datetime import date as _date
+            today = _date.today()
+            _console.print(Panel(
+                "[yellow]找不到 T+2 的 scan CSV。\n\n"
+                f"今天是 {today}，需要 2 個交易日前的掃描檔（data/scans/scan_YYYY-MM-DD.csv）。\n"
+                "請確認當天有執行 [bold]make scan[/bold] 並存下 CSV。[/yellow]",
+                title="[bold yellow]precheck --t2：找不到 CSV[/bold yellow]",
+                border_style="yellow",
+                padding=(0, 2),
+            ))
+            return
+
+    run_precheck(csv_path, args.min_confidence, args.top)
 
 
 if __name__ == "__main__":

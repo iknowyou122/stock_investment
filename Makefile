@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: scan precheck settle backtest factor-report optimize test setup migrate api install review daily show
+.PHONY: scan precheck precheck-t2 settle backtest factor-report optimize test setup migrate api install review daily show
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -40,6 +40,15 @@ precheck:
 		--top $(TOP) \
 		--min-confidence $(MIN_CONF) \
 		$(if $(CSV),--csv $(CSV))
+
+# T+2 進場確認：自動載入 2 個交易日前的 CSV（D+2 勝率 55.6% > D+0 38.5%）
+# 用法: make precheck-t2
+#       make precheck-t2 TOP=10 MIN_CONF=50
+precheck-t2:
+	$(PYTHON) scripts/precheck.py \
+		--t2 \
+		--top $(TOP) \
+		--min-confidence $(MIN_CONF)
 
 # ── 歷史掃描結果查詢 ──────────────────────────────────────────────────────────
 # 用法: make show              # 互動式選擇日期
