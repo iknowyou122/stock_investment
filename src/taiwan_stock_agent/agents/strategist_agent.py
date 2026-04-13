@@ -90,7 +90,7 @@ class StrategistAgent:
         being analyzed). This should be a day where FinMind data is available.
         """
         # --- Fetch OHLCV (last 25 sessions for 20-day calculations + buffer) ---
-        ohlcv_start = analysis_date - timedelta(days=95)
+        ohlcv_start = analysis_date - timedelta(days=130)
         ohlcv_df = self._finmind.fetch_ohlcv(ticker, ohlcv_start, analysis_date)
 
         if ohlcv_df.empty:
