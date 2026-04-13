@@ -83,6 +83,7 @@ class TWSEChipProxy(BaseModel):
     short_cover_days: float | None = None     # derived: short_balance/avg_daily_volume
     # v2 fields
     avg_20d_volume: int = 0                   # 20-day average daily volume (shares); used for ratio scoring
+    institution_buy_2_of_3: bool = False      # Foreign or trust net buy on >= 2 of last 3 trading days
     is_available: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
 

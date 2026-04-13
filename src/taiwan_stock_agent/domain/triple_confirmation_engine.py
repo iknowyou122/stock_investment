@@ -116,11 +116,11 @@ _PILLAR2_PAID_MAX = 40
 _PILLAR2_FREE_MAX = 40
 _PILLAR3_MAX = 35
 
-_LONG_THRESHOLD_NEUTRAL = 68
-_LONG_THRESHOLD_UPTREND = 63    # TAIEX MA20 rising
-_LONG_THRESHOLD_DOWNTREND = 73  # TAIEX MA20 falling/flat
-_WATCH_MIN = 45
-_CAUTION_THRESHOLD = 44
+_LONG_THRESHOLD_NEUTRAL = 55
+_LONG_THRESHOLD_UPTREND = 50    # TAIEX MA20 rising
+_LONG_THRESHOLD_DOWNTREND = 60  # TAIEX MA20 falling/flat
+_WATCH_MIN = 40
+_CAUTION_THRESHOLD = 39
 
 # MA20 slope computation parameters
 _MA20_SLOPE_MIN_SESSIONS = 25   # 20 (MA window) + 5 (diff lookback) so iloc[-6] is valid
@@ -233,6 +233,11 @@ class _ScoreBreakdown:
     upside_space_pts: int = 0         # 0/2/5
     bb_squeeze_breakout_pts: int = 0  # 0/2/3/5 — BB squeeze setup/breakout/+vol
 
+    # --- Pillar 4: Accumulation Detection (max 13) ---
+    emerging_setup_pts: int = 0       # 0/10
+    pullback_setup_pts: int = 0       # 0/8
+    bb_squeeze_coiling_pts: int = 0   # 0/3
+
     # --- Risk deductions (stored as non-negative values; subtracted in total) ---
     daytrade_risk: int = 0            # 0 or 25
     long_upper_shadow: int = 0        # 0 or 8
@@ -284,6 +289,10 @@ class _ScoreBreakdown:
             + self.relative_strength_pts
             + self.upside_space_pts
             + self.bb_squeeze_breakout_pts
+            # Pillar 4
+            + self.emerging_setup_pts
+            + self.pullback_setup_pts
+            + self.bb_squeeze_coiling_pts
             # Risk deductions
             - self.daytrade_risk
             - self.long_upper_shadow
@@ -435,16 +444,13 @@ class TripleConfirmationEngine:
         ohlcv: DailyOHLCV,
         ohlcv_history: list[DailyOHLCV],
         volume_profile: VolumeProfile,
+        twse_proxy: TWSEChipProxy | None = None,
     ) -> tuple[bool, int, int, list[str]]:
-        """Evaluate the 2-of-4 gate conditions.
+        """Evaluate the 2-of-5 gate conditions.
 
         Returns (passes, conditions_available, conditions_met, detail_flags).
-        detail_flags carries per-condition GATE_PASS/GATE_FAIL/GATE_SKIP and
-        INSUFFICIENT_GATE_DATA entries so callers can surface exactly which
-        condition blocked the gate.
         'Available' means the data existed to evaluate that condition.
-        Unavailable conditions are treated as NOT met (not penalized, but
-        the denominator for the 2-of-4 check is still 4).
+        Unavailable conditions are treated as NOT met (not penalized).
         """
         conditions_met = 0
         conditions_available = 0
@@ -464,7 +470,6 @@ class TripleConfirmationEngine:
             detail_flags.append("INSUFFICIENT_GATE_DATA:VWAP")
 
         # Condition 2: volume > 20d_avg_volume × 1.2
-        # Threshold aligned with Momentum Pillar volume_ratio_pts first bracket (>1.2×)
         vol_20ma = self._volume_20ma(ohlcv_history)
         if vol_20ma is not None:
             conditions_available += 1
@@ -478,7 +483,6 @@ class TripleConfirmationEngine:
             detail_flags.append("INSUFFICIENT_GATE_DATA:VOL")
 
         # Condition 3: close >= twenty_day_high × 0.99
-        # Guard: twenty_day_high == 0.0 → condition NOT met (partial-history stocks)
         conditions_available += 1
         if volume_profile.twenty_day_high > 0 and ohlcv.close >= volume_profile.twenty_day_high * 0.99:
             conditions_met += 1
@@ -487,8 +491,6 @@ class TripleConfirmationEngine:
             detail_flags.append("GATE_FAIL:HIGH20")
 
         # Condition 4: 5d_stock_return > 5d_taiex_return
-        # Uses date-intersection of stock and TAIEX history to avoid misalignment
-        # on trading suspensions or holiday gaps.
         taiex = getattr(self, "_taiex_history", [])
         stock_date_map = {b.trade_date: b for b in ohlcv_history}
         taiex_date_map = {b.trade_date: b for b in taiex}
@@ -512,6 +514,17 @@ class TripleConfirmationEngine:
             detail_flags.append("GATE_SKIP:RS")
             detail_flags.append("INSUFFICIENT_GATE_DATA:RS")
 
+        # Condition 5: Foreign or trust net buy on >= 2 of last 3 trading days
+        if twse_proxy is not None and twse_proxy.is_available:
+            conditions_available += 1
+            if twse_proxy.institution_buy_2_of_3:
+                conditions_met += 1
+                detail_flags.append("GATE_PASS:INSTITUTIONAL")
+            else:
+                detail_flags.append("GATE_FAIL:INSTITUTIONAL")
+        else:
+            detail_flags.append("GATE_SKIP:INSTITUTIONAL")
+
         passes = conditions_met >= 2
         return passes, conditions_available, conditions_met, detail_flags
 
@@ -531,7 +544,7 @@ class TripleConfirmationEngine:
 
         # --- Gate check first ---
         gate_passes, gate_available, gate_met, gate_detail_flags = self._gate_check(
-            ohlcv, ohlcv_history, volume_profile
+            ohlcv, ohlcv_history, volume_profile, twse_proxy=twse_proxy
         )
         bd.flags.append(f"GATE_AVAILABLE:{gate_available}")
         bd.flags.append(f"GATE_MET:{gate_met}")
@@ -631,6 +644,9 @@ class TripleConfirmationEngine:
         if bb_flag:
             bd.flags.append(bb_flag)
 
+        # --- Pillar 4: Accumulation Detection ---
+        self._accumulation_score(bd, ohlcv, ohlcv_history, volume_profile, twse_proxy)
+
         # --- Risk deductions ---
         self._apply_risk_deductions(
             bd, ohlcv, ohlcv_history, volume_profile, twse_proxy,
@@ -643,6 +659,7 @@ class TripleConfirmationEngine:
             "p2_paid=%d+%d+%d+%d+%d "
             "p2_free=%d+%d+%d+%d+%d+%d+%d+%d "
             "p3=%d+%d+%d+%d+%d+%d+%d+%d+%d "
+            "p4=%d+%d+%d "
             "risk=-%d-%d-%d-%d-%d-%d-%d-%d-%d "
             "flags=%s → total=%d",
             ohlcv.ticker,
@@ -658,6 +675,7 @@ class TripleConfirmationEngine:
             bd.breakout_volume_pts,
             bd.ma_alignment_pts, bd.ma20_slope_pts, bd.relative_strength_pts,
             bd.upside_space_pts, bd.bb_squeeze_breakout_pts,
+            bd.emerging_setup_pts, bd.pullback_setup_pts, bd.bb_squeeze_coiling_pts,
             bd.daytrade_risk, bd.long_upper_shadow, bd.overheat_ma20, bd.overheat_ma60,
             bd.daytrade_heat, bd.sbl_breakout_fail, bd.margin_chase_heat,
             bd.adx_exhaustion_deduction, bd.dmi_divergence_deduction,
@@ -691,16 +709,16 @@ class TripleConfirmationEngine:
 
     def _close_strength_score(self, ohlcv: DailyOHLCV) -> tuple[int, str | None]:
         """K線收盤強弱比: (close-low)/(high-low).
-        ≥0.7 → 4, 0.5–0.7 → 2, <0.5 → 0.
+        0.5–0.7 → 4 (ideal recovery), ≥0.7 → 2 (potential extension), <0.5 → 0.
         Guard: high==low → 0, flag DOJI_OR_HALT.
         """
         bar_range = ohlcv.high - ohlcv.low
         if bar_range <= 0:
             return 0, "DOJI_OR_HALT"
         ratio = (ohlcv.close - ohlcv.low) / bar_range
-        if ratio >= 0.7:
+        if 0.5 <= ratio < 0.7:
             return 4, None
-        if ratio >= 0.5:
+        if ratio >= 0.7:
             return 2, None
         return 0, None
 
@@ -753,12 +771,11 @@ class TripleConfirmationEngine:
         return 0
 
     def _rsi_momentum_score(self, history: list[DailyOHLCV]) -> int:
-        """RSI(14) momentum zone: 55 ≤ RSI < 70 → +4.
+        """RSI(14) momentum zone: 30 ≤ RSI < 55 → +4.
 
-        Rationale: this range indicates healthy upward momentum — stock has been
-        outperforming over the past 14 days but has not yet entered overbought territory.
-        RSI ≥ 70 is already addressed by overheat risk deductions; no double-penalizing.
-        RSI < 55 means momentum is neutral/weak — no bonus.
+        Rationale: this range indicates healthy recovery momentum — stock has been
+        forming a base or rebounding, but has not yet entered overbought territory.
+        RSI < 30 is oversold (caution); RSI ≥ 55 is momentum-chasing (old v2 regime).
 
         Requires ≥ 16 sessions (14-period RSI + 2 for delta computation).
         """
@@ -769,7 +786,7 @@ class TripleConfirmationEngine:
         rsi = self._rsi(closes, period=14)
         if rsi is None:
             return 0
-        return 4 if 55.0 <= rsi < 70.0 else 0
+        return 4 if 30.0 <= rsi < 55.0 else 0
 
     def _volume_escalation_score(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
@@ -1205,6 +1222,70 @@ class TripleConfirmationEngine:
             return 5, "BB_SQUEEZE_BREAKOUT"
         return 3, "BB_SQUEEZE_BREAKOUT"
 
+    def _accumulation_score(
+        self,
+        bd: _ScoreBreakdown,
+        ohlcv: DailyOHLCV,
+        history: list[DailyOHLCV],
+        volume_profile: VolumeProfile,
+        twse_proxy: TWSEChipProxy | None,
+    ) -> None:
+        """Compute Pillar 4: Accumulation Detection scoring (in-place)."""
+        # --- 4a. EMERGING_SETUP (+10 pts) ---
+        # MA aligned + MA20 rising + institutional buy + NOT yet broken out
+        ma_aligned = bd.ma_alignment_pts > 0
+        ma20_rising = bd.ma20_slope_pts > 0
+        has_inst_buy = False
+        if twse_proxy is not None and twse_proxy.is_available:
+            has_inst_buy = (twse_proxy.foreign_net_buy > 0 or twse_proxy.trust_net_buy > 0)
+
+        no_breakout_yet = (ohlcv.close < volume_profile.twenty_day_high * 0.99)
+
+        if ma_aligned and ma20_rising and has_inst_buy and no_breakout_yet:
+            bd.emerging_setup_pts = 10
+            bd.flags.append("EMERGING_SETUP")
+
+        # --- 4b. PULLBACK_SETUP (+8 pts) ---
+        # Had breakout in last 20d + near MA20 + MA20 rising + volume contraction
+        # Mutually exclusive with EMERGING_SETUP in practice (one requires breakout, one forbids)
+        if bd.emerging_setup_pts == 0:
+            # recent = sorted(history, key=lambda x: x.trade_date)
+            # if len(recent) >= 20: # handled by slope and alignment requirements
+            if ma20_rising:
+                # Approximate MA20 from history
+                closes = pd.Series([d.close for d in history])
+                if len(closes) >= 20:
+                    ma20 = closes.rolling(20).mean().iloc[-1]
+                    if not pd.isna(ma20) and ma20 > 0:
+                        near_ma20 = (ma20 * 0.97 <= ohlcv.close <= ma20 * 1.03)
+
+                        # Volume contraction: last 3 days volume < 20d avg * 0.8
+                        vol_20ma = self._volume_20ma(history)
+                        if vol_20ma is not None and vol_20ma > 0:
+                            # Average volume of yesterday, day before, and today
+                            recent_h = sorted(history, key=lambda x: x.trade_date)
+                            last3_vol_avg = (recent_h[-1].volume + recent_h[-2].volume + ohlcv.volume) / 3
+                            vol_contracted = (last3_vol_avg < vol_20ma * 0.8)
+
+                            if near_ma20 and vol_contracted:
+                                # Verify if we had a breakout recently
+                                # If twenty_day_high is significantly above current price,
+                                # it implies we pulled back from a recent high.
+                                if volume_profile.twenty_day_high > ohlcv.close * 1.02:
+                                    bd.pullback_setup_pts = 8
+                                    bd.flags.append("PULLBACK_SETUP")
+
+        # --- 4c. BB_SQUEEZE_COILING bonus (+3 pts) ---
+        # BB Squeeze + extreme volume contraction
+        if "BB_SQUEEZE_SETUP" in bd.flags:
+            vol_20ma = self._volume_20ma(history)
+            if vol_20ma is not None and vol_20ma > 0:
+                recent_h = sorted(history, key=lambda x: x.trade_date)
+                last3_vol_avg = (recent_h[-1].volume + recent_h[-2].volume + ohlcv.volume) / 3
+                if last3_vol_avg < vol_20ma * 0.7:
+                    bd.bb_squeeze_coiling_pts = 3
+                    bd.flags.append("BB_SQUEEZE_COILING")
+
     # ------------------------------------------------------------------
     # Risk deductions
     # ------------------------------------------------------------------
@@ -1231,21 +1312,19 @@ class TripleConfirmationEngine:
                     bd.long_upper_shadow = 8
                     bd.flags.append("LONG_UPPER_SHADOW")
 
-        # 2. 過熱乖離 (requires MA history)
-        recent = sorted(history, key=lambda x: x.trade_date)
-        if len(recent) >= 20:
-            closes = pd.Series([d.close for d in recent])
-            ma20 = closes.rolling(20).mean().iloc[-1]
-            if not pd.isna(ma20) and ma20 > 0:
-                if ohlcv.close > ma20 * 1.10:
-                    bd.overheat_ma20 = 5
-                    bd.flags.append(f"OVERHEAT_MA20: {ohlcv.close/ma20:.1%} above MA20")
-            if len(recent) >= 60:
-                ma60 = closes.rolling(60).mean().iloc[-1]
-                if not pd.isna(ma60) and ma60 > 0:
-                    if ohlcv.close > ma60 * 1.20:
-                        bd.overheat_ma60 = 5
-                        bd.flags.append(f"OVERHEAT_MA60: {ohlcv.close/ma60:.1%} above MA60")
+        # 2. 過熱乖離 (v2 historical: data shows these are positive trend signals, removing deductions)
+        # recent = sorted(history, key=lambda x: x.trade_date)
+        # if len(recent) >= 20:
+        #     closes = pd.Series([d.close for d in recent])
+        #     ma20 = closes.rolling(20).mean().iloc[-1]
+        #     if not pd.isna(ma20) and ma20 > 0:
+        #         if ohlcv.close > ma20 * 1.10:
+        #             bd.overheat_ma20 = 0  # removed -5
+        #     if len(recent) >= 60:
+        #         ma60 = closes.rolling(60).mean().iloc[-1]
+        #         if not pd.isna(ma60) and ma60 > 0:
+        #             if ohlcv.close > ma60 * 1.20:
+        #                 bd.overheat_ma60 = 0  # removed -5
 
         # 3. 當沖過熱: daytrade_ratio > 35% AND not above 20d high
         if twse_proxy is not None and twse_proxy.daytrade_ratio is not None:

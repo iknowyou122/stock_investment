@@ -587,7 +587,7 @@ class TestInstitutionConsecutiveDays:
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
                        side_effect=_side_effect):
                 flags: list = []
-                foreign_count, trust_count, dealer_count = (
+                foreign_count, trust_count, dealer_count, _ = (
                     fetcher._fetch_institution_consecutive_days(ticker, trade_date, flags)
                 )
 
@@ -625,7 +625,7 @@ class TestInstitutionConsecutiveDays:
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
                        side_effect=_side_effect):
                 flags: list = []
-                _, trust_count, _ = fetcher._fetch_institution_consecutive_days(
+                _, trust_count, _, _ = fetcher._fetch_institution_consecutive_days(
                     ticker, trade_date, flags
                 )
 
@@ -654,7 +654,7 @@ class TestInstitutionConsecutiveDays:
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
                        side_effect=_side_effect):
                 flags: list = []
-                foreign_count, trust_count, dealer_count = (
+                foreign_count, trust_count, dealer_count, _ = (
                     fetcher._fetch_institution_consecutive_days(ticker, trade_date, flags)
                 )
 

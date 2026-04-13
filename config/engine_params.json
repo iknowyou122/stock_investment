@@ -1,12 +1,15 @@
 {
   "gate_vol_ratio": 1.2,
-  "rsi_momentum_lo": 55,
-  "rsi_momentum_hi": 67,
-  "breakout_vol_ratio": 1.7,
+  "rsi_momentum_lo": 30,
+  "rsi_momentum_hi": 55,
+  "breakout_vol_ratio": 1.5,
   "sector_topN_pct": 0.2,
-  "long_threshold_uptrend": 63,
-  "long_threshold_neutral": 68,
-  "long_threshold_downtrend": 73,
-  "watch_min": 45,
-  "_comment": "Tunable parameters. Edited by apply_tuning.py."
+  "long_threshold_uptrend": 50,
+  "long_threshold_neutral": 55,
+  "long_threshold_downtrend": 60,
+  "watch_min": 40,
+  "emerging_setup_pts": 10,
+  "pullback_setup_pts": 8,
+  "bb_squeeze_coiling_pts": 3,
+  "_comment": "Tunable parameters for Accumulation Engine (2026-04-13 recalibration)."
 }

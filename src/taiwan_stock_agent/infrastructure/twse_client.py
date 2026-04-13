@@ -107,7 +107,7 @@ class ChipProxyFetcher:
 
         foreign_net, trust_net, dealer_net = self._fetch_t86_data(ticker, trade_date, flags)
         margin_change = self._fetch_margin_balance_change(ticker, trade_date, flags)
-        foreign_consec, trust_consec, dealer_consec = self._fetch_institution_consecutive_days(
+        foreign_consec, trust_consec, dealer_consec, buy_2_of_3 = self._fetch_institution_consecutive_days(
             ticker, trade_date, flags
         )
         short_increased, short_margin_ratio = self._fetch_short_data(ticker, trade_date, flags)
@@ -144,6 +144,7 @@ class ChipProxyFetcher:
             sbl_available=sbl_ratio is not None,
             margin_utilization_rate=margin_util,
             daytrade_ratio=daytrade_ratio,
+            institution_buy_2_of_3=buy_2_of_3,
             is_available=is_available,
             data_quality_flags=flags,
         )
@@ -599,15 +600,13 @@ class ChipProxyFetcher:
 
     def _fetch_institution_consecutive_days(
         self, ticker: str, trade_date: date, flags: list[str]
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, bool]:
         """Count consecutive calendar-adjusted buy days for all three institutions.
 
-        Returns (foreign_count, trust_count, dealer_count).
+        Returns (foreign_count, trust_count, dealer_count, buy_2_of_3).
 
-        Looks back up to 14 calendar days (~7 trading days) using T86 data.
-        The circuit breaker (_t86_circuit_open) limits damage when TWSE is
-        rate-limiting — after 3 consecutive failures, all lookback dates
-        resolve instantly from cache (empty) without HTTP calls.
+        Lookback up to 21 calendar days (~7 trading days) using T86 data.
+        buy_2_of_3: True if (Foreign OR Trust) net buy on >= 2 of last 3 trading days.
         """
         foreign_vals: list[int] = []
         trust_vals: list[int] = []
@@ -641,10 +640,24 @@ class ChipProxyFetcher:
                     break
             return count
 
+        # Calculate buy_2_of_3: Foreign or Trust net buy on >= 2 of last 3 trading days.
+        buy_2_of_3 = False
+        if len(foreign_vals) >= 3:
+            # We assume foreign_vals and trust_vals are aligned by trading days.
+            # T86 table usually has both if available for that market date.
+            buys = 0
+            for i in range(3):
+                f_buy = foreign_vals[i] > 0 if i < len(foreign_vals) else False
+                t_buy = trust_vals[i] > 0 if i < len(trust_vals) else False
+                if f_buy or t_buy:
+                    buys += 1
+            buy_2_of_3 = (buys >= 2)
+
         return (
             _count_consec(foreign_vals),
             _count_consec(trust_vals),
             _count_consec(dealer_vals),
+            buy_2_of_3,
         )
 
     def _fetch_foreign_consecutive_days(
@@ -655,7 +668,7 @@ class ChipProxyFetcher:
         Prefer _fetch_institution_consecutive_days() for new call sites — it
         returns all three institutions in one pass.
         """
-        foreign_count, _, _ = self._fetch_institution_consecutive_days(ticker, trade_date, flags)
+        foreign_count, _, _, _ = self._fetch_institution_consecutive_days(ticker, trade_date, flags)
         return foreign_count
 
     def _fetch_sbl_data(

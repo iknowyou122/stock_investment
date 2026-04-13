@@ -12,19 +12,23 @@ _PARAMS_PATH = Path(__file__).resolve().parents[3] / "config" / "engine_params.j
 
 DEFAULT_PARAMS: dict = {
     "gate_vol_ratio": 1.2,
-    "rsi_momentum_lo": 55,
-    "rsi_momentum_hi": 70,
+    "rsi_momentum_lo": 30,
+    "rsi_momentum_hi": 55,
     "breakout_vol_ratio": 1.5,
     "sector_topN_pct": 0.20,
-    "long_threshold_uptrend": 63,
-    "long_threshold_neutral": 68,
-    "long_threshold_downtrend": 73,
-    "watch_min": 45,
+    "long_threshold_uptrend": 50,
+    "long_threshold_neutral": 55,
+    "long_threshold_downtrend": 60,
+    "watch_min": 40,
+    "emerging_setup_pts": 10,
+    "pullback_setup_pts": 8,
+    "bb_squeeze_coiling_pts": 3,
 }
 
 _RISK_FIELDS = frozenset({
     "daytrade_risk", "long_upper_shadow", "overheat_ma20",
     "overheat_ma60", "daytrade_heat", "sbl_breakout_fail", "margin_chase_heat",
+    "adx_exhaustion_deduction", "dmi_divergence_deduction",
 })
 _NON_SCORE_FIELDS = frozenset({"scoring_version"})
 
@@ -81,6 +85,15 @@ def recompute_score(breakdown: dict, params: dict) -> tuple[int, str]:
         pts["breakout_volume_pts"] = (
             3 if (had_breakout and vol_ratio >= bv_thresh) else 0
         )
+
+    # --- Pillar 4: Accumulation Points ---
+    flags = breakdown.get("flags", [])
+    if "EMERGING_SETUP" in flags:
+        pts["emerging_setup_pts"] = params.get("emerging_setup_pts", 10)
+    if "PULLBACK_SETUP" in flags:
+        pts["pullback_setup_pts"] = params.get("pullback_setup_pts", 8)
+    if "BB_SQUEEZE_COILING" in flags:
+        pts["bb_squeeze_coiling_pts"] = params.get("bb_squeeze_coiling_pts", 3)
 
     # --- Re-evaluate gate_vol ---
     if vol_ratio is not None:

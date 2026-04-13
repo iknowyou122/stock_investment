@@ -2,8 +2,8 @@ from __future__ import annotations
 from taiwan_stock_agent.domain.scoring_replay import recompute_score, load_params, DEFAULT_PARAMS
 
 
-def _base_breakdown(rsi: float = 62.0, vol_ratio: float = 1.8, breakout: bool = True) -> dict:
-    """Minimal breakdown dict for testing."""
+def _base_breakdown(rsi: float = 40.0, vol_ratio: float = 1.8, breakout: bool = True) -> dict:
+    """Minimal breakdown dict for testing. Default RSI 40 in new range [30,55]."""
     return {
         "raw": {
             "rsi_14": rsi,
@@ -17,7 +17,7 @@ def _base_breakdown(rsi: float = 62.0, vol_ratio: float = 1.8, breakout: bool = 
             "vwap_advantage_pts": 6,
             "trend_continuity_pts": 5,
             "volume_escalation_pts": 5,
-            "rsi_momentum_pts": 4,        # RSI 62 in [55,70] → 4
+            "rsi_momentum_pts": 4,        # RSI 40 in [30,55] → 4
             "foreign_strength_pts": 5,
             "trust_strength_pts": 4,
             "dealer_strength_pts": 4,
@@ -46,6 +46,8 @@ def _base_breakdown(rsi: float = 62.0, vol_ratio: float = 1.8, breakout: bool = 
             "daytrade_heat": 0,
             "sbl_breakout_fail": 0,
             "margin_chase_heat": 0,
+            "adx_exhaustion_deduction": 0,
+            "dmi_divergence_deduction": 0,
             "scoring_version": "v2",
         },
         "flags": ["BREAKOUT_WITH_VOL"],
@@ -59,8 +61,11 @@ def test_recompute_score_unchanged_params_gives_same_score():
     score, action = recompute_score(bd, DEFAULT_PARAMS)
     # Sum all pts manually
     pts = bd["pts"]
-    risk_fields = {"daytrade_risk","long_upper_shadow","overheat_ma20",
-                   "overheat_ma60","daytrade_heat","sbl_breakout_fail","margin_chase_heat"}
+    risk_fields = {
+        "daytrade_risk","long_upper_shadow","overheat_ma20",
+        "overheat_ma60","daytrade_heat","sbl_breakout_fail","margin_chase_heat",
+        "adx_exhaustion_deduction", "dmi_divergence_deduction",
+    }
     non_score = {"scoring_version"}
     expected = sum(v for k, v in pts.items()
                    if k not in risk_fields and k not in non_score
@@ -70,11 +75,11 @@ def test_recompute_score_unchanged_params_gives_same_score():
 
 
 def test_recompute_score_rsi_zone_widened():
-    """Widening RSI zone to [50,72] captures RSI=52 that was previously excluded."""
-    bd = _base_breakdown(rsi=52.0)
-    bd["pts"]["rsi_momentum_pts"] = 0   # RSI 52 < 55 → 0 with defaults
+    """Widening RSI zone to [25,60] captures RSI=28 that was previously excluded."""
+    bd = _base_breakdown(rsi=28.0)
+    bd["pts"]["rsi_momentum_pts"] = 0   # RSI 28 < 30 (default) → 0
 
-    params_wider = {**DEFAULT_PARAMS, "rsi_momentum_lo": 50, "rsi_momentum_hi": 72}
+    params_wider = {**DEFAULT_PARAMS, "rsi_momentum_lo": 25, "rsi_momentum_hi": 60}
     score_wider, _ = recompute_score(bd, params_wider)
 
     score_default, _ = recompute_score(bd, DEFAULT_PARAMS)
