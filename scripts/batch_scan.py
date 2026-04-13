@@ -149,11 +149,16 @@ def _build_industry_map() -> dict[str, str]:
     return {}
 
 
-def _sector_menu(industry_map: dict[str, str]) -> list[tuple[int, str, int]]:
-    """Print numbered sector table. Returns [(idx, industry_name, count), ...]."""
+def _build_sector_rows(industry_map: dict[str, str]) -> list[tuple[int, str, int]]:
+    """Build numbered sector list without printing. Returns [(idx, industry_name, count), ...]."""
     from collections import Counter
     counts = Counter(industry_map.values())
-    rows = [(i, ind, counts[ind]) for i, ind in enumerate(sorted(counts.keys()), start=1)]
+    return [(i, ind, counts[ind]) for i, ind in enumerate(sorted(counts.keys()), start=1)]
+
+
+def _sector_menu(industry_map: dict[str, str]) -> list[tuple[int, str, int]]:
+    """Print numbered sector table. Returns [(idx, industry_name, count), ...]."""
+    rows = _build_sector_rows(industry_map)
 
     table = Table(
         title="可用產業別",
@@ -510,15 +515,13 @@ CSV_FIELDS = [
 
 
 def _save_csv(results: list[dict], analysis_date: date, csv_path: Path) -> None:
-    """Append scan results to a CSV file (creates with header if new)."""
+    """Write scan results to a CSV file (overwrites if already exists for this date)."""
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not csv_path.exists()
     scan_date = date.today().isoformat()
 
-    with csv_path.open("a", newline="", encoding="utf-8") as f:
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        if write_header:
-            writer.writeheader()
+        writer.writeheader()
         for r in results:
             writer.writerow({
                 "scan_date": scan_date,
@@ -565,7 +568,7 @@ def _conf_bar(conf: int) -> str:
     return f"[{color}]{bar}[/{color}] [dim]{conf}[/dim]"
 
 
-def _print_table(results: list[dict], top: int, min_confidence: int) -> None:
+def _print_table(results: list[dict], top: int, min_confidence: int, scan_date: str = "") -> None:
     valid = [r for r in results if not r["halt"] and r["error"] is None]
     halted = [r for r in results if r["halt"] or r["error"] is not None]
 
@@ -576,8 +579,9 @@ def _print_table(results: list[dict], top: int, min_confidence: int) -> None:
     if top:
         valid = valid[:top]
 
+    title_str = f"BATCH SCAN RESULTS  {scan_date}" if scan_date else "BATCH SCAN RESULTS"
     table = Table(
-        title="BATCH SCAN RESULTS",
+        title=title_str,
         box=box.ROUNDED,
         show_header=True,
         header_style="bold white on dark_blue",
@@ -592,10 +596,12 @@ def _print_table(results: list[dict], top: int, min_confidence: int) -> None:
     table.add_column("Entry", justify="right", style="cyan", width=9)
     table.add_column("Stop", justify="right", style="red", width=9)
     table.add_column("Target", justify="right", style="green", width=9)
+    table.add_column("Upside", justify="right", style="yellow", width=7)
 
     for i, r in enumerate(valid, 1):
         action = r["action"] + ("*" if r["free_tier"] else "")
         action_text = Text(action, style=_action_style(r["action"]))
+        upside_pct = (r["target"] / r["entry_bid"] - 1) * 100 if r["entry_bid"] > 0 else 0
         table.add_row(
             str(i),
             r["ticker"],
@@ -604,6 +610,7 @@ def _print_table(results: list[dict], top: int, min_confidence: int) -> None:
             f"{r['entry_bid']:.1f}",
             f"{r['stop_loss']:.1f}",
             f"{r['target']:.1f}",
+            f"{upside_pct:+.1f}%",
         )
 
     _console.print()
@@ -816,13 +823,23 @@ def run_batch(
         else:
             _console.print("  [dim yellow]⚠ DB 未設定或無法連線，略過寫入[/dim yellow]")
 
-    _print_table(results, top, min_confidence)
+    _print_table(results, top, min_confidence, scan_date=str(analysis_date))
 
     if csv_path:
         _save_csv(results, analysis_date, csv_path)
 
 
 def main() -> None:
+    # 大批次掃描（728 檔）會消耗大量 socket fd；macOS 預設只有 256。
+    # 在這裡嘗試提高到 4096，避免 "Too many open files" 錯誤。
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft < 4096:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (min(4096, hard), hard))
+    except Exception:
+        pass  # 不支援的平台或無權限時靜默忽略
+
     parser = argparse.ArgumentParser(description="批量掃描台股，依信心分數排序")
     parser.add_argument("--tickers", nargs="+", help="自訂標的清單（跳過產業選單）")
     parser.add_argument(
@@ -871,7 +888,88 @@ def main() -> None:
         action="store_true",
         help="將訊號寫入 signal_outcomes DB (source=live)，用於 factor-report 分析",
     )
+    parser.add_argument(
+        "--show",
+        metavar="DATE",
+        help="顯示指定日期的掃描結果（從 CSV 讀取，例: --show 2026-04-10）",
+    )
     args = parser.parse_args()
+
+    # ── show 模式：從 CSV 印出歷史結果 ──────────────────────────────────────
+    if args.show is not None:
+        scan_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
+        available = sorted(p.stem.replace("scan_", "") for p in scan_dir.glob("scan_*.csv"))
+
+        show_date = args.show.strip() if args.show.strip() else ""
+        if not show_date:
+            # 互動式選擇（上下鍵）
+            if not available:
+                _console.print("[red]找不到任何掃描結果（data/scans/ 目錄為空）[/red]")
+                return
+            import questionary
+            rev = list(reversed(available))
+            show_date = questionary.select(
+                "選擇掃描日期",
+                choices=rev,
+                default=rev[0],
+                style=questionary.Style([
+                    ("selected", "fg:cyan bold"),
+                    ("pointer", "fg:cyan bold"),
+                    ("highlighted", "fg:cyan"),
+                    ("question", "bold"),
+                ]),
+            ).ask()
+            if show_date is None:
+                return  # Ctrl-C
+
+        csv_file = scan_dir / f"scan_{show_date}.csv"
+        if not csv_file.exists():
+            if not available:
+                _console.print("[red]找不到任何掃描結果（data/scans/ 目錄為空）[/red]")
+                return
+            _console.print(f"[yellow]找不到 {show_date} 的資料，請重新選擇：[/yellow]")
+            import questionary
+            rev = list(reversed(available))
+            show_date = questionary.select(
+                "選擇掃描日期",
+                choices=rev,
+                default=rev[0],
+                style=questionary.Style([
+                    ("selected", "fg:cyan bold"),
+                    ("pointer", "fg:cyan bold"),
+                    ("highlighted", "fg:cyan"),
+                    ("question", "bold"),
+                ]),
+            ).ask()
+            if show_date is None:
+                return
+            csv_file = scan_dir / f"scan_{show_date}.csv"
+        import csv as _csv
+        with open(csv_file, newline="", encoding="utf-8") as f:
+            rows_raw = list(_csv.DictReader(f))
+        # Dedup by ticker: keep last (newest) row per ticker (guards against legacy append CSVs)
+        seen: dict[str, dict] = {}
+        for r in rows_raw:
+            seen[r["ticker"]] = r
+        results = [
+            {
+                "ticker": r["ticker"],
+                "action": r["action"],
+                "confidence": int(r["confidence"]),
+                "free_tier": r.get("free_tier", "True") == "True",
+                "halt": r.get("halt", "False") == "True",
+                "error": None,
+                "entry_bid": float(r["entry_bid"]),
+                "stop_loss": float(r["stop_loss"]),
+                "target": float(r["target"]),
+                "momentum": r.get("momentum", ""),
+                "chip": r.get("chip_analysis", ""),
+                "risk": r.get("risk_factors", ""),
+            }
+            for r in seen.values()
+        ]
+        _print_table(results, args.top, args.min_confidence, scan_date=show_date)
+        return
 
     csv_path: Path | None = None
     if args.save_csv:
@@ -891,16 +989,17 @@ def main() -> None:
             logger.warning("No industry map available; using fallback ticker list")
             tickers = _FALLBACK_TICKERS
         else:
-            rows = _sector_menu(industry_map)
-            idx_map = {i: name for i, name, _ in rows}
+            industry_map_rows = _build_sector_rows(industry_map)
+            idx_map = {i: name for i, name, _ in industry_map_rows}
 
             if args.sectors:
-                # Non-interactive: resolve numeric codes directly
+                # Non-interactive: resolve numeric codes directly (skip menu display)
                 chosen = {idx_map[n] for n in args.sectors if n in idx_map}
                 if not chosen:
                     _console.print("  [yellow]指定代號無效，使用預設產業[/yellow]")
                     chosen = _DEFAULT_SECTOR_NAMES
             else:
+                rows = _sector_menu(industry_map)
                 chosen = _select_sectors(rows, _DEFAULT_SECTOR_NAMES)
 
             tickers = sorted(t for t, ind in industry_map.items() if ind in chosen)

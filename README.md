@@ -2,9 +2,9 @@
 
 台股籌碼面信號系統。每日收盤後分析指定股票，輸出 **LONG / WATCH / CAUTION** 三級信號，幫助判斷主力是否在進場。
 
-> **Last updated:** 2026-04-09
-> **Current focus:** Phase 4.15 完成（T-2 策略驗證 + 軌跡感知加分 + EMERGING_SETUP）
-> **Tests:** 208 unit passed（214 integration skipped，需 DB）
+> **Last updated:** 2026-04-12
+> **Current focus:** Phase 4.16 完成（盤後復盤 + T+1 結算 + A/B 優化 + 歷史結果查詢 + 資料品質修正）
+> **Tests:** 224 unit passed（214 integration skipped，需 DB）
 > **Scan watchlist:** 全市場上市+上櫃（每日自動更新），互動式選擇產業 + LLM 兩階段優化
 
 ---
@@ -38,7 +38,7 @@
 | **Confidence** | 三柱總分（0–100），不是勝率，是信號強度 |
 | **進場區間** | bid_limit（下限）到 max_chase（上限），超過上限不追價 |
 | **停損** | T+0 收盤價 |
-| **目標** | 60 日高點 × 1.05 |
+| **目標** | `max(poc_proxy × 1.05, close × 1.05)`（最大量日收盤 +5%，保證 > entry）|
 | **data_quality_flags** | 資料缺口說明（見下方） |
 
 ### 常見 flags
@@ -124,7 +124,7 @@ FINMIND_API_KEY=<你的 FinMind JWT token>
 
 ```bash
 make test
-# 預期：208 passed
+# 預期：224 passed
 ```
 
 ---
@@ -278,30 +278,51 @@ make factor-report
 
 ## 每日使用流程
 
-### 標準三段式工作流
+### 標準每日工作流
 
 ```
-收盤後 (14:00+)   →  make scan          掃描 + 存 CSV + 寫 DB
+收盤後 (14:00+)     →  make daily        掃描 + 盤後復盤（一鍵）
+  ├─ make scan       掃描 + 存 CSV + 寫 DB
+  └─ make review     T+1 結算 + 14日滾動勝率 + A/B 競賽管理
 隔日盤中 (09-13:30) →  make precheck      即時報價確認 + 蓄積中監控
-週末               →  make settle        補填 T+1/3/5 結算價
+週末               →  make settle        補填 T+3/5 結算價（長期）
 ```
 
-### Step 1：收盤後掃描
+### Step 1：收盤後掃描 + 復盤
 
 ```bash
-# 互動式掃描（選產業 + LLM）
-make scan
+# 一鍵執行（互動式選產業）
+make daily
 
-# 非互動（CI / cron 用）
-make scan SECTORS="1 5" LLM=gemini LLM_TOP=5
+# 或分開執行
+make scan                           # 互動式（選產業 + LLM）
+make scan SECTORS="5 31 33" LLM=none  # 非互動（CI / cron 用）
+make scan DATE=2026-03-28           # 指定歷史日期
 
-# 指定歷史日期
-make scan DATE=2026-03-28
+make review                         # 盤後復盤（T+1 結算 + 勝率 + A/B）
+make review DATE=2026-04-09         # 指定日期復盤
 ```
 
 掃描輸出兩份：
-- `data/scans/scan_YYYY-MM-DD.csv` — watchlist（供 precheck 讀取）
+- `data/scans/scan_YYYY-MM-DD.csv` — 每次掃描覆寫（不累加）
 - DB `signal_outcomes` — 供 factor-report / backtest 分析
+
+### 查詢歷史掃描結果
+
+```bash
+make show                           # 上下鍵互動選日期
+make show SHOW_DATE=2026-04-08      # 直接指定
+make show SHOW_DATE=2026-04-08 TOP=20 MIN_CONF=50
+```
+
+BATCH SCAN RESULTS 欄位：
+
+| 欄位 | 說明 |
+|------|------|
+| Entry | `close × 0.995`（委買限價下限）|
+| Stop | T+0 收盤價（停損參考）|
+| Target | `max(poc_proxy × 1.05, close × 1.05)`（目標，永遠 > Entry）|
+| Upside | `(Target / Entry - 1) × 100%`（潛在報酬，保證正值）|
 
 ### Step 2：隔日盤中確認
 
@@ -333,10 +354,10 @@ make api
 ### 每日自動化（cron）
 
 ```cron
-# 收盤後掃描（非互動模式）
-30 14 * * 1-5  cd /path/to/stock_investment && make scan SECTORS="1 5" LLM=none
+# 收盤後掃描 + 復盤（非互動模式）
+30 14 * * 1-5  cd /path/to/stock_investment && make scan SECTORS="5 31 33" LLM=none && make review
 
-# 週末結算
+# 週末結算（T+3/5 長期）
 0 10 * * 6    cd /path/to/stock_investment && make settle
 ```
 
@@ -385,8 +406,8 @@ python3 scripts/run_bayesian_update.py
 
 | 資料源 | 狀態 | 說明 |
 |--------|------|------|
-| FinMind `TaiwanStockPrice` (OHLCV) | ✅ 免費 | 未除權息調整；Pillar 1+3 評分來源 |
-| FinMind `TaiwanStockPriceAdj` | ❌ 需付費 | 自動 fallback 到未調整價格 |
+| FinMind `TaiwanStockPrice` (OHLCV) | ✅ 免費 | 未除權息調整（原始交易價）；Pillar 1+3 評分來源。**系統固定使用此資料集**，不使用還原股價，防止除權調整污染 entry/target 計算 |
+| FinMind `TaiwanStockPriceAdj` | ❌ 不使用 | 除權息還原股價，歷史 entry/target 計算不正確，已停用（見 `fetch_ohlcv adjusted=False`）|
 | FinMind `TaiwanStockBrokerTradingStatement` | ❌ 需付費 | 分點明細；Pillar 2 付費版 |
 | TWSE T86（外資/投信/自營商買賣超） | ⚠ WAF 封鎖 | 2026-03 起 TWSE 啟用 WAF，自動 fallback 到 OHLCV RS proxy |
 | TWSE openapi MI_MARGN（融資/融券） | ✅ 免費 | 融資餘額、融資使用率、券資比 |
@@ -500,6 +521,7 @@ python3 scripts/run_bayesian_update.py
 | Phase 4.13 | ✅ 完成 | backtest 效能優化：Margin/SBL/DayTrade 日期級 cache + OHLCV pre-fetch + Rich 進度條 |
 | Phase 4.14 | ✅ 完成 | `make scan` shared client + `make precheck` 即時報價確認（TWSE MIS）|
 | Phase 4.15 | ✅ 完成 | T-2 策略驗證（D+2 勝率 55.6% > D+0 38.5%）+ 軌跡感知加分（RISING+7/STABLE+5/DECLINING+0）+ EMERGING_SETUP flag + precheck 蓄積監控 + Settlement 批次優化 |
+| Phase 4.16 | ✅ 完成 | `make review`（盤後 T+1 復盤 + 14日滾動勝率 + A/B 競賽管理）+ `make daily`（scan+review 一鍵）+ `make show`（上下鍵查歷史）+ Upside% 欄位 + Target<Entry 雙層修正 + OHLCV 除權還原價 bug 修正 |
 | Phase 5 | ⏳ 規劃中 | Stripe 真實付款整合 + 社群信譽評分 + 台灣 Pay |
 
 ---
@@ -583,8 +605,9 @@ stock_investment/
 ├── frontend/
 │   └── index.html                  # Phase 3b Landing page
 ├── scripts/
-│   ├── batch_scan.py               # 批量掃描（動態 watchlist，每日 cache，shared clients）
+│   ├── batch_scan.py               # 批量掃描（動態 watchlist，每日 cache，shared clients；--show 查歷史）
 │   ├── precheck.py                 # 盤中即時確認 + EMERGING_SETUP 蓄積監控
+│   ├── review.py                   # 盤後復盤：T+1 結算 + 14日滾動勝率 + A/B 競賽管理
 │   ├── backtest.py                 # 歷史回測（OHLCV pre-fetch + entry-delay + 批次 settlement）
 │   ├── daily_runner.py             # 每日掃描 + 結算 runner
 │   ├── factor_report.py            # Lift 分析 + Walk-forward Grid Search + 殘差分析
@@ -597,7 +620,7 @@ stock_investment/
 │   │   ├── test_persistence_bonus.py              # 軌跡感知加分測試
 │   │   └── ...                     # 208 tests 總計，無需 DB/網路
 │   └── integration/                # 需要 PostgreSQL
-├── db/migrations/                  # SQL migrations（001–008）
+├── db/migrations/                  # SQL migrations（001–009）
 └── docs/design/
     ├── factor-optimization-v2-plan.md  # v2 因子完整規格
     ├── signal-engine-design.md

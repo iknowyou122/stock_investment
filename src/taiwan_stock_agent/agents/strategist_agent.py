@@ -265,8 +265,13 @@ class StrategistAgent:
         # POC proxy: close price of the highest-volume day in last 20 sessions.
         # Rationale: the day with the most volume is where the most conviction existed;
         # that price level tends to act as support/resistance.
-        # Falls back to twenty_day_high if all volumes are 0 (data quality issue).
-        max_vol_day = max(recent_20, key=lambda d: d.volume)
+        # Panic filter: exclude days where close dropped >5% vs open (large red candles);
+        # those days have high volume but artificially depressed closes that would set
+        # poc_proxy far below current price and produce target < entry.
+        # Falls back to twenty_day_high if no valid candidate or all volumes are 0.
+        valid_days = [d for d in recent_20 if d.open <= 0 or (d.close / d.open - 1) > -0.05]
+        candidates = valid_days if valid_days else recent_20
+        max_vol_day = max(candidates, key=lambda d: d.volume)
         poc_proxy = max_vol_day.close if max_vol_day.volume > 0 else twenty_day_high
 
         flags = []

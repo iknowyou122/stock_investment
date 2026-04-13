@@ -35,6 +35,7 @@ you will create drift that is expensive to fix.
 | Phase 4.13 | ✅ Done | `make backtest` 效能優化 ✅ · Margin/SBL/DayTrade 日期級記憶體 cache（每日各 1 次 HTTP → 服務所有 ticker）✅ · TAIEX history 同日期共用（StrategistAgent `_taiex_cache`）✅ · default delay 0.5s→0.1s ✅ · Rich 進度條 + ETA（backtest 主迴路）✅ · 全 CLI 互動式 Rich UI（backtest/daily_runner/analyze/optimize）✅ · `requirements.txt` 加入 rich + yfinance ✅ · 197 unit tests passing ✅ |
 | Phase 4.14 | ✅ Done | `make scan` 共用客戶端優化（shared FinMindClient + ChipProxyFetcher，日期級快取跨 worker 共享）✅ · `make precheck` 盤前/盤中確認（TWSE MIS 即時報價 → 確認 entry±3%、量能、大盤）✅ · 197 unit tests passing ✅ |
 | Phase 4.15 | ✅ Done | T-2 策略驗證（`entry_delay_analysis.py` D+2 勝率 55.6% > D+0 38.5%）✅ · 軌跡感知持續加分（RISING +7 / STABLE +5 / DECLINING +0，讀近 3 天 CSV）✅ · `EMERGING_SETUP` flag（WATCH + MA排列 + 法人買 + 未突破）✅ · `make precheck` 蓄積中監控表 ✅ · MIS API `z=-` fallback（bid→hl_mid→open）✅ · Settlement 批次優化（executemany）✅ · 跨機器 DB 備份還原（`make db-dump/restore`）✅ · 208 unit tests passing ✅ |
+| Phase 4.16 | ✅ Done | `make review`（盤後 T+1 復盤）✅ · `make daily`（scan + review 一鍵）✅ · `make show`（上下鍵互動選日期查歷史結果）✅ · migration 009（stop_loss/intraday_high/low/entry_success/ab_candidate_score + ab_competitions 表）✅ · BATCH SCAN RESULTS 加 Upside% 欄位 + 標題日期 ✅ · CSV 改覆寫模式（防重複 ticker）✅ · Target < Entry 雙層修正（poc_proxy 排除恐慌拋售日 + floor = close×1.05）✅ · `FinMindClient.fetch_ohlcv` 預設改 `adjusted=False`（防除權還原價污染快取）✅ · `--sectors` 非互動跳過選單顯示（make daily 可背景執行）✅ · `questionary` 加入 requirements.txt ✅ · 224 unit tests passing ✅ |
 
 **免費 vs 付費因子說明：**
 

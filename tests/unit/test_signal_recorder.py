@@ -65,8 +65,9 @@ def test_record_signal_inserts_row():
     assert params[1] == "2330"  # ticker
     assert params[3] == 72  # confidence
     assert params[5] == 985.0  # entry_price (entry_bid_limit)
-    assert params[7] == "backtest"  # source
-    assert params[8] is not None  # score_breakdown JSON
+    assert params[6] == 972.0  # stop_loss
+    assert params[8] == "backtest"  # source
+    assert params[9] is not None  # score_breakdown JSON
 
 
 def test_record_signal_none_breakdown():
@@ -86,7 +87,7 @@ def test_record_signal_none_breakdown():
         signal_id = record_signal(signal, source="live")
 
     call_args = mock_cur.execute.call_args[0]
-    assert call_args[1][8] is None  # score_breakdown should be None
+    assert call_args[1][9] is None  # score_breakdown should be None
 
 
 def test_record_signal_extracts_scoring_version():
@@ -121,7 +122,7 @@ def test_record_signal_extracts_scoring_version():
 
     call_args = mock_cur.execute.call_args[0]
     params = call_args[1]
-    assert params[6] == "v1"  # scoring_version
+    assert params[7] == "v1"  # scoring_version
 
 
 def test_record_signal_default_scoring_version():
@@ -156,7 +157,7 @@ def test_record_signal_default_scoring_version():
 
     call_args = mock_cur.execute.call_args[0]
     params = call_args[1]
-    assert params[6] == "v2"  # scoring_version defaults to v2
+    assert params[7] == "v2"  # scoring_version defaults to v2
 
 
 def test_record_signal_returns_uuid():

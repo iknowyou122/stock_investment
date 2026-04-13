@@ -1431,12 +1431,17 @@ class TripleConfirmationEngine:
         entry_bid_limit = close × 0.995  (lower bound, limit order)
         entry_max_chase = close × 1.005  (upper bound, max acceptable chase)
         stop_loss       = T+0 closing price
-        target          = poc_proxy × 1.05  (5% above 20-day high proxy)
+        target          = max(poc_proxy × 1.05, close × 1.05)
+                          Guarantees target > entry. poc_proxy may be lower than
+                          current close when the highest-volume day was a panic
+                          selloff, so we floor at close × 1.05.
         """
         close = ohlcv.close
+        raw_target = round(volume_profile.poc_proxy * 1.05, 2)
+        target = max(raw_target, round(close * 1.05, 2))
         return ExecutionPlan(
             entry_bid_limit=round(close * 0.995, 2),
             entry_max_chase=round(close * 1.005, 2),
             stop_loss=close,
-            target=round(volume_profile.poc_proxy * 1.05, 2),
+            target=target,
         )

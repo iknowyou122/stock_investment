@@ -37,8 +37,8 @@ def record_signal(signal: SignalOutput, source: str = "live") -> str:
                 """
                 INSERT INTO signal_outcomes
                     (signal_id, ticker, signal_date, confidence_score, action,
-                     entry_price, scoring_version, source, score_breakdown)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     entry_price, stop_loss, scoring_version, source, score_breakdown)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (signal_id) DO NOTHING
                 """,
                 (
@@ -48,6 +48,7 @@ def record_signal(signal: SignalOutput, source: str = "live") -> str:
                     signal.confidence,
                     signal.action,
                     signal.execution_plan.entry_bid_limit,
+                    signal.execution_plan.stop_loss,
                     scoring_version,
                     source,
                     score_breakdown_json,

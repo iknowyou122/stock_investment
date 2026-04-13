@@ -31,7 +31,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from dotenv import load_dotenv
 load_dotenv()
 
+import urllib3
 import requests
+# TWSE MIS 憑證缺少 Subject Key Identifier（Python 3.14 嚴格驗證會拒絕）
+# 對 TWSE 公開行情 API 關閉驗證是可接受的風險
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from rich.console import Console
 from rich.table import Table
 from rich import box
@@ -84,6 +88,7 @@ def _fetch_realtime_batch(mis_keys: list[str]) -> dict[str, dict]:
                 params={"ex_ch": ex_ch, "json": "1", "delay": "0", "_": str(int(time.time() * 1000))},
                 headers={"User-Agent": "Mozilla/5.0"},
                 timeout=10,
+                verify=False,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -140,6 +145,8 @@ def _fetch_realtime_batch(mis_keys: list[str]) -> dict[str, dict]:
             vol_str = item.get("v", "0")
             yesterday_str = item.get("y", "0")
             try:
+                h_val = item.get("h", "-")
+                l_val = item.get("l", "-")
                 results[ticker] = {
                     "price": price,
                     "price_source": price_source,
@@ -147,6 +154,8 @@ def _fetch_realtime_batch(mis_keys: list[str]) -> dict[str, dict]:
                     "yesterday_close": float(yesterday_str),
                     "timestamp": item.get("t", ""),
                     "name": item.get("n", ""),
+                    "high": float(h_val) if h_val not in ("-", "") else None,
+                    "low": float(l_val) if l_val not in ("-", "") else None,
                 }
             except (ValueError, TypeError):
                 continue

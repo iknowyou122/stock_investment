@@ -158,7 +158,7 @@ class FinMindClient:
         start_date: date,
         end_date: date,
         *,
-        adjusted: bool = True,
+        adjusted: bool = False,
         use_cache: bool = True,
     ) -> pd.DataFrame:
         """Fetch daily OHLCV.

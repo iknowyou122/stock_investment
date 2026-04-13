@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: scan precheck settle backtest factor-report optimize test setup migrate api install
+.PHONY: scan precheck settle backtest factor-report optimize test setup migrate api install review daily show
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -40,6 +40,14 @@ precheck:
 		--top $(TOP) \
 		--min-confidence $(MIN_CONF) \
 		$(if $(CSV),--csv $(CSV))
+
+# ── 歷史掃描結果查詢 ──────────────────────────────────────────────────────────
+# 用法: make show              # 互動式選擇日期
+#       make show SHOW_DATE=2026-04-10
+#       make show SHOW_DATE=2026-04-10 TOP=20
+SHOW_DATE ?=
+show:
+	$(PYTHON) scripts/batch_scan.py --show "$(SHOW_DATE)" --top $(TOP) --min-confidence $(MIN_CONF)
 
 # ── 週末結算 ─────────────────────────────────────────────────────────────────
 # 補填 T+1/T+3/T+5 漲跌幅（每週末跑一次）
@@ -103,6 +111,25 @@ migrate:
 # ── API server ───────────────────────────────────────────────────────────────
 api:
 	$(PYTHON) -m uvicorn taiwan_stock_agent.api.main:app --reload --port 8000
+
+# ── 盤後復盤 ─────────────────────────────────────────────────────────────────
+# T+1 結算、勝率、A/B 參數競賽
+# 用法: make review
+#       make review DATE=2026-04-09
+review:
+ifeq ($(DATE),$(_TODAY))
+	$(PYTHON) scripts/review.py
+else
+	$(PYTHON) scripts/review.py --date $(DATE)
+endif
+
+# ── 完整每日流程 ─────────────────────────────────────────────────────────────
+# 掃描 + 復盤（一鍵執行）
+# 用法: make daily
+#       make daily LLM=gemini LLM_TOP=5
+daily:
+	$(MAKE) scan
+	$(MAKE) review
 
 # ── 資料庫備份與還原 ─────────────────────────────────────────────────────────
 # 從 DATABASE_URL 解析連線資訊

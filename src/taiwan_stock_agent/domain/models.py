@@ -92,7 +92,8 @@ class VolumeProfile(BaseModel):
     Phase 1–3 proxy: POC = highest-volume day's close in last 20 sessions.
     This approximates where the most volume traded (real POC concept) better than
     using the 20-day high. Real VolumeProfile requires intraday tick data (Phase 4+).
-    Target price = poc_proxy * 1.05 (5% above POC proxy).
+    Target price = max(poc_proxy * 1.05, close * 1.05). Floor at close * 1.05
+    to prevent target < entry when poc_proxy is depressed by panic selloff days.
     """
     ticker: str
     period_end: date
@@ -113,7 +114,7 @@ class ExecutionPlan(BaseModel):
     entry_bid_limit: float    # close * 0.995 — lower bound limit order
     entry_max_chase: float    # close * 1.005 — upper bound max chase
     stop_loss: float          # T+0 closing price (not intraday VWAP — requires tick data)
-    target: float             # poc_proxy * 1.05
+    target: float             # max(poc_proxy * 1.05, close * 1.05)
 
 
 class Reasoning(BaseModel):
