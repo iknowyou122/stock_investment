@@ -83,13 +83,13 @@ class StrategistAgent:
         # {analysis_date: list[DailyOHLCV] | None}
         self._taiex_cache: dict[date, list[DailyOHLCV] | None] = {}
 
-    def run(self, ticker: str, analysis_date: date) -> SignalOutput:
+    def run(self, ticker: str, analysis_date: date, market: str = "TSE") -> SignalOutput:
         """Run the full pipeline for one ticker on analysis_date.
 
         analysis_date is the T+1 settlement date (the date whose broker flows are
         being analyzed). This should be a day where FinMind data is available.
         """
-        # --- Fetch OHLCV (last 25 sessions for 20-day calculations + buffer) ---
+        # --- Fetch OHLCV (last 130 days for 60-day BB/DMI + 20-day high + slope) ---
         ohlcv_start = analysis_date - timedelta(days=130)
         ohlcv_df = self._finmind.fetch_ohlcv(ticker, ohlcv_start, analysis_date)
 
@@ -110,7 +110,7 @@ class StrategistAgent:
                 f"INSUFFICIENT_HISTORY: {len(history)} sessions (need {_MIN_HISTORY_SESSIONS})"
             )
 
-        # --- Fetch broker trades (last 5 trading days for 3-day net_buyer_count_diff) ---
+        # --- Fetch broker trades (last 10 days for 3-day net_buyer_count_diff) ---
         broker_start = analysis_date - timedelta(days=10)
         broker_df = self._finmind.fetch_broker_trades(ticker, broker_start, analysis_date)
 
@@ -136,7 +136,8 @@ class StrategistAgent:
         if analysis_date in self._taiex_cache:
             taiex_history = self._taiex_cache[analysis_date]
         else:
-            taiex_df = self._finmind.fetch_taiex_history(analysis_date, lookback_days=35)
+            # Need 60+ days for TAIEX slope/regime if coiling detector uses it
+            taiex_df = self._finmind.fetch_taiex_history(analysis_date, lookback_days=130)
             taiex_history: list[DailyOHLCV] | None = None
             if not taiex_df.empty:
                 taiex_history = self._df_to_ohlcv_list(taiex_df, "TAIEX")
@@ -167,6 +168,7 @@ class StrategistAgent:
             volume_profile=volume_profile,
             twse_proxy=twse_proxy,
             taiex_history=taiex_history,
+            market=market,
         )
 
         # --- LLM reasoning (Phase 3) ---

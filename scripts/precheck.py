@@ -239,7 +239,7 @@ def _load_watchlist(csv_path: Path, min_confidence: int) -> tuple[list[dict], li
     """Load scan CSV. Returns (actionable, emerging).
 
     actionable: LONG stocks with confidence >= min_confidence
-    emerging:   WATCH stocks with EMERGING_SETUP flag (T-2 monitoring candidates)
+    emerging:   WATCH stocks with EMERGING_SETUP, COILING, or COILING_PRIME flags
     """
     actionable = []
     emerging = []
@@ -263,12 +263,19 @@ def _load_watchlist(csv_path: Path, min_confidence: int) -> tuple[list[dict], li
                 }
                 if conf >= min_confidence:
                     actionable.append(parsed)
-                elif "EMERGING_SETUP" in flags_str:
+                elif any(f in flags_str for f in ("EMERGING_SETUP", "COILING", "COILING_PRIME")):
                     emerging.append(parsed)
             except (ValueError, KeyError):
                 continue
     actionable.sort(key=lambda r: r["confidence"], reverse=True)
-    emerging.sort(key=lambda r: r["confidence"], reverse=True)
+    
+    # Priority: COILING_PRIME > COILING > EMERGING_SETUP
+    def sort_key(r):
+        f = r["flags"]
+        p = 3 if "COILING_PRIME" in f else (2 if "COILING" in f else 1)
+        return (p, r["confidence"])
+    emerging.sort(key=sort_key, reverse=True)
+    
     return actionable, emerging
 
 
@@ -456,19 +463,21 @@ def _print_results(
     # Emerging monitoring table (T-2 candidates)
     if emerging:
         tbl = Table(
-            title="🌱 蓄積中（WATCH + EMERGING_SETUP — 1~2 日後可能晉升 LONG）",
+            title="🌱 蓄積監控（可能晉升 LONG）",
             box=box.ROUNDED,
             header_style="bold white on dark_magenta",
             border_style="magenta",
+            show_lines=True,
         )
-        tbl.add_column("股票", style="white", width=14)
+        tbl.add_column("#", justify="center", style="dim", width=4)
+        tbl.add_column("股票", style="bold white", width=14)
+        tbl.add_column("狀態", width=10)
         tbl.add_column("信心", justify="right", width=6)
         tbl.add_column("現價", justify="right", width=10)
-        tbl.add_column("昨收", justify="right", style="dim", width=9)
         tbl.add_column("漲跌", justify="right", width=8)
         tbl.add_column("累計量", justify="right", width=8)
 
-        for e in emerging:
+        for i, e in enumerate(emerging, 1):
             q = e.get("quote") or {}
             price = q.get("price", 0)
             yclose = q.get("yesterday_close", 0)
@@ -484,20 +493,24 @@ def _print_results(
             else:
                 chg_str = "-"
 
+            status_label = "[bold magenta]蓄積★[/bold magenta]" if "COILING_PRIME" in e["flags"] else \
+                           ("[magenta]蓄積[/magenta]" if "COILING" in e["flags"] else "雛形")
+
             name = q.get("name", "")
             ticker_cell = f"{e['ticker']}\n[dim]{name[:4]}[/dim]" if name else e["ticker"]
 
             tbl.add_row(
+                str(i),
                 ticker_cell,
+                status_label,
                 str(e["confidence"]),
                 f"{price:.1f}{src_hint}" if price else "-",
-                f"{yclose:.1f}" if yclose else "-",
                 chg_str,
                 f"{vol:,}" if vol else "-",
             )
         _console.print()
         _console.print(tbl)
-        _console.print("  [dim magenta]→ 尚未達到 LONG 門檻，觀察用。可在昨收附近掛限價單被動佈局。[/dim magenta]")
+        _console.print("  [dim magenta]→ 蓄積狀態代表波動率壓縮且有法人建倉，可在盤整區間內被動佈局。[/dim magenta]")
 
     # Summary
     n_emerging = len(emerging) if emerging else 0

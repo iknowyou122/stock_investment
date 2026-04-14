@@ -115,7 +115,7 @@ def _fetch_isin_tickers(url: str) -> dict[str, tuple[str, str]]:
 def _build_industry_map() -> dict[str, str]:
     """Load or fetch full ticker→industry map (ALL sectors), cached daily.
 
-    Cache files: industry_map_YYYY-MM-DD.json + name_map_YYYY-MM-DD.json
+    Cache files: industry_map_YYYY-MM-DD.json + name_map_YYYY-MM-DD.json + market_map_YYYY-MM-DD.json
     Returns empty dict if fetch fails (caller handles fallback).
     """
     from collections import Counter
@@ -131,23 +131,31 @@ def _build_industry_map() -> dict[str, str]:
             pass
 
     _console.print("[dim]正在從 TWSE/OTC 抓取完整產業清單...[/dim]")
-    all_raw: dict[str, tuple[str, str]] = {}  # {ticker: (industry, name)}
-    for market, url in _ISIN_URLS.items():
+    all_raw: dict[str, tuple[str, str, str]] = {}  # {ticker: (industry, name, market)}
+    for market_key, url in _ISIN_URLS.items():
+        market_label = "TSE" if market_key == "twse" else "TPEx"
         try:
             m = _fetch_isin_tickers(url)
-            _console.print(f"  [dim]{market.upper()}: {len(m)} 檔[/dim]")
-            all_raw.update(m)
+            _console.print(f"  [dim]{market_label}: {len(m)} 檔[/dim]")
+            for ticker, (ind, name) in m.items():
+                all_raw[ticker] = (ind, name, market_label)
         except Exception as e:
-            logger.warning("Failed to fetch %s: %s", market, e)
+            logger.warning("Failed to fetch %s: %s", market_key, e)
 
     if all_raw:
         all_map = {k: v[0] for k, v in all_raw.items()}
         all_names = {k: v[1] for k, v in all_raw.items()}
+        all_markets = {k: v[2] for k, v in all_raw.items()}
         counts = Counter(all_map.values())
         total_sectors = len(counts)
         cache_file.write_text(json.dumps(all_map, ensure_ascii=False))
+        
         name_cache = _CACHE_DIR / f"name_map_{date.today()}.json"
         name_cache.write_text(json.dumps(all_names, ensure_ascii=False))
+        
+        market_cache = _CACHE_DIR / f"market_map_{date.today()}.json"
+        market_cache.write_text(json.dumps(all_markets, ensure_ascii=False))
+        
         _console.print(f"  [dim]合計: {len(all_map)} 檔，{total_sectors} 個產業（已快取至 {cache_file.name}）[/dim]\n")
         return all_map
 
@@ -156,11 +164,24 @@ def _build_industry_map() -> dict[str, str]:
 
 
 def _build_name_map() -> dict[str, str]:
-    """Load ticker→company name map from daily cache (built alongside industry_map)."""
+    """Load ticker→company name map from daily cache."""
     name_cache = _CACHE_DIR / f"name_map_{date.today()}.json"
     if name_cache.exists():
         try:
             data = json.loads(name_cache.read_text())
+            if data:
+                return data
+        except Exception:
+            pass
+    return {}
+
+
+def _build_market_map() -> dict[str, str]:
+    """Load ticker→market (TSE/TPEx) map from daily cache."""
+    market_cache = _CACHE_DIR / f"market_map_{date.today()}.json"
+    if market_cache.exists():
+        try:
+            data = json.loads(market_cache.read_text())
             if data:
                 return data
         except Exception:
@@ -491,7 +512,7 @@ def _make_agent(llm_provider=None, no_llm: bool = False, label_repo=None,
     return agent
 
 
-def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent) -> dict:
+def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: str = "TSE") -> dict:
     """Run pipeline for one ticker using a shared agent; return result dict.
 
     The returned dict includes a '_signal' key with the raw SignalOutput object
@@ -499,7 +520,7 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent) -> dict:
     """
     t0 = time.time()
     try:
-        signal = agent.run(ticker, analysis_date)
+        signal = agent.run(ticker, analysis_date, market=market)
         elapsed = time.time() - t0
         return {
             "ticker": ticker,
@@ -636,8 +657,17 @@ def _print_table(
     table.add_column("Upside", justify="right", style="yellow", width=7)
 
     for i, r in enumerate(valid, 1):
-        action = r["action"] + ("*" if r["free_tier"] else "")
-        action_text = Text(action, style=_action_style(r["action"]))
+        action_str = r["action"] + ("*" if r["free_tier"] else "")
+        flags = r.get("flags") or []
+        
+        # COILING visual treatment
+        coiling_label = ""
+        if "COILING_PRIME" in flags:
+            coiling_label = " [bold magenta]蓄積★[/bold magenta]"
+        elif "COILING" in flags:
+            coiling_label = " [magenta]蓄積[/bold magenta]"
+            
+        action_text = Text.from_markup(f"[{_action_style(r['action'])}]{action_str}[/{_action_style(r['action'])}]{coiling_label}")
         upside_pct = (r["target"] / r["entry_bid"] - 1) * 100 if r["entry_bid"] > 0 else 0
         ticker = r["ticker"]
         if name_map:
@@ -695,6 +725,7 @@ def _run_phase(
     llm_provider=None,
     no_llm: bool = False,
     label_repo=None,
+    market_map: dict[str, str] | None = None,
 ) -> list[dict]:
     """執行一批 ticker 的掃描，回傳 results list（順序不保證）。
 
@@ -707,6 +738,7 @@ def _run_phase(
 
     no_llm=True 強制關閉 LLM（Phase 1 deterministc 用，避免 StrategistAgent 自動偵測 API key）。
     label_repo: shared BrokerLabelRepository instance（read-only，多執行緒安全）。
+    market_map: {ticker: "TSE"|"TPEx"}
     """
     # 建立共用客戶端 — 所有 worker 共享快取
     shared_finmind = FinMindClient()
@@ -733,7 +765,10 @@ def _run_phase(
         task = progress.add_task(f"掃描 {total} 檔", total=total)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_scan_one, ticker, analysis_date, shared_agent): ticker
+                pool.submit(
+                    _scan_one, ticker, analysis_date, shared_agent,
+                    market=market_map.get(ticker, "TSE") if market_map else "TSE"
+                ): ticker
                 for ticker in tickers
             }
             for future in as_completed(futures):
@@ -795,6 +830,7 @@ def run_batch(
     industry_map: dict[str, str] | None = None,
     save_db: bool = False,
     name_map: dict[str, str] | None = None,
+    market_map: dict[str, str] | None = None,
 ) -> None:
     llm_label = getattr(llm_provider, "name", None) or "（無 LLM）"
     label_status = (
@@ -815,11 +851,11 @@ def run_batch(
 
     if llm_provider is None:
         # 純 deterministic：強制關閉 LLM（避免 StrategistAgent 自動偵測 API key）
-        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo)
+        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo, market_map=market_map)
     else:
         # 永遠兩階段：Phase 1 全量 deterministic → Phase 2 top N with LLM
         _console.print(f"\n[bold cyan][Phase 1][/bold cyan] deterministic scan：{len(tickers)} 檔")
-        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo)
+        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo, market_map=market_map)
 
         # 排序有效結果
         eligible = sorted(
@@ -843,7 +879,7 @@ def run_batch(
         else:
             _console.print(f"\n[bold cyan][Phase 2][/bold cyan] 送前 {llm_top} 名給 [cyan]{llm_label}[/cyan]：{', '.join(llm_tickers)}")
             p2_workers = min(3, len(llm_tickers))
-            phase2 = _run_phase(llm_tickers, analysis_date, p2_workers, llm_provider=llm_provider, label_repo=label_repo)
+            phase2 = _run_phase(llm_tickers, analysis_date, p2_workers, llm_provider=llm_provider, label_repo=label_repo, market_map=market_map)
             p2_valid = {r["ticker"]: r for r in phase2 if r.get("error") is None}
             results = [p2_valid.get(r["ticker"], r) for r in results]
 
@@ -1067,6 +1103,7 @@ def main() -> None:
     label_repo = _make_label_repo()
 
     name_map = _build_name_map()
+    market_map = _build_market_map()
 
     run_batch(
         tickers, args.date, args.top, args.min_confidence, args.workers,
@@ -1074,6 +1111,7 @@ def main() -> None:
         industry_map=industry_map,
         save_db=args.save_db,
         name_map=name_map,
+        market_map=market_map,
     )
 
 
