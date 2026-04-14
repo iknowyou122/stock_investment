@@ -126,6 +126,15 @@ _CAUTION_THRESHOLD = 39
 _MA20_SLOPE_MIN_SESSIONS = 25   # 20 (MA window) + 5 (diff lookback) so iloc[-6] is valid
 _MA20_SLOPE_DIFF_DAYS = 5       # compare MA20 today vs 5 sessions ago
 
+# v2.2a Liquidity Gate — daily turnover thresholds (NT$).
+# Amount-based instead of share-count so high-priced stocks aren't over-filtered
+# and low-priced stocks aren't under-filtered.
+_LIQUIDITY_THRESHOLDS: dict[str, float] = {
+    "TSE":  20_000_000.0,   # NT$ 20M/day (≈ 400 張 @ 50元, ≈ 100 張 @ 200元)
+    "TPEx":  8_000_000.0,   # NT$ 8M/day — TPEx boards are typically thinner
+}
+_DEFAULT_MARKET = "TSE"
+
 # Known FII branch codes (hardcoded; stable, ~1-2 changes per year)
 # Do NOT import from broker_label_classifier to avoid coupling.
 _KNOWN_FII_BRANCH_CODES: dict[str, str] = {
@@ -386,6 +395,7 @@ class TripleConfirmationEngine:
     def __init__(self, free_tier_mode: bool = False) -> None:
         self._free_tier_mode = free_tier_mode
         self._taiex_history: list[DailyOHLCV] = []
+        self._market: str = _DEFAULT_MARKET
 
     # ------------------------------------------------------------------
     # Public API — signatures unchanged from v1
@@ -399,9 +409,11 @@ class TripleConfirmationEngine:
         volume_profile: VolumeProfile,
         twse_proxy: TWSEChipProxy | None = None,
         taiex_history: list[DailyOHLCV] | None = None,
+        market: str = _DEFAULT_MARKET,
     ) -> SignalOutput:
         """Compute deterministic v2 confidence and return a SignalOutput."""
         self._taiex_history = taiex_history or []
+        self._market = market if market in _LIQUIDITY_THRESHOLDS else _DEFAULT_MARKET
         breakdown = self._compute(ohlcv, ohlcv_history, chip_report, volume_profile, twse_proxy)
         return self._build_signal(ohlcv, breakdown, volume_profile, chip_report)
 
@@ -413,9 +425,11 @@ class TripleConfirmationEngine:
         volume_profile: VolumeProfile,
         twse_proxy: TWSEChipProxy | None = None,
         taiex_history: list[DailyOHLCV] | None = None,
+        market: str = _DEFAULT_MARKET,
     ) -> tuple[SignalOutput, _ScoreBreakdown]:
         """Same as score() but also returns the breakdown for LLM prompting."""
         self._taiex_history = taiex_history or []
+        self._market = market if market in _LIQUIDITY_THRESHOLDS else _DEFAULT_MARKET
         breakdown = self._compute(ohlcv, ohlcv_history, chip_report, volume_profile, twse_proxy)
         return self._build_signal(ohlcv, breakdown, volume_profile, chip_report), breakdown
 
@@ -427,9 +441,11 @@ class TripleConfirmationEngine:
         volume_profile: VolumeProfile,
         twse_proxy: TWSEChipProxy | None = None,
         taiex_history: list[DailyOHLCV] | None = None,
+        market: str = _DEFAULT_MARKET,
     ) -> tuple[SignalOutput, _ScoreBreakdown, _AnalysisHints]:
         """Score + breakdown + analysis hints. Use this from StrategistAgent."""
         self._taiex_history = taiex_history or []
+        self._market = market if market in _LIQUIDITY_THRESHOLDS else _DEFAULT_MARKET
         breakdown = self._compute(ohlcv, ohlcv_history, chip_report, volume_profile, twse_proxy)
         hints = self._compute_hints(ohlcv, ohlcv_history, twse_proxy=twse_proxy)
         signal = self._build_signal(ohlcv, breakdown, volume_profile, chip_report)
@@ -541,6 +557,30 @@ class TripleConfirmationEngine:
         twse_proxy: TWSEChipProxy | None,
     ) -> _ScoreBreakdown:
         bd = _ScoreBreakdown()
+
+        # --- v2.2a Liquidity Gate (hard exclusion by daily turnover) ---
+        turnover_20ma = self._turnover_20ma(ohlcv_history)
+        threshold = _LIQUIDITY_THRESHOLDS.get(self._market, _LIQUIDITY_THRESHOLDS[_DEFAULT_MARKET])
+        if turnover_20ma is not None and turnover_20ma < threshold:
+            bd.flags.append(
+                f"LOW_LIQUIDITY:{self._market}:{turnover_20ma/1e6:.1f}M<{threshold/1e6:.0f}M"
+            )
+            bd.flags.append("NO_SETUP")
+            return bd
+
+        # --- v2.2b COILING Detector (runs independently of regular gate) ---
+        # COILING detects pre-breakout bases, which by definition do NOT pass
+        # the momentum-focused regular gate (VOL > 1.2x, close near high, etc.).
+        # So we compute it here and tag breakdown regardless of gate outcome.
+        regime_for_coiling = self._compute_taiex_regime(getattr(self, "_taiex_history", []))
+        coiling_score, coiling_flags = self._coiling_detect(
+            ohlcv, ohlcv_history, volume_profile, twse_proxy, regime_for_coiling
+        )
+        bd.flags.extend(coiling_flags)
+        if coiling_score >= 4:
+            bd.flags.append("COILING_PRIME")
+        elif coiling_score >= 3:
+            bd.flags.append("COILING")
 
         # --- Gate check first ---
         gate_passes, gate_available, gate_met, gate_detail_flags = self._gate_check(
@@ -1448,8 +1488,13 @@ class TripleConfirmationEngine:
                 if any(f.startswith(p) for p in (
                     "GATE_PASS:", "GATE_FAIL:", "GATE_SKIP:",
                     "INSUFFICIENT_GATE_DATA:", "GATE_MET:", "GATE_AVAILABLE:",
+                    "LOW_LIQUIDITY:",
                 )):
                     data_quality_flags.append(f)
+            # v2.2b: COILING flag on gate-failed stocks is still meaningful for watchlist surfacing
+            for tag in ("COILING_PRIME", "COILING"):
+                if tag in breakdown.flags and tag not in data_quality_flags:
+                    data_quality_flags.append(tag)
             data_quality_flags.append("NO_SETUP")
             # Top-level summary when data was insufficient
             if any(f.startswith("INSUFFICIENT_GATE_DATA:") for f in breakdown.flags):
@@ -1475,6 +1520,11 @@ class TripleConfirmationEngine:
         data_quality_flags.extend(chip_report.data_quality_flags)
         data_quality_flags.extend(volume_profile.data_quality_flags)
         data_quality_flags.append("scoring_version:v2")
+
+        # v2.2b: propagate COILING / COILING_PRIME flags (set in _compute)
+        for tag in ("COILING_PRIME", "COILING"):
+            if tag in breakdown.flags and tag not in data_quality_flags:
+                data_quality_flags.append(tag)
 
         # EMERGING_SETUP: WATCH stocks with pre-breakout characteristics
         # MA aligned + MA20 slope up + institutional buying + no breakout yet
@@ -1611,6 +1661,124 @@ class TripleConfirmationEngine:
         if len(recent) < 20:
             return None
         return sum(d.volume for d in recent) / len(recent)
+
+    @staticmethod
+    def _turnover_20ma(history: list[DailyOHLCV]) -> float | None:
+        """20-session simple moving average of daily turnover (NT$).
+
+        turnover_i = close_i × volume_i. Used by v2.2a liquidity gate so
+        the threshold auto-adapts to high/low priced stocks.
+        """
+        recent = sorted(history, key=lambda x: x.trade_date)[-20:]
+        if len(recent) < 20:
+            return None
+        return sum(d.close * d.volume for d in recent) / len(recent)
+
+    def _coiling_detect(
+        self,
+        ohlcv: DailyOHLCV,
+        history: list[DailyOHLCV],
+        volume_profile: VolumeProfile,
+        twse_proxy: TWSEChipProxy | None,
+        regime: str,
+    ) -> tuple[int, list[str]]:
+        """v2.2b COILING detector — Gate (6 mandatory) + Quality Score (5 K-of-N).
+
+        Returns (score, flags). Score ∈ [0, 5]; 0 means Gate failed.
+        Flags document which condition fired (for debugging / LLM hints).
+        """
+        sorted_hist = sorted(history, key=lambda x: x.trade_date)
+        if len(sorted_hist) < 60:
+            return 0, ["COILING_SKIP:INSUFFICIENT_HISTORY"]
+
+        closes = [d.close for d in sorted_hist]
+        highs = [d.high for d in sorted_hist]
+        lows = [d.low for d in sorted_hist]
+        volumes = [d.volume for d in sorted_hist]
+
+        # --- Gate G2: MA20 > MA60 and MA20 slope ≥ 0 ---
+        ma20_today = sum(closes[-20:]) / 20
+        ma60_today = sum(closes[-60:]) / 60
+        if ma20_today <= ma60_today:
+            return 0, ["COILING_FAIL:G2_MA20_LE_MA60"]
+        if len(closes) >= 25:
+            ma20_5d_ago = sum(closes[-25:-5]) / 20
+            if ma20_today < ma20_5d_ago:
+                return 0, ["COILING_FAIL:G2_MA20_SLOPE_DOWN"]
+
+        # --- Gate G3: TAIEX regime != downtrend ---
+        if regime == "downtrend":
+            return 0, ["COILING_FAIL:G3_TAIEX_DOWNTREND"]
+
+        # --- Gate G4: pivot range over last 5 sessions < 5% ---
+        last5_highs = highs[-4:] + [ohlcv.high]
+        last5_lows = lows[-4:] + [ohlcv.low]
+        pivot_low = min(last5_lows)
+        pivot_high = max(last5_highs)
+        if pivot_low <= 0:
+            return 0, ["COILING_FAIL:G4_NO_RANGE"]
+        pivot_range = (pivot_high - pivot_low) / pivot_low
+        if pivot_range >= 0.05:
+            return 0, [f"COILING_FAIL:G4_RANGE_{pivot_range*100:.1f}PCT"]
+
+        # --- Gate G5: no breakout in last 5 sessions (close < 20d_high) ---
+        twenty_day_high = volume_profile.twenty_day_high
+        last5_closes = closes[-4:] + [ohlcv.close]
+        if twenty_day_high > 0 and max(last5_closes) >= twenty_day_high:
+            return 0, ["COILING_FAIL:G5_ALREADY_BROKE"]
+
+        # --- Gate G6: close ≥ max(close[-10:]) × 0.97 (sit on platform top) ---
+        last10_closes = closes[-9:] + [ohlcv.close]
+        platform_top = max(last10_closes)
+        if ohlcv.close < platform_top * 0.97:
+            return 0, ["COILING_FAIL:G6_BELOW_PLATFORM"]
+
+        # Gate passed — compute Quality Score
+        flags: list[str] = ["COILING_GATE_PASS"]
+        score = 0
+
+        # --- Q1: Bollinger squeeze — bb_width_percentile < 20 ---
+        _, _, _, bb_width_pct = self._calculate_bb(sorted_hist)
+        if bb_width_pct is not None and bb_width_pct < 20.0:
+            score += 1
+            flags.append(f"COILING_Q1_SQUEEZE:{bb_width_pct:.0f}")
+
+        # --- Q2: volume dry-up — 5d avg vol < 20d avg vol × 0.9 ---
+        if len(volumes) >= 20:
+            vol_20ma = sum(volumes[-20:]) / 20
+            vol_5ma = sum(volumes[-5:]) / 5
+            if vol_20ma > 0 and vol_5ma < vol_20ma * 0.9:
+                score += 1
+                flags.append(f"COILING_Q2_DRYUP:{vol_5ma/vol_20ma:.2f}")
+
+        # --- Q3: institutional continuous buying (3+ consecutive days) ---
+        if twse_proxy is not None and twse_proxy.is_available:
+            if (
+                twse_proxy.foreign_consecutive_buy_days >= 3
+                or twse_proxy.trust_consecutive_buy_days >= 3
+            ):
+                score += 1
+                flags.append("COILING_Q3_CHIP_CONTINUOUS")
+
+        # --- Q4: prior constructive advance — close / min(close[-60:]) ≥ 1.15 ---
+        min60 = min(closes[-60:])
+        if min60 > 0 and ohlcv.close / min60 >= 1.15:
+            score += 1
+            flags.append(f"COILING_Q4_PRIOR_RUN:{(ohlcv.close/min60-1)*100:.0f}PCT")
+
+        # --- Q5: close strength — last 5 sessions avg (close-low)/(high-low) > 0.5 ---
+        recent5 = sorted_hist[-4:] + [ohlcv]
+        strengths: list[float] = []
+        for d in recent5:
+            rng = d.high - d.low
+            if rng > 0:
+                strengths.append((d.close - d.low) / rng)
+        if strengths and sum(strengths) / len(strengths) > 0.5:
+            score += 1
+            flags.append("COILING_Q5_CLOSE_STRONG")
+
+        flags.append(f"COILING_SCORE:{score}")
+        return score, flags
 
     @staticmethod
     def _ma20_slope(history: list[DailyOHLCV]) -> float | None:

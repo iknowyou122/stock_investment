@@ -1283,3 +1283,256 @@ class TestRSIMomentumRecalibration:
         # If it's in 30-55, it should get 4 pts
         assert pts in (0, 4)
 
+
+
+# ---------------------------------------------------------------------------
+# v2.2a Liquidity Gate
+# ---------------------------------------------------------------------------
+
+def _history_with_turnover(avg_turnover: float, n: int = 70) -> list[DailyOHLCV]:
+    """Generate history with flat price so turnover = close * volume is stable."""
+    close = 50.0
+    vol = int(avg_turnover / close)
+    result = []
+    d = date(2025, 1, 2)
+    for i in range(n):
+        result.append(
+            DailyOHLCV(
+                ticker="TEST",
+                trade_date=d + timedelta(days=i),
+                open=close, high=close + 0.2, low=close - 0.2,
+                close=close, volume=vol,
+            )
+        )
+    return result
+
+
+class TestLiquidityGate:
+    def test_tse_below_threshold_triggers_low_liquidity(self):
+        engine = TripleConfirmationEngine()
+        history = _history_with_turnover(avg_turnover=15_000_000)  # 1500萬 < 2000萬
+        today = _make_ohlcv(close=50.0, volume=300_000, trade_date=date(2025, 3, 13))
+        signal = engine.score(
+            ohlcv=today, ohlcv_history=history,
+            chip_report=_make_chip_report(), volume_profile=_make_volume_profile(),
+            market="TSE",
+        )
+        assert signal.action == "CAUTION"
+        assert signal.confidence == 0
+        assert "NO_SETUP" in signal.data_quality_flags
+        assert any(f.startswith("LOW_LIQUIDITY:TSE") for f in signal.data_quality_flags)
+
+    def test_tse_above_threshold_passes_liquidity_gate(self):
+        engine = TripleConfirmationEngine()
+        history = _history_with_turnover(avg_turnover=25_000_000)  # 2500萬 > 2000萬
+        today = _make_ohlcv(close=50.0, volume=500_000, trade_date=date(2025, 3, 13))
+        _, breakdown = engine.score_with_breakdown(
+            ohlcv=today, ohlcv_history=history,
+            chip_report=_make_chip_report(), volume_profile=_make_volume_profile(),
+            market="TSE",
+        )
+        assert not any(f.startswith("LOW_LIQUIDITY") for f in breakdown.flags)
+
+    def test_tpex_lower_threshold_applied(self):
+        """TPEx 800萬 threshold — 1000萬 passes, 500萬 fails."""
+        engine = TripleConfirmationEngine()
+        # Below TPEx threshold (500萬 < 800萬) but above nothing
+        history_fail = _history_with_turnover(avg_turnover=5_000_000)
+        today = _make_ohlcv(close=50.0, volume=100_000, trade_date=date(2025, 3, 13))
+        signal = engine.score(
+            ohlcv=today, ohlcv_history=history_fail,
+            chip_report=_make_chip_report(), volume_profile=_make_volume_profile(),
+            market="TPEx",
+        )
+        assert "NO_SETUP" in signal.data_quality_flags
+        assert any(f.startswith("LOW_LIQUIDITY:TPEx") for f in signal.data_quality_flags)
+
+        # Above TPEx threshold (1000萬 > 800萬) — but would still fail TSE (< 2000萬)
+        history_pass = _history_with_turnover(avg_turnover=10_000_000)
+        _, bd = engine.score_with_breakdown(
+            ohlcv=today, ohlcv_history=history_pass,
+            chip_report=_make_chip_report(), volume_profile=_make_volume_profile(),
+            market="TPEx",
+        )
+        assert not any(f.startswith("LOW_LIQUIDITY") for f in bd.flags)
+
+    def test_turnover_20ma_helper(self):
+        engine = TripleConfirmationEngine()
+        history = _history_with_turnover(avg_turnover=30_000_000)
+        turnover = engine._turnover_20ma(history)
+        assert turnover is not None
+        assert abs(turnover - 30_000_000) < 1_000  # rounding tolerance
+
+    def test_turnover_20ma_insufficient_history(self):
+        engine = TripleConfirmationEngine()
+        history = _history_with_turnover(avg_turnover=30_000_000, n=10)  # only 10 days
+        assert engine._turnover_20ma(history) is None
+
+
+# ---------------------------------------------------------------------------
+# v2.2b COILING Detector
+# ---------------------------------------------------------------------------
+
+def _make_coiling_history(
+    n: int = 70,
+    start: float = 80.0,
+    peak: float = 100.0,
+    plateau: float = 98.0,
+    base_vol: int = 800_000,
+    squeeze_vol: int = 600_000,
+) -> list[DailyOHLCV]:
+    """Build a classic VCP-style base: rise → plateau with tight range.
+
+    Days [0, n-10): linear rise start → peak (builds prior run).
+    Days [n-10, n): tight consolidation around `plateau` (< 5% range).
+    """
+    result = []
+    d = date(2025, 1, 2)
+    rise_days = n - 10
+    for i in range(rise_days):
+        close = start + (peak - start) * (i / max(rise_days - 1, 1))
+        result.append(
+            DailyOHLCV(
+                ticker="TEST",
+                trade_date=d + timedelta(days=i),
+                open=close, high=close + 0.3, low=close - 0.3,
+                close=close, volume=base_vol,
+            )
+        )
+    # Tight plateau (range < 5%)
+    for i in range(10):
+        close = plateau + (i % 3) * 0.15  # < 0.5% wiggle
+        result.append(
+            DailyOHLCV(
+                ticker="TEST",
+                trade_date=d + timedelta(days=rise_days + i),
+                open=close, high=close + 0.2, low=close - 0.2,
+                close=close, volume=squeeze_vol,  # dry-up
+            )
+        )
+    return result
+
+
+def _make_taiex_uptrend(n: int = 70) -> list[DailyOHLCV]:
+    """TAIEX in uptrend so COILING G3 passes."""
+    result = []
+    d = date(2025, 1, 2)
+    for i in range(n):
+        close = 15000.0 + i * 10
+        result.append(
+            DailyOHLCV(
+                ticker="TAIEX", trade_date=d + timedelta(days=i),
+                open=close, high=close + 20, low=close - 20,
+                close=close, volume=1_000_000_000,
+            )
+        )
+    return result
+
+
+class TestCoilingDetector:
+    def test_vcp_pattern_triggers_coiling(self):
+        engine = TripleConfirmationEngine()
+        history = _make_coiling_history()
+        # Today sits at plateau top, matching prior 10 days
+        today = _make_ohlcv(
+            close=98.15, volume=650_000,
+            high=98.3, low=98.0,
+            trade_date=date(2025, 3, 20),
+        )
+        vp = _make_volume_profile(twenty_day_high=105.0)  # not yet broken
+        proxy = _make_twse_proxy(
+            foreign_consecutive_buy_days=3,
+            avg_20d_volume=750_000,
+            is_available=True,
+        )
+        _, bd = engine.score_with_breakdown(
+            ohlcv=today, ohlcv_history=history,
+            chip_report=_make_chip_report(net_buyer_diff=0, active_branches=0),
+            volume_profile=vp,
+            twse_proxy=proxy,
+            taiex_history=_make_taiex_uptrend(),
+            market="TSE",
+        )
+        assert "COILING_GATE_PASS" in bd.flags
+        # Should fire at least COILING (score >= 3)
+        assert "COILING" in bd.flags or "COILING_PRIME" in bd.flags
+
+    def test_downtrend_taiex_fails_g3(self):
+        engine = TripleConfirmationEngine()
+        history = _make_coiling_history()
+        today = _make_ohlcv(close=98.15, volume=650_000, trade_date=date(2025, 3, 20))
+        # TAIEX downtrend
+        taiex_down = []
+        d = date(2025, 1, 2)
+        for i in range(70):
+            c = 16000.0 - i * 80  # steep drop so MA20 slope < -1%
+            taiex_down.append(DailyOHLCV(
+                ticker="TAIEX", trade_date=d + timedelta(days=i),
+                open=c, high=c + 10, low=c - 10, close=c, volume=1_000_000_000,
+            ))
+        _, bd = engine.score_with_breakdown(
+            ohlcv=today, ohlcv_history=history,
+            chip_report=_make_chip_report(net_buyer_diff=0, active_branches=0),
+            volume_profile=_make_volume_profile(twenty_day_high=105.0),
+            taiex_history=taiex_down,
+            market="TSE",
+        )
+        assert "COILING_FAIL:G3_TAIEX_DOWNTREND" in bd.flags
+        assert "COILING" not in bd.flags
+        assert "COILING_PRIME" not in bd.flags
+
+    def test_already_broke_out_fails_g5(self):
+        engine = TripleConfirmationEngine()
+        history = _make_coiling_history()
+        today = _make_ohlcv(close=98.15, volume=650_000, trade_date=date(2025, 3, 20))
+        # twenty_day_high below plateau → G5 says we've already broken above it
+        vp = _make_volume_profile(twenty_day_high=97.0)
+        _, bd = engine.score_with_breakdown(
+            ohlcv=today, ohlcv_history=history,
+            chip_report=_make_chip_report(net_buyer_diff=0, active_branches=0),
+            volume_profile=vp,
+            taiex_history=_make_taiex_uptrend(),
+            market="TSE",
+        )
+        assert "COILING_FAIL:G5_ALREADY_BROKE" in bd.flags
+
+    def test_wide_range_fails_g4(self):
+        engine = TripleConfirmationEngine()
+        # Build history with wide last-5 range
+        history = _make_coiling_history()
+        # Overwrite last 4 bars with wide swings
+        history = history[:-4]
+        d0 = history[-1].trade_date
+        for i, close in enumerate([95.0, 103.0, 96.0, 102.0]):
+            history.append(DailyOHLCV(
+                ticker="TEST", trade_date=d0 + timedelta(days=i + 1),
+                open=close, high=close + 1, low=close - 1, close=close, volume=800_000,
+            ))
+        today = _make_ohlcv(
+            close=99.0, volume=650_000,
+            high=104.0, low=94.0,  # extreme
+            trade_date=date(2025, 3, 25),
+        )
+        _, bd = engine.score_with_breakdown(
+            ohlcv=today, ohlcv_history=history,
+            chip_report=_make_chip_report(net_buyer_diff=0, active_branches=0),
+            volume_profile=_make_volume_profile(twenty_day_high=110.0),
+            taiex_history=_make_taiex_uptrend(),
+            market="TSE",
+        )
+        assert any(f.startswith("COILING_FAIL:G4_RANGE_") for f in bd.flags)
+
+    def test_insufficient_history_skips(self):
+        engine = TripleConfirmationEngine()
+        history = _make_history(30)  # < 60 bars
+        today = _make_ohlcv(close=115.0, volume=500_000, trade_date=date(2025, 2, 15))
+        # Call detector directly — avoids liquidity gate early-return
+        score, flags = engine._coiling_detect(
+            ohlcv=today,
+            history=history,
+            volume_profile=_make_volume_profile(twenty_day_high=120.0),
+            twse_proxy=None,
+            regime="uptrend",
+        )
+        assert score == 0
+        assert "COILING_SKIP:INSUFFICIENT_HISTORY" in flags

@@ -62,8 +62,8 @@ def _make_mock_ohlcv_df(
     """Generate n rows of ascending OHLCV with the last row set to analysis_date.
 
     The last row (analysis_date) has volume 3x the 20-day average to ensure the
-    volume-surge pillar fires. History rows use uniform 10,000 volume so the
-    20-day MA is stable and the multiplier is predictable.
+    volume-surge pillar fires. Baseline volume is set high enough that
+    turnover (close × volume) clears the v2.2a liquidity gate (TSE 20M NT$).
     """
     rows = []
     for i in range(n):
@@ -77,7 +77,7 @@ def _make_mock_ohlcv_df(
                 "high": close + 1,
                 "low": close - 2,
                 "close": close,
-                "volume": 10_000,  # uniform baseline so 20-day MA = 10,000
+                "volume": 300_000,  # turnover ≈ 30M NT$ > 20M liquidity gate
             }
         )
     # Last row: analysis_date with volume surge (3x avg) and close at 20d high
@@ -87,7 +87,7 @@ def _make_mock_ohlcv_df(
             "trade_date": analysis_date,
             "close": last_close,
             "high": last_close + 1,
-            "volume": 30_000,  # 3x > 1.5x threshold
+            "volume": 900_000,  # 3x > 1.5x threshold
         }
     )
     return pd.DataFrame(rows)
