@@ -141,13 +141,18 @@
 **Effort:** XS (human: 30 min / CC: ~5 min)
 **Priority:** P1 within chip expansion — must do BEFORE implementing _fetch_sbl_data().
 
-## v2 Factor Engine — Deferred (from /autoplan 2026-04-01)
+## v2 Factor Engine (Accumulation Engine 2026-04-13)
 
-### P1 (blocking for v2)
-- [ ] `TWSEChipProxy.avg_20d_volume` field — required for ratio-based 外資/投信/自營商 free-tier factors
-- [ ] Migration 007: `signal_outcomes.scoring_version` column — must land before first v2 signal
-- [ ] Fix: `(close - low) / (high - low)` ZeroDivisionError when `high == low` (limit-up/halt)
-- [ ] Fix: Gate condition 3 passes silently when `twenty_day_high == 0.0` on partial-history stocks
+### Completed (2026-04-13)
+- [x] **Accumulation Engine implementation**: Pillar 4 (EMERGING_SETUP, PULLBACK_SETUP, BB_SQUEEZE_COILING).
+- [x] **Threshold recalibration**: Lowered LONG thresholds (50/55) and WATCH (40).
+- [x] **Gate 2-of-5**: Added institutional condition (Foreign/Trust net buy >= 2 of last 3 days).
+- [x] **RSI range shift**: Moved momentum bonus range to 30-55 (recalibration).
+- [x] **Risk cleanup**: Removed overheat MA20/MA60 deductions (data-driven lift).
+- [x] **UI Enhancement**: `make scan` supports shortcuts 'd' (default sectors) and 'a' (all).
+- [x] `TWSEChipProxy.avg_20d_volume` and `institution_buy_2_of_3` fields.
+- [x] Fix: `(close - low) / (high - low)` handling for limit-up/halt.
+- [x] Fix: Gate condition 3 guard for `twenty_day_high == 0.0`.
 
 ### P2 (v2.1)
 - [ ] IC Analysis Sprint — backtest v1 factor IC after 20 trading days of v2 live signals; calibrate weights in v2.1

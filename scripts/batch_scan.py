@@ -65,14 +65,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
-# 預設產業別（互動模式的 Enter 預設值）
+# 預設產業別（互動模式的 Enter 預設值：電子相關產業）
 # -------------------------------------------------------------------
 _DEFAULT_SECTOR_NAMES = {
-    "半導體業",
     "光電業",
-    "電腦及週邊設備業",
-    "電子零組件業",
     "其他電子業",
+    "半導體業",
+    "通信網路業",
+    "電子通路業",
+    "電子零組件業",
+    "電腦及週邊設備業",
 }
 
 _ISIN_URLS = {
@@ -202,12 +204,24 @@ def _select_sectors(
     rows: list[tuple[int, str, int]],
     default_names: set[str],
 ) -> set[str]:
-    """Prompt user to pick sectors by number. Enter → scan ALL sectors."""
+    """Prompt user to pick sectors by number.
+    'd' or Enter -> Default (Electronics sectors)
+    'a' -> All sectors
+    """
     all_names = {name for _, name, _ in rows}
-    _console.print(f"\n[bold yellow]請輸入產業代號[/bold yellow]（空白分隔），直接 Enter 掃全部 [dim]({len(all_names)} 個產業)[/dim]")
-    raw = _console.input("[bold cyan]> [/bold cyan]").strip()
-    if not raw:
+    _console.print(f"\n[bold yellow]請輸入產業代號[/bold yellow] (空白分隔)")
+    _console.print(f"  [cyan]'d'[/cyan] 或 [white]Enter[/white] : 預設電子產業 [dim]({len(default_names)} 個)[/dim]")
+    _console.print(f"  [cyan]'a'[/cyan] : 掃描全市場 [dim]({len(all_names)} 個)[/dim]")
+
+    raw = _console.input("[bold cyan]> [/bold cyan]").strip().lower()
+
+    if not raw or raw == 'd':
+        _console.print(f"  [green]→ 使用預設電子產業[/green]")
+        return default_names
+    if raw == 'a':
+        _console.print(f"  [green]→ 掃描全市場[/green]")
         return all_names
+
     idx_map = {i: name for i, name, _ in rows}
     selected: set[str] = set()
     for token in raw.split():
@@ -215,7 +229,7 @@ def _select_sectors(
             selected.add(idx_map[int(token)])
         except (ValueError, KeyError):
             _console.print(f"  [red]忽略無效代號: {token}[/red]")
-    return selected or all_names
+    return selected or default_names
 
 
 def _llm_menu() -> tuple:
