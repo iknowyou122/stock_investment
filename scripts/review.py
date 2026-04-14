@@ -208,6 +208,7 @@ def run_t1_settle(review_date: date) -> list[dict]:
         close = q["price"]
         high = q["high"]
         low = q["low"]
+        name = q.get("name", "")
 
         # entry_success: price touched entry zone AND didn't blow stop
         # If stop_loss is NULL (old signals before migration), derive from entry_price
@@ -219,6 +220,7 @@ def run_t1_settle(review_date: date) -> list[dict]:
         settled.append({
             "signal_id": signal_id,
             "ticker": ticker,
+            "name": name,
             "entry_price": entry_price,
             "stop_loss": sl,
             "confidence": conf,
@@ -658,8 +660,11 @@ def _print_report(
             entry_icon = "[green]O[/green]" if s["entry_success"] else "[red]X[/red]"
             win_icon = "[green]WIN[/green]" if pct > 0 else "[red]LOSS[/red]"
 
+            name = s.get("name", "")
+            ticker_cell = f"{s['ticker']}\n[dim]{name[:4]}[/dim]" if name else s["ticker"]
+
             tbl.add_row(
-                s["ticker"],
+                ticker_cell,
                 str(s["confidence"]),
                 f"{s['entry_price']:.1f}",
                 f"{s['close']:.1f}",

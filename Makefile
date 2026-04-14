@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: scan precheck precheck-t2 settle backtest factor-report optimize test setup migrate api install review daily show
+.PHONY: plan trade precheck-t2 report settle backtest factor-report optimize test setup migrate api install flow show
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -12,30 +12,31 @@ LLM  ?=
 install:
 	$(PYTHON) -m pip install -e ".[llm-gemini,llm-openai]"
 
-# ── 每日掃描（主流程）────────────────────────────────────────────────────────
-# 掃描 + 存 CSV（precheck 用）+ 寫 DB（factor-report 用）
-# 用法: make scan
-#       make scan LLM=gemini LLM_TOP=5
-#       make scan SECTORS="1 4"
+# ── 盤後擬定計畫 (Plan) ──────────────────────────────────────────────────────
+# 掃描 + 存 CSV（trade 用）+ 寫 DB（factor-report 用）
+# 用法: make plan
+#       make plan LLM=gemini LLM_TOP=5
+#       make plan SECTORS="1 4"
 SECTORS ?=
 LLM_TOP ?=
+SORT    ?= trend
 
-scan:
+plan:
 ifeq ($(DATE),$(_TODAY))
-	$(PYTHON) scripts/batch_scan.py --save-csv --save-db $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS))
+	$(PYTHON) scripts/batch_scan.py --save-csv --save-db --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS))
 else
-	$(PYTHON) scripts/batch_scan.py --save-csv --save-db --date $(DATE) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS))
+	$(PYTHON) scripts/batch_scan.py --save-csv --save-db --date $(DATE) --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS))
 endif
 
-# ── 盤中確認 ─────────────────────────────────────────────────────────────────
+# ── 盤中執行交易 (Trade) ──────────────────────────────────────────────────────
 # 讀取昨日 CSV → 即時報價 → 哪些還能進場
-# 用法: make precheck
-#       make precheck TOP=10 MIN_CONF=50
+# 用法: make trade
+#       make trade TOP=10 MIN_CONF=50
 TOP     ?= 20
 MIN_CONF ?= 40
 CSV     ?=
 
-precheck:
+trade:
 	$(PYTHON) scripts/precheck.py \
 		--top $(TOP) \
 		--min-confidence $(MIN_CONF) \
@@ -43,7 +44,6 @@ precheck:
 
 # T+2 進場確認：自動載入 2 個交易日前的 CSV（D+2 勝率 55.6% > D+0 38.5%）
 # 用法: make precheck-t2
-#       make precheck-t2 TOP=10 MIN_CONF=50
 precheck-t2:
 	$(PYTHON) scripts/precheck.py \
 		--t2 \
@@ -53,7 +53,6 @@ precheck-t2:
 # ── 歷史掃描結果查詢 ──────────────────────────────────────────────────────────
 # 用法: make show              # 互動式選擇日期
 #       make show SHOW_DATE=2026-04-10
-#       make show SHOW_DATE=2026-04-10 TOP=20
 SHOW_DATE ?=
 show:
 	$(PYTHON) scripts/batch_scan.py --show "$(SHOW_DATE)" --top $(TOP) --min-confidence $(MIN_CONF)
@@ -69,11 +68,9 @@ endif
 
 # ── 歷史回測 ─────────────────────────────────────────────────────────────────
 # 用法: make backtest
-#       make backtest DATE_FROM=2025-10-01 DATE_TO=2026-03-31 LLM=none
-#       make backtest ENTRY_DELAY=1    # T-1 佈局驗證
 DATE_FROM      ?=
 DATE_TO        ?=
-BACKTEST_TICKERS ?=
+TICKERS        ?=
 ENTRY_DELAY    ?=
 
 backtest:
@@ -81,7 +78,7 @@ backtest:
 		$(if $(DATE_FROM),--date-from $(DATE_FROM)) \
 		$(if $(DATE_TO),--date-to $(DATE_TO)) \
 		$(if $(LLM),--llm $(LLM)) \
-		$(if $(BACKTEST_TICKERS),--tickers $(BACKTEST_TICKERS)) \
+		$(if $(TICKERS),--tickers $(TICKERS)) \
 		$(if $(SECTORS),--sectors $(SECTORS)) \
 		$(if $(ENTRY_DELAY),--entry-delay $(ENTRY_DELAY))
 
@@ -92,8 +89,6 @@ factor-report:
 	$(PYTHON) scripts/factor_report.py $(if $(FACTOR_DAYS),--days $(FACTOR_DAYS))
 
 # ── 一鍵優化迴路 ─────────────────────────────────────────────────────────────
-# 用法: make optimize
-#       make optimize AUTO_APPROVE=1   # 全自動
 DAYS         ?=
 AUTO_APPROVE ?=
 DRY_RUN      ?=
@@ -121,24 +116,23 @@ migrate:
 api:
 	$(PYTHON) -m uvicorn taiwan_stock_agent.api.main:app --reload --port 8000
 
-# ── 盤後復盤 ─────────────────────────────────────────────────────────────────
+# ── 盤後產出報告 (Report) ──────────────────────────────────────────────────────
 # T+1 結算、勝率、A/B 參數競賽
-# 用法: make review
-#       make review DATE=2026-04-09
-review:
+# 用法: make report
+#       make report DATE=2026-04-09
+report:
 ifeq ($(DATE),$(_TODAY))
 	$(PYTHON) scripts/review.py
 else
 	$(PYTHON) scripts/review.py --date $(DATE)
 endif
 
-# ── 完整每日流程 ─────────────────────────────────────────────────────────────
-# 掃描 + 復盤（一鍵執行）
-# 用法: make daily
-#       make daily LLM=gemini LLM_TOP=5
-daily:
-	$(MAKE) scan
-	$(MAKE) review
+# ── 完整每日流程 (Flow) ────────────────────────────────────────────────────────
+# 擬定計畫 + 產出報告（一鍵執行）
+# 用法: make flow
+flow:
+	$(MAKE) plan
+	$(MAKE) report
 
 # ── 資料庫備份與還原 ─────────────────────────────────────────────────────────
 # 從 DATABASE_URL 解析連線資訊
@@ -147,26 +141,22 @@ _DB_NAME := $(shell echo $(_DB_URL) | sed 's|.*\/||')
 
 DUMP_FILE ?= backup_$(shell date +%Y%m%d).dump
 
-# 完整備份（schema + 所有資料）
 db-dump:
 	@echo "備份資料庫 $(_DB_NAME) → $(DUMP_FILE)"
 	pg_dump -Fc "$(_DB_URL)" > "$(DUMP_FILE)"
 	@echo "完成：$(DUMP_FILE) ($(shell du -sh $(DUMP_FILE) | cut -f1))"
 
-# 還原（需要目標 DB 已存在且空白）
 db-restore:
 	@test -n "$(FILE)" || (echo "用法: make db-restore FILE=backup_20260409.dump" && exit 1)
 	@echo "還原 $(FILE) → $(_DB_NAME)"
 	pg_restore -d "$(_DB_URL)" --no-owner --no-privileges "$(FILE)"
 	@echo "完成"
 
-# 只備份最有價值的分析資料（signal_outcomes）
 db-dump-signals:
 	@echo "備份 signal_outcomes → signals_$(shell date +%Y%m%d).dump"
 	pg_dump -Fc -t signal_outcomes "$(_DB_URL)" > "signals_$(shell date +%Y%m%d).dump"
 	@echo "完成"
 
-# 新機器一鍵初始化（clone 之後跑這個）
 db-init:
 	@echo "1. 建立資料庫 $(_DB_NAME)..."
 	createdb "$(_DB_NAME)" 2>/dev/null || echo "  (資料庫已存在，略過)"

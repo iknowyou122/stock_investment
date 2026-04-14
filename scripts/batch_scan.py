@@ -84,6 +84,16 @@ _ISIN_URLS = {
 
 _CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "watchlist_cache"
 
+_TREND_FIELDS = [
+    "ma_alignment_pts",
+    "ma20_slope_pts",
+    "relative_strength_pts",
+    "breakout_20d_pts",
+    "breakout_volume_pts",
+    "trend_continuity_pts",
+    "dmi_initiation_pts",
+]
+
 _FALLBACK_TICKERS = [
     "2330", "2454", "2303", "2379", "3711", "2408", "2344",
     "2317", "2382", "2356", "2324", "6669", "3231", "2357", "2353", "2308",
@@ -522,6 +532,10 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
     try:
         signal = agent.run(ticker, analysis_date, market=market)
         elapsed = time.time() - t0
+        breakdown_pts = {}
+        if signal.score_breakdown:
+            breakdown_pts = signal.score_breakdown.get("pts", {})
+        trend_score = sum(breakdown_pts.get(f, 0) for f in _TREND_FIELDS)
         return {
             "ticker": ticker,
             "action": signal.action,
@@ -538,6 +552,7 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "elapsed": elapsed,
             "error": None,
             "_signal": signal,
+            "trend_score": trend_score,
         }
     except Exception as e:
         return {
@@ -556,6 +571,7 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "elapsed": time.time() - t0,
             "error": str(e),
             "_signal": None,
+            "trend_score": 0,
         }
 
 
@@ -620,24 +636,40 @@ def _conf_bar(conf: int) -> str:
     return f"[{color}]{bar}[/{color}] [dim]{conf}[/dim]"
 
 
+def _trend_bar(ts: int) -> str:
+    if ts >= 25:
+        color = "green"
+    elif ts >= 15:
+        color = "yellow"
+    else:
+        color = "dim"
+    return f"[{color}]{ts}[/{color}][dim]/37[/dim]"
+
+
 def _print_table(
     results: list[dict],
     top: int,
     min_confidence: int,
     scan_date: str = "",
     name_map: dict[str, str] | None = None,
+    sort_by: str = "trend",
 ) -> None:
     valid = [r for r in results if not r["halt"] and r["error"] is None]
     halted = [r for r in results if r["halt"] or r["error"] is not None]
 
-    valid.sort(key=lambda r: r["confidence"], reverse=True)
+    if sort_by == "trend":
+        valid.sort(key=lambda r: (r.get("trend_score", 0), r["confidence"]), reverse=True)
+        sort_label = "趨勢強度"
+    else:
+        valid.sort(key=lambda r: r["confidence"], reverse=True)
+        sort_label = "信心分數"
 
     if min_confidence > 0:
         valid = [r for r in valid if r["confidence"] >= min_confidence]
     if top:
         valid = valid[:top]
 
-    title_str = f"BATCH SCAN RESULTS  {scan_date}" if scan_date else "BATCH SCAN RESULTS"
+    title_str = f"BATCH SCAN RESULTS  {scan_date}  [{sort_label}排序]" if scan_date else f"BATCH SCAN RESULTS  [{sort_label}排序]"
     table = Table(
         title=title_str,
         box=box.ROUNDED,
@@ -651,6 +683,7 @@ def _print_table(
     table.add_column("Ticker", style="bold white", width=11)
     table.add_column("Action", width=12)
     table.add_column("Confidence", width=18)
+    table.add_column("趨勢", justify="right", width=9)
     table.add_column("Entry", justify="right", style="cyan", width=9)
     table.add_column("Stop", justify="right", style="red", width=9)
     table.add_column("Target", justify="right", style="green", width=9)
@@ -659,14 +692,14 @@ def _print_table(
     for i, r in enumerate(valid, 1):
         action_str = r["action"] + ("*" if r["free_tier"] else "")
         flags = r.get("flags") or []
-        
+
         # COILING visual treatment
         coiling_label = ""
         if "COILING_PRIME" in flags:
             coiling_label = " [bold magenta]蓄積★[/bold magenta]"
         elif "COILING" in flags:
             coiling_label = " [magenta]蓄積[/bold magenta]"
-            
+
         action_text = Text.from_markup(f"[{_action_style(r['action'])}]{action_str}[/{_action_style(r['action'])}]{coiling_label}")
         upside_pct = (r["target"] / r["entry_bid"] - 1) * 100 if r["entry_bid"] > 0 else 0
         ticker = r["ticker"]
@@ -680,6 +713,7 @@ def _print_table(
             ticker_cell,
             action_text,
             _conf_bar(r["confidence"]),
+            _trend_bar(r.get("trend_score", 0)),
             f"{r['entry_bid']:.1f}",
             f"{r['stop_loss']:.1f}",
             f"{r['target']:.1f}",
@@ -831,6 +865,7 @@ def run_batch(
     save_db: bool = False,
     name_map: dict[str, str] | None = None,
     market_map: dict[str, str] | None = None,
+    sort_by: str = "trend",
 ) -> None:
     llm_label = getattr(llm_provider, "name", None) or "（無 LLM）"
     label_status = (
@@ -903,7 +938,7 @@ def run_batch(
         else:
             _console.print("  [dim yellow]⚠ DB 未設定或無法連線，略過寫入[/dim yellow]")
 
-    _print_table(results, top, min_confidence, scan_date=str(analysis_date), name_map=name_map)
+    _print_table(results, top, min_confidence, scan_date=str(analysis_date), name_map=name_map, sort_by=sort_by)
 
     if csv_path:
         _save_csv(results, analysis_date, csv_path)
@@ -972,6 +1007,12 @@ def main() -> None:
         "--show",
         metavar="DATE",
         help="顯示指定日期的掃描結果（從 CSV 讀取，例: --show 2026-04-10）",
+    )
+    parser.add_argument(
+        "--sort-by",
+        choices=["trend", "confidence"],
+        default="trend",
+        help="排序方式：trend（趨勢強度，預設）或 confidence（信心分數）",
     )
     args = parser.parse_args()
 
@@ -1048,7 +1089,7 @@ def main() -> None:
             }
             for r in seen.values()
         ]
-        _print_table(results, args.top, args.min_confidence, scan_date=show_date, name_map=_build_name_map())
+        _print_table(results, args.top, args.min_confidence, scan_date=show_date, name_map=_build_name_map(), sort_by="confidence")
         return
 
     csv_path: Path | None = None
@@ -1112,6 +1153,7 @@ def main() -> None:
         save_db=args.save_db,
         name_map=name_map,
         market_map=market_map,
+        sort_by=args.sort_by,
     )
 
 
