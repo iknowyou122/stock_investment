@@ -379,7 +379,7 @@ def _print_results(
             show_lines=True,
         )
         tbl.add_column("#", justify="center", style="dim", width=4)
-        tbl.add_column("股票", style="bold white", width=8)
+        tbl.add_column("股票", style="bold white", width=14)
         tbl.add_column("信心", justify="right", width=6)
         tbl.add_column("現價", justify="right", style="cyan", width=10)
         tbl.add_column("建議買入", justify="right", style="green", width=9)
@@ -399,9 +399,12 @@ def _print_results(
             _SRC_LABEL = {"bid": "買", "hl_mid": "中", "open": "開"}
             src_hint = f" ({_SRC_LABEL[src]})" if src in _SRC_LABEL else ""
 
+            name = q.get("name", "")
+            ticker_cell = f"{r['ticker']}\n[dim]{name[:4]}[/dim]" if name else r["ticker"]
+
             tbl.add_row(
                 str(i),
-                r["ticker"],
+                ticker_cell,
                 str(r["confidence"]),
                 f"{price:.1f}{src_hint}" if price else "-",
                 f"{entry:.1f}",
@@ -420,7 +423,7 @@ def _print_results(
             header_style="bold white on dark_orange3",
             border_style="yellow",
         )
-        tbl.add_column("股票", style="white", width=8)
+        tbl.add_column("股票", style="white", width=14)
         tbl.add_column("信心", justify="right", width=6)
         tbl.add_column("現價", justify="right", width=9)
         tbl.add_column("Entry", justify="right", width=9)
@@ -432,8 +435,10 @@ def _print_results(
             src = q.get("price_source", "last")
             _SRC_LABEL_W = {"bid": "買", "hl_mid": "中", "open": "開"}
             src_hint = f" ({_SRC_LABEL_W[src]})" if src in _SRC_LABEL_W else ""
+            name = q.get("name", "")
+            ticker_cell = f"{r['ticker']}\n[dim]{name[:4]}[/dim]" if name else r["ticker"]
             tbl.add_row(
-                r["ticker"],
+                ticker_cell,
                 str(r["confidence"]),
                 f"{price:.1f}{src_hint}" if price else "-",
                 f"{r['entry_bid']:.1f}",
@@ -456,7 +461,7 @@ def _print_results(
             header_style="bold white on dark_magenta",
             border_style="magenta",
         )
-        tbl.add_column("股票", style="white", width=8)
+        tbl.add_column("股票", style="white", width=14)
         tbl.add_column("信心", justify="right", width=6)
         tbl.add_column("現價", justify="right", width=10)
         tbl.add_column("昨收", justify="right", style="dim", width=9)
@@ -479,8 +484,11 @@ def _print_results(
             else:
                 chg_str = "-"
 
+            name = q.get("name", "")
+            ticker_cell = f"{e['ticker']}\n[dim]{name[:4]}[/dim]" if name else e["ticker"]
+
             tbl.add_row(
-                e["ticker"],
+                ticker_cell,
                 str(e["confidence"]),
                 f"{price:.1f}{src_hint}" if price else "-",
                 f"{yclose:.1f}" if yclose else "-",
