@@ -98,10 +98,22 @@ def _run_subprocess(cmd: list[str]) -> tuple[int, str]:
     return result.returncode, result.stdout + result.stderr
 
 
-async def _run_subprocess_async(cmd: list[str]) -> tuple[int, str]:
-    """Non-blocking subprocess — runs in thread pool so event loop stays alive."""
+async def _run_subprocess_async(cmd: list[str], log_tail: int = 8) -> tuple[int, str]:
+    """Non-blocking subprocess — runs in thread pool so event loop stays alive.
+
+    Always logs the last `log_tail` non-empty lines of output so the panel
+    shows what the child process actually printed.
+    """
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _run_subprocess, cmd)
+    code, out = await loop.run_in_executor(None, _run_subprocess, cmd)
+    script = Path(cmd[1]).name if len(cmd) > 1 else "?"
+    lines = [l for l in out.splitlines() if l.strip()]
+    for line in lines[-log_tail:]:
+        if code != 0:
+            logger.error("[%s] %s", script, line)
+        else:
+            logger.info("[%s] %s", script, line)
+    return code, out
 
 
 # ── Telegram helpers ─────────────────────────────────────────────────────────
