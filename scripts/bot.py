@@ -563,6 +563,44 @@ async def cmd_rollback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"⏪ 已還原上一版參數：\n{lines}")
 
 
+@_track("help")
+async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = (
+        "📖 *指令說明*\n"
+        "\n"
+        "*手動觸發*\n"
+        "/scan         全市場掃描，更新今日名單並推播\n"
+        "/precheck     對名單即時取報價，達進場條件發警報\n"
+        "/postmarket   盤後報告（命中率 \\+ 隔日名單）\n"
+        "/optimize     啟動 AI 參數優化 Agent\n"
+        "\n"
+        "*查詢*\n"
+        "/top          查看今日名單（不重新掃描）\n"
+        "/status       系統狀態（名單檔數、上次掃描、LLM）\n"
+        "/params       查看當前引擎參數\n"
+        "\n"
+        "*控制*\n"
+        "/pause        暫停盤中 precheck 自動推播\n"
+        "/resume       恢復盤中 precheck 自動推播\n"
+        "\n"
+        "*優化*\n"
+        "/approve      套用待確認的 AI 優化建議\n"
+        "/rollback     還原上一版參數，或捨棄待確認建議\n"
+        "\n"
+        "*診斷*\n"
+        "/test         執行指令邏輯自動測試（7 項驗證）\n"
+        "/help         顯示此說明\n"
+        "\n"
+        "⏰ *自動排程*\n"
+        "09:05          開盤掃描 \\+ 推播名單\n"
+        "10–13:05       每小時重掃，有異動才推\n"
+        "09:05–13:55    每 10 分鐘 precheck\n"
+        "17:00          盤後報告\n"
+        "週二/五 18:00  AI 優化"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
 # ── Rich CLI display ─────────────────────────────────────────────────────────
 
 def _render_status_panel() -> Panel:
@@ -657,7 +695,7 @@ async def main_async(llm: str) -> None:
         ("params", cmd_params), ("optimize", cmd_optimize),
         ("approve", cmd_approve), ("rollback", cmd_rollback),
         ("scan", cmd_scan), ("precheck", cmd_precheck), ("postmarket", cmd_postmarket),
-        ("test", cmd_test),
+        ("test", cmd_test), ("help", cmd_help),
     ]:
         app.add_handler(CommandHandler(cmd_name, handler))
 
