@@ -264,7 +264,9 @@ async def _job_opening_scan(force: bool = False, notify_fn=None) -> None:
         logger.info("opening_scan START force=%s", force)
         await notify(f"🔍 *掃描開始* {t0:%H:%M}\n正在執行全市場分析，請稍候...")
         code, out = await _run_subprocess_async([
-            sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db",
+            sys.executable, "scripts/batch_scan.py",
+            "--save-csv", "--save-db",
+            "--llm", _state["llm"], "--llm-top", "5",
         ])
         elapsed = int((datetime.now() - t0).total_seconds())
         if code != 0:
@@ -294,7 +296,9 @@ async def _job_hourly_rescan() -> None:
         t0 = datetime.now()
         logger.info("hourly_rescan START %s", t0.strftime("%H:%M"))
         code, out = await _run_subprocess_async([
-            sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db",
+            sys.executable, "scripts/batch_scan.py",
+            "--save-csv", "--save-db",
+            "--llm", _state["llm"], "--llm-top", "5",
         ])
         if code != 0:
             logger.error("hourly_rescan FAILED code=%d\n%s", code, out[:300])

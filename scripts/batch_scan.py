@@ -1113,15 +1113,20 @@ def main() -> None:
             industry_map_rows = _build_sector_rows(industry_map)
             idx_map = {i: name for i, name, _ in industry_map_rows}
 
+            _is_tty = sys.stdin.isatty()
             if args.sectors:
                 # Non-interactive: resolve numeric codes directly (skip menu display)
                 chosen = {idx_map[n] for n in args.sectors if n in idx_map}
                 if not chosen:
                     _console.print("  [yellow]指定代號無效，使用預設產業[/yellow]")
                     chosen = _DEFAULT_SECTOR_NAMES
-            else:
+            elif _is_tty:
                 rows = _sector_menu(industry_map)
                 chosen = _select_sectors(rows, _DEFAULT_SECTOR_NAMES)
+            else:
+                # Non-TTY (e.g. bot subprocess): silently use default sectors
+                chosen = _DEFAULT_SECTOR_NAMES
+                _console.print(f"  [dim]非互動模式 → 使用預設產業（{len(chosen)} 個）[/dim]")
 
             tickers = sorted(t for t, ind in industry_map.items() if ind in chosen)
             from collections import Counter
@@ -1130,15 +1135,21 @@ def main() -> None:
             _console.print(f"\n[bold]掃描範圍:[/bold] {summary} = [cyan]{len(tickers)}[/cyan] 檔")
 
     from taiwan_stock_agent.domain.llm_provider import create_llm_provider
+    _is_tty = sys.stdin.isatty()
     if args.no_llm:
         llm_provider, llm_top = None, None
     elif args.llm is not None or args.llm_top is not None:
         # 非互動模式：CLI 明確指定
         llm_provider = create_llm_provider(args.llm)
         llm_top = args.llm_top
-    else:
+    elif _is_tty:
         # 互動模式：進入選單
         llm_provider, llm_top = _llm_menu()
+    else:
+        # Non-TTY (e.g. bot subprocess): auto-detect LLM from env, top 5
+        llm_provider = create_llm_provider(None)
+        llm_top = 5
+        _console.print(f"  [dim]非互動模式 → LLM 自動偵測，前 {llm_top} 名[/dim]")
 
     # 嘗試載入 BrokerLabelRepository（需要 DATABASE_URL + build-labels 已執行）
     label_repo = _make_label_repo()
