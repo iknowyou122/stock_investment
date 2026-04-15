@@ -31,7 +31,9 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from rich.console import Console
 from rich.live import Live
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from rich import box
 
 from taiwan_stock_agent.utils.trading_calendar import is_trading_day
@@ -496,20 +498,38 @@ async def cmd_rollback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── Rich CLI display ─────────────────────────────────────────────────────────
 
-def _render_status_table() -> Table:
-    table = Table(box=box.ROUNDED, show_header=False, expand=True)
-    table.add_column("key", style="dim", width=18)
-    table.add_column("val")
+def _render_status_panel() -> Panel:
     now = datetime.now()
-    table.add_row("時間", now.strftime("%H:%M:%S"))
-    table.add_row("今日名單", f"{len(_state['shortlist'])} 檔")
-    table.add_row("推播", "✅ 開啟" if _state["monitoring_active"] else "⏸ 暫停")
-    table.add_row("LLM", _state["llm"])
+    table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+    table.add_column("key", style="dim", min_width=16)
+    table.add_column("val")
+
+    # clock
+    table.add_row("時間", f"[bold cyan]{now.strftime('%H:%M:%S')}[/bold cyan]")
+    table.add_row("", "")
+
+    # watchlist
+    shortlist = _state["shortlist"]
+    table.add_row("今日名單", f"[green]{len(shortlist)} 檔[/green]")
     last = _state["last_scan_time"]
-    table.add_row("上次掃描", last.strftime("%H:%M") if last else "—")
-    # Next scheduled jobs
-    table.add_row("optimize", "週二/週五 18:00")
-    return table
+    table.add_row("上次掃描", last.strftime("%H:%M") if last else "[dim]尚未執行[/dim]")
+    table.add_row("推播監控", "✅ 開啟" if _state["monitoring_active"] else "[yellow]⏸ 暫停[/yellow]")
+    table.add_row("LLM", _state["llm"])
+    table.add_row("", "")
+
+    # pending change
+    pending_raw = _PENDING_PATH.read_text().strip() if _PENDING_PATH.exists() else "null"
+    if pending_raw not in ("null", ""):
+        table.add_row("待確認", "[yellow]有優化建議 → /approve[/yellow]")
+    else:
+        table.add_row("待確認", "[dim]無[/dim]")
+    table.add_row("", "")
+
+    # schedule reminder
+    table.add_row("[dim]排程[/dim]", "[dim]掃描 09:05 · 重掃 10-13:05 · 盤後 17:00 · 優化 週二/五 18:00[/dim]")
+    table.add_row("[dim]指令[/dim]", "[dim]/scan /precheck /postmarket /optimize /test /status[/dim]")
+
+    return Panel(table, title="[bold blue]股票信號機器人[/bold blue]", subtitle=f"[dim]{now.strftime('%Y-%m-%d')}[/dim]", border_style="blue")
 
 
 # ── LLM selection ────────────────────────────────────────────────────────────
@@ -571,18 +591,14 @@ async def main_async(llm: str) -> None:
     scheduler.add_job(_job_optimize, "cron", day_of_week="tue,fri", hour=18, minute=0)
     scheduler.start()
 
-    _console.print("  ✅ Telegram Bot 連線")
-    _console.print("  ✅ 排程載入（下次任務依排程自動觸發）")
-    _console.print("  ✅ 監控中（Ctrl+C 停止）\n")
-
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
     try:
-        with Live(_render_status_table(), console=_console, refresh_per_second=0.1, screen=True) as live:
+        with Live(_render_status_panel(), console=_console, refresh_per_second=1, screen=True) as live:
             while True:
-                live.update(_render_status_table())
-                await asyncio.sleep(30)
+                live.update(_render_status_panel())
+                await asyncio.sleep(1)
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
