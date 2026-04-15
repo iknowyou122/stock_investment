@@ -93,27 +93,37 @@ _state: dict = {
 
 # ── Subprocess helper ────────────────────────────────────────────────────────
 
-def _run_subprocess(cmd: list[str]) -> tuple[int, str]:
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(_ROOT))
-    return result.returncode, result.stdout + result.stderr
+import re as _re
+_ANSI = _re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07|\r")
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI.sub("", text).strip()
 
 
-async def _run_subprocess_async(cmd: list[str], log_tail: int = 8) -> tuple[int, str]:
-    """Non-blocking subprocess — runs in thread pool so event loop stays alive.
+async def _run_subprocess_async(cmd: list[str], **_) -> tuple[int, str]:
+    """Stream subprocess stdout+stderr line-by-line into the log panel.
 
-    Always logs the last `log_tail` non-empty lines of output so the panel
-    shows what the child process actually printed.
+    Uses asyncio.create_subprocess_exec so each output line appears in the
+    Rich panel immediately, rather than waiting for the process to finish.
     """
-    loop = asyncio.get_event_loop()
-    code, out = await loop.run_in_executor(None, _run_subprocess, cmd)
     script = Path(cmd[1]).name if len(cmd) > 1 else "?"
-    lines = [l for l in out.splitlines() if l.strip()]
-    for line in lines[-log_tail:]:
-        if code != 0:
-            logger.error("[%s] %s", script, line)
-        else:
-            logger.info("[%s] %s", script, line)
-    return code, out
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        cwd=str(_ROOT),
+    )
+    collected: list[str] = []
+    async for raw in proc.stdout:
+        line = _strip_ansi(raw.decode("utf-8", errors="replace"))
+        if line:
+            collected.append(line)
+            logger.info("[%s] %s", script, line[:120])
+    await proc.wait()
+    code = proc.returncode
+    if code != 0:
+        logger.error("[%s] exited with code %d", script, code)
+    return code, "\n".join(collected)
 
 
 # ── Telegram helpers ─────────────────────────────────────────────────────────
