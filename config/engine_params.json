@@ -11,5 +11,18 @@
   "emerging_setup_pts": 10,
   "pullback_setup_pts": 8,
   "bb_squeeze_coiling_pts": 3,
-  "_comment": "Tunable parameters for Accumulation Engine (2026-04-13 recalibration)."
+  "_comment": "Tunable parameters for Accumulation Engine (2026-04-13 recalibration).",
+  "tunable_whitelist": [
+    "gate_vol_ratio",
+    "rsi_momentum_hi",
+    "breakout_vol_ratio",
+    "sector_topN_pct",
+    "long_threshold_uptrend",
+    "long_threshold_neutral",
+    "long_threshold_downtrend",
+    "watch_min",
+    "emerging_setup_pts",
+    "pullback_setup_pts",
+    "bb_squeeze_coiling_pts"
+  ]
 }
