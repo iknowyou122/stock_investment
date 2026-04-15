@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan trade precheck-t2 report settle backtest factor-report optimize test setup migrate api install flow show
+.PHONY: plan trade precheck-t2 report settle backtest factor-report optimize test setup migrate api install flow show bot-setup bot
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -165,3 +165,10 @@ db-init:
 	@echo "3. 完成。如有備份檔請執行: make db-restore FILE=your_backup.dump"
 
 .PHONY: db-dump db-restore db-dump-signals db-init
+
+## ── Telegram Bot ──────────────────────────────────────────────────────────
+bot-setup:
+	$(PYTHON) scripts/bot_setup.py
+
+bot:
+	$(PYTHON) scripts/bot.py $(if $(LLM),--llm $(LLM))
