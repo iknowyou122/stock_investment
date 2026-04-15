@@ -1236,31 +1236,39 @@ def _do_notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int
     _console.print(f"  [dim]TG notify: {len(signals)} 筆 LONG/WATCH (min_conf={min_confidence}, top={top})[/dim]")
 
     if not signals:
-        _tg_send(token, chat_id, f"📋 {scan_date} 掃描結果\n無符合條件的標的（LONG/WATCH 0 筆）")
+        _tg_send(token, chat_id, f"📋 {scan_date} 隔日建倉名單\n目前無 LONG/WATCH 標的")
         return
 
+    long_n  = sum(1 for s in signals if s["action"] == "LONG")
+    watch_n = len(signals) - long_n
     # CSV already sorted by trend_score descending from _save_csv
-    lines = [f"📋 {scan_date} 掃描結果（{len(signals)} 檔，趨勢強度排序）\n"]
+    lines = [
+        f"📋 {scan_date} 隔日建倉名單",
+        f"🟢 LONG {long_n} 檔  🟡 WATCH {watch_n} 檔  （趨勢強度排序）",
+        "",
+    ]
     for i, s in enumerate(signals[:top], 1):
         action_icon = "🟢" if s["action"] == "LONG" else "🟡"
-        name_str = f" {s['name']}" if s.get("name") else ""
-        entry = f"{s['entry_bid']:.1f}" if s["entry_bid"] else "—"
-        target = f"{s['target']:.1f}" if s["target"] else "—"
-        stop  = f"{s['stop_loss']:.1f}" if s["stop_loss"] else "—"
+        name = s.get("name") or ""
+        ticker_name = f"{s['ticker']} {name}" if name else s["ticker"]
+        entry  = f"{s['entry_bid']:.1f}" if s["entry_bid"] else "—"
+        target = f"{s['target']:.1f}"    if s["target"]    else "—"
+        stop   = f"{s['stop_loss']:.1f}" if s["stop_loss"] else "—"
         filled = min(s["trend_score"] // 4, 5)
-        trend_bar = "█" * filled + "░" * (5 - filled) + f"({s['trend_score']})"
+        trend_bar = "█" * filled + "░" * (5 - filled) + f" {s['trend_score']}"
         upside = (
-            f" ↑{((s['target'] - s['entry_bid']) / s['entry_bid'] * 100):.1f}%"
+            f" +{((s['target'] - s['entry_bid']) / s['entry_bid'] * 100):.1f}%"
             if s["entry_bid"] and s["target"] else ""
         )
         key_flags = [
             fl for fl in (s.get("flags") or "").split("|")
             if any(k in fl for k in ("COILING", "BREAKOUT", "EMERGING", "RISING", "SECTOR_RANK"))
         ]
-        flag_str = f"\n    [{' | '.join(key_flags)}]" if key_flags else ""
+        flag_str = f"  [{' | '.join(key_flags)}]" if key_flags else ""
         lines.append(
-            f"{i}. {action_icon} {s['ticker']}{name_str}  趨勢{trend_bar}  信心{s['confidence']}\n"
-            f"   進{entry} 目標{target}{upside} 停{stop}{flag_str}"
+            f"{i}. {action_icon} {ticker_name}\n"
+            f"   趨勢 {trend_bar}  信心 {s['confidence']}\n"
+            f"   進場 {entry} → 目標 {target}{upside}  停損 {stop}{flag_str}"
         )
 
     msg = "\n".join(lines)
