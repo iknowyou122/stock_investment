@@ -527,7 +527,16 @@ def _render_status_panel() -> Panel:
 
     # schedule reminder
     table.add_row("[dim]排程[/dim]", "[dim]掃描 09:05 · 重掃 10-13:05 · 盤後 17:00 · 優化 週二/五 18:00[/dim]")
-    table.add_row("[dim]指令[/dim]", "[dim]/scan /precheck /postmarket /optimize /test /status[/dim]")
+    table.add_row("", "")
+    table.add_row("[dim]指令[/dim]", "[dim]/scan        手動觸發全市場掃描[/dim]")
+    table.add_row("",               "[dim]/precheck    盤中確認名單進場條件[/dim]")
+    table.add_row("",               "[dim]/postmarket  產生盤後報告（命中率+隔日名單）[/dim]")
+    table.add_row("",               "[dim]/optimize    手動觸發 AI 參數優化[/dim]")
+    table.add_row("",               "[dim]/approve     套用待確認的優化建議[/dim]")
+    table.add_row("",               "[dim]/rollback    還原上一版參數[/dim]")
+    table.add_row("",               "[dim]/top         查看今日名單[/dim]")
+    table.add_row("",               "[dim]/status      系統狀態摘要[/dim]")
+    table.add_row("",               "[dim]/test        指令邏輯自動測試[/dim]")
 
     return Panel(table, title="[bold blue]股票信號機器人[/bold blue]", subtitle=f"[dim]{now.strftime('%Y-%m-%d')}[/dim]", border_style="blue")
 
