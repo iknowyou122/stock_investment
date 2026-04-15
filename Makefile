@@ -21,11 +21,13 @@ SECTORS ?=
 LLM_TOP ?=
 SORT    ?= trend
 
+NOTIFY  ?= 1
+
 plan:
 ifeq ($(DATE),$(_TODAY))
-	$(PYTHON) scripts/batch_scan.py --save-csv --save-db --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS))
+	$(PYTHON) scripts/batch_scan.py --save-csv --save-db --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
 else
-	$(PYTHON) scripts/batch_scan.py --save-csv --save-db --date $(DATE) --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS))
+	$(PYTHON) scripts/batch_scan.py --save-csv --save-db --date $(DATE) --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
 endif
 
 # ── 盤中執行交易 (Trade) ──────────────────────────────────────────────────────

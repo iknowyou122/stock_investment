@@ -1014,6 +1014,11 @@ def main() -> None:
         default="trend",
         help="排序方式：trend（趨勢強度，預設）或 confidence（信心分數）",
     )
+    parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="掃描完成後將結果推送到 Telegram（需要 .env TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID）",
+    )
     args = parser.parse_args()
 
     # ── show 模式：從 CSV 印出歷史結果 ──────────────────────────────────────
@@ -1166,6 +1171,92 @@ def main() -> None:
         market_map=market_map,
         sort_by=args.sort_by,
     )
+
+    if args.notify and csv_path and csv_path.exists():
+        _notify_telegram(csv_path, args.date, args.top, args.min_confidence)
+
+
+def _tg_escape(text: str) -> str:
+    """Escape special chars for Telegram MarkdownV2."""
+    for ch in r"\_*[]()~`>#+-=|{}.!":
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
+def _notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int) -> None:
+    """Read the saved CSV and push the opening list to Telegram."""
+    import csv as _csv
+    import urllib.parse
+    import urllib.request
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        _console.print("  [yellow]⚠ TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未設定，略過推播[/yellow]")
+        return
+
+    signals: list[dict] = []
+    with open(csv_path, newline="") as f:
+        for row in _csv.DictReader(f):
+            if row.get("action") not in ("BUY", "WATCH"):
+                continue
+            conf = int(row.get("confidence", 0) or 0)
+            if conf < min_confidence:
+                continue
+            signals.append({
+                "ticker": row["ticker"],
+                "name": row.get("name", ""),
+                "action": row["action"],
+                "confidence": conf,
+                "entry_bid": float(row.get("entry_bid", 0) or 0),
+                "target": float(row.get("target", 0) or 0),
+                "stop_loss": float(row.get("stop_loss", 0) or 0),
+                "flags": row.get("data_quality_flags", ""),
+            })
+
+    if not signals:
+        _tg_send(token, chat_id, f"📋 *{scan_date} 掃描結果*\n無符合條件的標的")
+        return
+
+    # Build message — plain text to avoid MarkdownV2 escape complexity
+    lines = [f"📋 {scan_date} 掃描結果（共 {len(signals)} 檔，趨勢強度排序）\n"]
+    for i, s in enumerate(signals[:top], 1):
+        action_icon = "🟢" if s["action"] == "BUY" else "🟡"
+        name_str = f" {s['name']}" if s.get("name") else ""
+        entry = f"{s['entry_bid']:.1f}" if s["entry_bid"] else "—"
+        target = f"{s['target']:.1f}" if s["target"] else "—"
+        stop = f"{s['stop_loss']:.1f}" if s["stop_loss"] else "—"
+        upside = (
+            f" ↑{((s['target']-s['entry_bid'])/s['entry_bid']*100):.1f}%"
+            if s["entry_bid"] and s["target"] else ""
+        )
+        flags = f"\n    [{s['flags']}]" if s.get("flags") else ""
+        lines.append(
+            f"{i}. {action_icon} {s['ticker']}{name_str}  {s['confidence']}分\n"
+            f"   進 {entry} → 目標 {target}{upside}  停 {stop}{flags}"
+        )
+
+    msg = "\n".join(lines)
+    # Telegram message limit is 4096 chars
+    if len(msg) > 4000:
+        msg = msg[:4000] + "\n…（已截斷）"
+
+    ok = _tg_send(token, chat_id, msg)
+    if ok:
+        _console.print(f"  [green]✅ 結果已推送到 Telegram（{len(signals)} 檔）[/green]")
+    else:
+        _console.print("  [red]❌ Telegram 推播失敗[/red]")
+
+
+def _tg_send(token: str, chat_id: str, text: str) -> bool:
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
+    try:
+        with urllib.request.urlopen(url, data=data, timeout=15) as r:
+            return r.status == 200
+    except Exception as e:
+        _console.print(f"  [red]TG error: {e}[/red]")
+        return False
 
 
 if __name__ == "__main__":
