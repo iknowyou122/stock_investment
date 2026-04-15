@@ -65,6 +65,7 @@ _state: dict = {
     "precheck_lock": None,     # asyncio.Lock, initialised in main_async()
     "app": None,               # Telegram Application
     "chat_id": None,
+    "last_cmd": None,          # (cmd_name, status, time) — shown in status panel
 }
 
 
@@ -92,6 +93,34 @@ async def _send(text: str) -> None:
         )
     except Exception as e:
         logger.error(f"Telegram send error: {e}")
+
+
+async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global error handler — reports any unhandled exception back to Telegram."""
+    import traceback
+    err = context.error
+    tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))
+    logger.error(f"Unhandled exception: {tb}")
+
+    cmd = _state.get("last_cmd")
+    cmd_name = f"/{cmd[0]}" if cmd else "unknown"
+    _state["last_cmd"] = (cmd[0] if cmd else "?", "❌ 錯誤", datetime.now()) if cmd else ("?", "❌ 錯誤", datetime.now())
+
+    short = str(err)[:200]
+    await _send(f"❌ *指令執行失敗* `{cmd_name}`\n```\n{short}\n```")
+
+
+def _track(cmd_name: str):
+    """Decorator that records command start/done in _state['last_cmd']."""
+    def decorator(fn):
+        async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+            _state["last_cmd"] = (cmd_name, "⏳ 執行中", datetime.now())
+            await fn(update, ctx)
+            # Only mark done if no exception (error_handler handles failures)
+            if _state["last_cmd"] and _state["last_cmd"][1] != "❌ 錯誤":
+                _state["last_cmd"] = (cmd_name, "✅ 完成", datetime.now())
+        return wrapper
+    return decorator
 
 
 # ── CSV helpers ──────────────────────────────────────────────────────────────
@@ -312,6 +341,7 @@ async def _job_optimize() -> None:
 
 # ── Telegram command handlers ────────────────────────────────────────────────
 
+@_track("top")
 async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         format_opening_list(_state["shortlist"], str(date.today())),
@@ -319,6 +349,7 @@ async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+@_track("status")
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     last = _state["last_scan_time"]
     await update.message.reply_text(
@@ -331,16 +362,19 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+@_track("pause")
 async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     _state["monitoring_active"] = False
     await update.message.reply_text("⏸ 盤中推播已暫停。/resume 恢復")
 
 
+@_track("resume")
 async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     _state["monitoring_active"] = True
     await update.message.reply_text("▶️ 盤中推播已恢復")
 
 
+@_track("params")
 async def cmd_params(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     params = json.loads(_PARAMS_PATH.read_text())
     clean = {k: v for k, v in params.items() if not k.startswith("_") and k != "tunable_whitelist"}
@@ -350,13 +384,14 @@ async def cmd_params(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+@_track("optimize")
 async def cmd_optimize(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🤖 手動觸發優化，執行中...")
     await _job_optimize()
 
 
+@_track("scan")
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually trigger opening scan (bypasses trading-day check)."""
     if _state["scan_lock"].locked():
         await update.message.reply_text("⚠ 掃描進行中，請稍候")
         return
@@ -364,8 +399,8 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _job_opening_scan(force=True)
 
 
+@_track("precheck")
 async def cmd_precheck(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually trigger precheck on current shortlist (bypasses trading-day check)."""
     if not _state["shortlist"]:
         await update.message.reply_text("⚠ 名單為空，請先執行 /scan")
         return
@@ -376,12 +411,13 @@ async def cmd_precheck(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _job_precheck(force=True)
 
 
+@_track("postmarket")
 async def cmd_postmarket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually trigger post-market report (bypasses trading-day check)."""
     await update.message.reply_text("📈 手動觸發盤後報告...")
     await _job_postmarket_report(force=True)
 
 
+@_track("test")
 async def cmd_test(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Logic smoke test: verify each command path actually works."""
     reply = update.message.reply_text
@@ -478,6 +514,7 @@ async def cmd_test(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+@_track("approve")
 async def cmd_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     pending_raw = _PENDING_PATH.read_text().strip() if _PENDING_PATH.exists() else "null"
     if pending_raw in ("null", ""):
@@ -494,6 +531,7 @@ async def cmd_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("✅ 已套用優化建議")
 
 
+@_track("rollback")
 async def cmd_rollback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     pending_raw = _PENDING_PATH.read_text().strip() if _PENDING_PATH.exists() else "null"
     if pending_raw not in ("null", ""):
@@ -528,6 +566,17 @@ def _render_status_panel() -> Panel:
     table.add_row("推播監控", "✅ 開啟" if _state["monitoring_active"] else "[yellow]⏸ 暫停[/yellow]")
     table.add_row("LLM", _state["llm"])
     table.add_row("", "")
+
+    # last command
+    cmd = _state.get("last_cmd")
+    if cmd:
+        cmd_name, cmd_status, cmd_time = cmd
+        age = int((now - cmd_time).total_seconds())
+        age_str = f"{age}s ago" if age < 60 else f"{age//60}m ago"
+        color = "green" if "✅" in cmd_status else "yellow" if "⏳" in cmd_status else "red"
+        table.add_row("最後指令", f"[{color}]/{cmd_name}  {cmd_status}  ({age_str})[/{color}]")
+    else:
+        table.add_row("最後指令", "[dim]—[/dim]")
 
     # pending change
     pending_raw = _PENDING_PATH.read_text().strip() if _PENDING_PATH.exists() else "null"
@@ -583,6 +632,7 @@ async def main_async(llm: str) -> None:
 
     app = Application.builder().token(token).build()
     _state["app"] = app
+    app.add_error_handler(_error_handler)
 
     for cmd_name, handler in [
         ("top", cmd_top), ("status", cmd_status),
