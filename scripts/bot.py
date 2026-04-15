@@ -52,7 +52,15 @@ _PARAMS_PATH = _ROOT / "config" / "engine_params.json"
 _HISTORY_PATH = _ROOT / "config" / "param_history.json"
 _PENDING_PATH = _ROOT / "config" / "pending_change.json"
 
-logging.basicConfig(level=logging.WARNING)
+_LOG_PATH = _ROOT / "logs" / "bot.log"
+_LOG_PATH.parent.mkdir(exist_ok=True)
+
+# Write INFO+ to file, WARNING+ to stderr (hidden behind Live screen)
+_file_handler = logging.FileHandler(_LOG_PATH, encoding="utf-8")
+_file_handler.setLevel(logging.INFO)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
+
+logging.basicConfig(level=logging.INFO, handlers=[_file_handler])
 logger = logging.getLogger(__name__)
 
 # ── In-memory state ─────────────────────────────────────────────────────────
@@ -222,39 +230,48 @@ def _save_intraday_hit(ticker: str, price: float, triggered: bool) -> None:
 async def _job_opening_scan(force: bool = False, notify_fn=None) -> None:
     """09:05 — full market scan, build today's shortlist."""
     if not force and not is_trading_day(date.today()):
+        logger.info("opening_scan skipped — not a trading day")
         return
     notify = notify_fn or _send
     async with _state["scan_lock"]:
         t0 = datetime.now()
+        logger.info("opening_scan START force=%s", force)
         await notify(f"🔍 *掃描開始* {t0:%H:%M}\n正在執行全市場分析，請稍候...")
-        code, _ = await _run_subprocess_async([
+        code, out = await _run_subprocess_async([
             sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db",
         ])
         elapsed = int((datetime.now() - t0).total_seconds())
         if code != 0:
+            logger.error("opening_scan FAILED code=%d elapsed=%ds\n%s", code, elapsed, out[:500])
             await notify(f"❌ 掃描失敗（{elapsed}s）")
             return
+        logger.info("opening_scan batch_scan done elapsed=%ds", elapsed)
         await notify(f"📡 掃描完成（{elapsed}s），正在讀取結果...")
         csv_path = _latest_scan_csv(0)
         if csv_path:
             _state["shortlist"] = _parse_scan_csv(csv_path)
             _state["last_scan_time"] = datetime.now()
+            logger.info("opening_scan shortlist loaded n=%d from %s", len(_state["shortlist"]), csv_path.name)
         await notify(format_opening_list(_state["shortlist"], str(date.today())))
+        logger.info("opening_scan DONE n=%d", len(_state["shortlist"]))
 
 
 async def _job_hourly_rescan() -> None:
     """Hourly rescan — update shortlist ranking if not already running."""
     if not is_trading_day(date.today()):
+        logger.info("hourly_rescan skipped — not a trading day")
         return
     if _state["scan_lock"].locked():
-        logger.info("Hourly rescan skipped — previous scan still running")
+        logger.info("hourly_rescan skipped — previous scan still running")
         return
     async with _state["scan_lock"]:
         t0 = datetime.now()
-        code, _ = await _run_subprocess_async([
+        logger.info("hourly_rescan START %s", t0.strftime("%H:%M"))
+        code, out = await _run_subprocess_async([
             sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db",
         ])
         if code != 0:
+            logger.error("hourly_rescan FAILED code=%d\n%s", code, out[:300])
             return
         csv_path = _latest_scan_csv(0)
         if not csv_path:
@@ -267,6 +284,7 @@ async def _job_hourly_rescan() -> None:
         _state["shortlist"] = new_list
         _state["last_scan_time"] = datetime.now()
         elapsed = int((datetime.now() - t0).total_seconds())
+        logger.info("hourly_rescan done elapsed=%ds added=%s removed=%s", elapsed, sorted(added), sorted(removed))
         if added or removed:
             lines = [f"📊 *名單更新*（{t0:%H:%M}，{elapsed}s）"]
             for t in sorted(added):
@@ -281,17 +299,21 @@ async def _job_hourly_rescan() -> None:
 async def _job_precheck(force: bool = False, notify_fn=None) -> None:
     """Every 10 min — check entry conditions for shortlist via precheck.py --csv."""
     if not force and not is_trading_day(date.today()):
+        logger.info("precheck skipped — not a trading day")
         return
     if not _state["monitoring_active"]:
+        logger.info("precheck skipped — monitoring paused")
         return
     if _state["precheck_lock"].locked():
-        logger.info("Precheck skipped — previous round still running")
+        logger.info("precheck skipped — previous round still running")
         return
     notify = notify_fn or _send
     async with _state["precheck_lock"]:
         if not _state["shortlist"]:
+            logger.info("precheck skipped — shortlist empty")
             return
         n = len(_state["shortlist"])
+        logger.info("precheck START n=%d force=%s", n, force)
         await notify(f"🔔 *Precheck 開始* {datetime.now():%H:%M}\n正在取得 {n} 檔即時報價...")
         tmp_csv = _write_temp_shortlist_csv(_state["shortlist"])
         try:
@@ -314,6 +336,7 @@ async def _job_precheck(force: bool = False, notify_fn=None) -> None:
             _save_intraday_hit(ticker, s["entry_bid"], triggered)
             if triggered:
                 triggered_count += 1
+                logger.info("precheck TRIGGERED ticker=%s entry=%.2f", ticker, s["entry_bid"])
                 await _send(format_entry_signal(
                     ticker, s.get("name", ""),
                     price=s["entry_bid"],
@@ -322,21 +345,29 @@ async def _job_precheck(force: bool = False, notify_fn=None) -> None:
                     stop=s["stop_loss"],
                 ))
         if triggered_count == 0:
+            logger.info("precheck DONE triggered=0/%d", n)
             await notify(f"⏳ Precheck 完成，{n} 檔均未達進場條件")
         else:
+            logger.info("precheck DONE triggered=%d/%d", triggered_count, n)
             await notify(f"✅ Precheck 完成，{triggered_count}/{n} 檔達進場條件")
 
 
 async def _job_postmarket_report(force: bool = False, notify_fn=None) -> None:
     """17:00 — post-market report with hit rate + tomorrow's list."""
     if not force and not is_trading_day(date.today()):
+        logger.info("postmarket_report skipped — not a trading day")
         return
     notify = notify_fn or _send
+    logger.info("postmarket_report START force=%s", force)
     await notify(f"📈 *盤後報告生成中* {datetime.now():%H:%M}\n正在執行隔日掃描...")
     async with _state["scan_lock"]:
         t0 = datetime.now()
-        await _run_subprocess_async([sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db"])
+        code, out = await _run_subprocess_async([sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db"])
         elapsed = int((datetime.now() - t0).total_seconds())
+        if code != 0:
+            logger.error("postmarket_report scan FAILED code=%d\n%s", code, out[:300])
+        else:
+            logger.info("postmarket_report scan done elapsed=%ds", elapsed)
 
     await notify(f"📊 掃描完成（{elapsed}s），正在計算今日命中率...")
     yesterday_csv = _latest_scan_csv(1)
@@ -344,6 +375,7 @@ async def _job_postmarket_report(force: bool = False, notify_fn=None) -> None:
     intraday_hits = _load_intraday_hits(date.today())
     tomorrow_csv = _latest_scan_csv(0)
     tomorrow_signals = _parse_scan_csv(tomorrow_csv) if tomorrow_csv else []
+    logger.info("postmarket_report yesterday=%d hits=%d tomorrow=%d", len(yesterday_signals), len(intraday_hits), len(tomorrow_signals))
 
     await _send(format_postmarket_report(
         yesterday_signals=yesterday_signals,
@@ -351,12 +383,15 @@ async def _job_postmarket_report(force: bool = False, notify_fn=None) -> None:
         tomorrow_signals=tomorrow_signals,
         report_date=str(date.today()),
     ))
+    logger.info("postmarket_report DONE")
 
 
 async def _job_optimize() -> None:
     """Tue/Fri 18:00 — run AI optimization agent."""
     from taiwan_stock_agent.optimize import run_optimize
-    await run_optimize(_state["llm"], _send)
+    logger.info("optimize START llm=%s", _state["llm"])
+    result = await run_optimize(_state["llm"], _send)
+    logger.info("optimize DONE result=%s", result)
 
 
 # ── Telegram command handlers ────────────────────────────────────────────────
@@ -406,12 +441,14 @@ async def cmd_params(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 @_track("optimize")
 async def cmd_optimize(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("CMD /optimize from user=%s", update.effective_user.id if update.effective_user else "?")
     await _send(f"🤖 *優化 Agent 啟動* {datetime.now():%H:%M}\n依序執行：settle → factor\\_report → LLM → 驗證 → 套用")
     await _job_optimize()
 
 
 @_track("scan")
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("CMD /scan from user=%s", update.effective_user.id if update.effective_user else "?")
     if _state["scan_lock"].locked():
         await update.message.reply_text("⚠ 掃描進行中，請稍候")
         return
@@ -420,6 +457,7 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 @_track("precheck")
 async def cmd_precheck(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("CMD /precheck from user=%s", update.effective_user.id if update.effective_user else "?")
     if not _state["shortlist"]:
         await update.message.reply_text("⚠ 名單為空，請先執行 /scan")
         return
@@ -431,6 +469,7 @@ async def cmd_precheck(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 @_track("postmarket")
 async def cmd_postmarket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("CMD /postmarket from user=%s", update.effective_user.id if update.effective_user else "?")
     await _job_postmarket_report(force=True, notify_fn=_send)
 
 
@@ -684,6 +723,7 @@ async def main_async(llm: str) -> None:
         _console.print("[red]❌ 請先執行 make bot-setup 設定 Telegram[/red]")
         sys.exit(1)
     _state["chat_id"] = chat_id
+    logger.info("Bot START llm=%s chat_id=%s log=%s", llm, chat_id, _LOG_PATH)
 
     app = Application.builder().token(token).build()
     _state["app"] = app
