@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ROOT — needed for scripts.optimize_agent
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -357,23 +358,76 @@ async def cmd_optimize(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Manually trigger opening scan (bypasses trading-day check)."""
+    if _state["scan_lock"].locked():
+        await update.message.reply_text("⚠ 掃描進行中，請稍候")
+        return
     await update.message.reply_text("🔍 手動觸發掃描，執行中（需數分鐘）...")
-    await _job_opening_scan()
+    async with _state["scan_lock"]:
+        code, _ = await _run_subprocess_async([
+            sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db",
+        ])
+        if code != 0:
+            await update.message.reply_text("❌ 掃描失敗，請查看 terminal log")
+            return
+        csv_path = _latest_scan_csv(0)
+        if csv_path:
+            _state["shortlist"] = _parse_scan_csv(csv_path)
+            _state["last_scan_time"] = datetime.now()
+        await _send(format_opening_list(_state["shortlist"], str(date.today())))
 
 
 async def cmd_precheck(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually trigger precheck on current shortlist."""
+    """Manually trigger precheck on current shortlist (bypasses trading-day check)."""
     if not _state["shortlist"]:
         await update.message.reply_text("⚠ 名單為空，請先執行 /scan")
         return
+    if _state["precheck_lock"].locked():
+        await update.message.reply_text("⚠ precheck 進行中，請稍候")
+        return
     await update.message.reply_text(f"🔔 手動 precheck — 監控 {len(_state['shortlist'])} 檔...")
-    await _job_precheck()
+    async with _state["precheck_lock"]:
+        tmp_csv = _write_temp_shortlist_csv(_state["shortlist"])
+        try:
+            code, out = await _run_subprocess_async([
+                sys.executable, "scripts/precheck.py",
+                "--csv", str(tmp_csv), "--min-confidence", "0",
+            ])
+        finally:
+            tmp_csv.unlink(missing_ok=True)
+        lines = out.split("\n")
+        triggered_count = 0
+        for s in _state["shortlist"]:
+            ticker = s["ticker"]
+            ticker_lines = [l for l in lines if re.search(rf"\b{re.escape(ticker)}\b", l)]
+            triggered = any("✅" in l for l in ticker_lines)
+            _save_intraday_hit(ticker, s["entry_bid"], triggered)
+            if triggered:
+                triggered_count += 1
+                await _send(format_entry_signal(
+                    ticker, s.get("name", ""),
+                    price=s["entry_bid"],
+                    entry_low=s["entry_bid"] * 0.97,
+                    entry_high=s["entry_bid"] * 1.03,
+                    stop=s["stop_loss"],
+                ))
+        if triggered_count == 0:
+            await update.message.reply_text(f"⏳ precheck 完成，{len(_state['shortlist'])} 檔均未達進場條件")
 
 
 async def cmd_postmarket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually trigger post-market report."""
+    """Manually trigger post-market report (bypasses trading-day check)."""
     await update.message.reply_text("📈 手動觸發盤後報告...")
-    await _job_postmarket_report()
+    yesterday_csv = _latest_scan_csv(1)
+    yesterday_signals = _parse_scan_csv(yesterday_csv) if yesterday_csv else []
+    intraday_hits = _load_intraday_hits(date.today())
+    tomorrow_csv = _latest_scan_csv(0)
+    tomorrow_signals = _parse_scan_csv(tomorrow_csv) if tomorrow_csv else []
+    await _send(format_postmarket_report(
+        yesterday_signals=yesterday_signals,
+        intraday_hits=intraday_hits,
+        tomorrow_signals=tomorrow_signals,
+        report_date=str(date.today()),
+    ))
 
 
 async def cmd_test(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -473,7 +527,7 @@ async def cmd_test(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    pending_raw = _PENDING_PATH.read_text().strip()
+    pending_raw = _PENDING_PATH.read_text().strip() if _PENDING_PATH.exists() else "null"
     if pending_raw in ("null", ""):
         await update.message.reply_text("目前沒有待確認的建議")
         return
@@ -489,7 +543,7 @@ async def cmd_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_rollback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    pending_raw = _PENDING_PATH.read_text().strip()
+    pending_raw = _PENDING_PATH.read_text().strip() if _PENDING_PATH.exists() else "null"
     if pending_raw not in ("null", ""):
         _PENDING_PATH.write_text("null")
         await update.message.reply_text("🗑 已捨棄待確認的建議")

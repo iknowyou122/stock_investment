@@ -170,19 +170,24 @@ def _call_llm(llm_name: str, params: dict, factor_data: dict) -> dict | None:
         return _call_claude(prompt)
 
 
+async def _run_subprocess_async(cmd: list[str]) -> tuple[int, str]:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _run_subprocess, cmd)
+
+
 async def run_optimize(llm_name: str, notify_fn) -> str:
     """Run the full optimization pipeline. notify_fn(msg) sends a Telegram message.
 
     Returns a status string for logging.
     """
     # Step 1: settle
-    code, out = _run_subprocess([sys.executable, "scripts/daily_runner.py", "settle"])
+    code, out = await _run_subprocess_async([sys.executable, "scripts/daily_runner.py", "settle"])
     if code != 0 or _MIN_SAMPLE_WARNING in out:
         await notify_fn("🤖 優化 Agent：資料不足，本次跳過優化\n（settle 失敗或無結算訊號）")
         return "skipped: settle failed"
 
     # Step 2: factor_report (writes JSON as side effect)
-    code, out = _run_subprocess([sys.executable, "scripts/factor_report.py"])
+    code, out = await _run_subprocess_async([sys.executable, "scripts/factor_report.py"])
     if code != 0:
         await notify_fn(f"🤖 優化 Agent：factor\\_report 失敗\n```\n{out[:300]}\n```")
         return "skipped: factor_report failed"
