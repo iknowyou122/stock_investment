@@ -75,6 +75,12 @@ def _run_subprocess(cmd: list[str]) -> tuple[int, str]:
     return result.returncode, result.stdout + result.stderr
 
 
+async def _run_subprocess_async(cmd: list[str]) -> tuple[int, str]:
+    """Non-blocking subprocess — runs in thread pool so event loop stays alive."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _run_subprocess, cmd)
+
+
 # ── Telegram helpers ─────────────────────────────────────────────────────────
 
 async def _send(text: str) -> None:
@@ -190,7 +196,7 @@ async def _job_opening_scan() -> None:
         return
     async with _state["scan_lock"]:
         _console.print(f"[dim]{datetime.now():%H:%M} 全市場掃描中...[/dim]")
-        code, _ = _run_subprocess([
+        code, _ = await _run_subprocess_async([
             sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db",
         ])
         if code != 0:
@@ -212,7 +218,7 @@ async def _job_hourly_rescan() -> None:
         return
     async with _state["scan_lock"]:
         _console.print(f"[dim]{datetime.now():%H:%M} 全市場重掃...[/dim]")
-        code, _ = _run_subprocess([
+        code, _ = await _run_subprocess_async([
             sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db",
         ])
         if code != 0:
@@ -252,7 +258,7 @@ async def _job_precheck() -> None:
             return
         tmp_csv = _write_temp_shortlist_csv(_state["shortlist"])
         try:
-            code, out = _run_subprocess([
+            code, out = await _run_subprocess_async([
                 sys.executable, "scripts/precheck.py",
                 "--csv", str(tmp_csv), "--min-confidence", "0",
             ])
@@ -282,7 +288,7 @@ async def _job_postmarket_report() -> None:
         return
     # Run new scan for tomorrow's list
     async with _state["scan_lock"]:
-        _run_subprocess([sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db"])
+        await _run_subprocess_async([sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db"])
 
     yesterday_csv = _latest_scan_csv(1)
     yesterday_signals = _parse_scan_csv(yesterday_csv) if yesterday_csv else []
