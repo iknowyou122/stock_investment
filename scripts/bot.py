@@ -30,6 +30,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from rich.console import Console
+from rich.live import Live
 from rich.table import Table
 from rich import box
 
@@ -457,10 +458,10 @@ async def main_async(llm: str) -> None:
     await app.start()
     await app.updater.start_polling()
     try:
-        while True:
-            _console.clear()
-            _console.print(_render_status_table())
-            await asyncio.sleep(30)
+        with Live(_render_status_table(), console=_console, refresh_per_second=0.1, screen=True) as live:
+            while True:
+                live.update(_render_status_table())
+                await asyncio.sleep(30)
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
