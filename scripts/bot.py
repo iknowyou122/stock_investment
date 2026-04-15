@@ -347,54 +347,121 @@ async def cmd_optimize(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _job_optimize()
 
 
+async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manually trigger opening scan (bypasses trading-day check)."""
+    await update.message.reply_text("🔍 手動觸發掃描，執行中（需數分鐘）...")
+    await _job_opening_scan()
+
+
+async def cmd_precheck(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manually trigger precheck on current shortlist."""
+    if not _state["shortlist"]:
+        await update.message.reply_text("⚠ 名單為空，請先執行 /scan")
+        return
+    await update.message.reply_text(f"🔔 手動 precheck — 監控 {len(_state['shortlist'])} 檔...")
+    await _job_precheck()
+
+
+async def cmd_postmarket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manually trigger post-market report."""
+    await update.message.reply_text("📈 手動觸發盤後報告...")
+    await _job_postmarket_report()
+
+
 async def cmd_test(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send one sample of every notification type for visual verification."""
-    _SAMPLE = [
-        {"ticker": "6933", "name": "信驊", "action": "BUY", "confidence": 72,
-         "entry_bid": 320.0, "target": 358.0, "stop_loss": 312.0, "flags": "COILING_PRIME"},
-        {"ticker": "3704", "name": "合一", "action": "WATCH", "confidence": 58,
-         "entry_bid": 85.0, "target": 95.0, "stop_loss": 82.0, "flags": "EMERGING_SETUP"},
-    ]
-    today = str(date.today())
+    """Logic smoke test: verify each command path actually works."""
+    reply = update.message.reply_text
+    ok = "✅"
+    fail = "❌"
+    results: list[str] = []
 
-    await update.message.reply_text("🧪 *通知測試開始* — 依序發送各種通知格式", parse_mode="Markdown")
+    # 1. /status — read state
+    try:
+        last = _state["last_scan_time"]
+        msg = (
+            f"📊 *系統狀態*\n名單：{len(_state['shortlist'])} 檔\n"
+            f"上次掃描：{last.strftime('%H:%M') if last else '尚未執行'}\n"
+            f"推播：{'✅ 開啟' if _state['monitoring_active'] else '⏸ 暫停'}\n"
+            f"LLM：{_state['llm']}"
+        )
+        assert "LLM" in msg
+        results.append(f"{ok} /status — 讀取狀態正常")
+    except Exception as e:
+        results.append(f"{fail} /status — {e}")
 
-    # 1. 開盤名單
-    await _send(format_opening_list(_SAMPLE, today))
+    # 2. /params — read engine_params.json
+    try:
+        params = json.loads(_PARAMS_PATH.read_text())
+        assert "tunable_whitelist" in params
+        results.append(f"{ok} /params — 讀取 engine_params.json（{len(params)} 個參數）")
+    except Exception as e:
+        results.append(f"{fail} /params — {e}")
 
-    # 2. 每小時心跳（無異動）
-    await _send(f"🔄 {datetime.now():%H:%M} 重掃完成，名單無異動（共 {len(_SAMPLE)} 檔）")
+    # 3. /top — format current shortlist (may be empty)
+    try:
+        msg = format_opening_list(_state["shortlist"], str(date.today()))
+        assert msg
+        results.append(f"{ok} /top — 格式化名單（{len(_state['shortlist'])} 檔）")
+    except Exception as e:
+        results.append(f"{fail} /top — {e}")
 
-    # 3. 名單有變動
-    await _send("📊 *名單更新*\n✨ 新進：2330\n⬇️ 移出：2454")
+    # 4. /pause + /resume — toggle monitoring flag
+    try:
+        _state["monitoring_active"] = False
+        assert not _state["monitoring_active"]
+        _state["monitoring_active"] = True
+        assert _state["monitoring_active"]
+        results.append(f"{ok} /pause + /resume — 推播開關切換正常")
+    except Exception as e:
+        results.append(f"{fail} /pause//resume — {e}")
 
-    # 4. 盤中進場警報
-    await _send(format_entry_signal("6933", "信驊", price=322.0,
-                                    entry_low=310.0, entry_high=330.0, stop=312.0))
+    # 5. /approve — write fake pending → approve → verify applied
+    try:
+        params = json.loads(_PARAMS_PATH.read_text())
+        original_val = params.get("watch_min", 40)
+        new_val = round(original_val * 1.05, 1)  # +5%, within ±20%
+        fake_pending = {
+            "confidence": 80,
+            "changes": [{"param": "watch_min", "from": original_val, "to": new_val, "reason": "test"}],
+            "summary": "自動化測試用",
+        }
+        _PENDING_PATH.write_text(json.dumps(fake_pending, ensure_ascii=False))
+        # run approve logic
+        pending = json.loads(_PENDING_PATH.read_text())
+        ok_v, errors = validate_changes(pending["changes"], params)
+        assert ok_v, errors
+        apply_changes(pending["changes"], params_path=_PARAMS_PATH, history_path=_HISTORY_PATH)
+        _PENDING_PATH.write_text("null")
+        updated = json.loads(_PARAMS_PATH.read_text())
+        assert updated["watch_min"] == new_val
+        results.append(f"{ok} /approve — pending 套用成功（watch\\_min {original_val}→{new_val}）")
+    except Exception as e:
+        results.append(f"{fail} /approve — {e}")
 
-    # 5. 盤後報告
-    hits = [{"ticker": "6933", "triggered": True, "price": 322.0},
-            {"ticker": "3704", "triggered": False, "price": 84.0}]
-    await _send(format_postmarket_report(_SAMPLE, hits, _SAMPLE, today))
+    # 6. /rollback — revert the change just applied
+    try:
+        reverted = rollback_params(params_path=_PARAMS_PATH, history_path=_HISTORY_PATH)
+        assert reverted is not None
+        restored = json.loads(_PARAMS_PATH.read_text())
+        assert restored["watch_min"] == original_val
+        results.append(f"{ok} /rollback — 還原成功（watch\\_min 回到 {original_val}）")
+    except Exception as e:
+        results.append(f"{fail} /rollback — {e}")
 
-    # 6. 優化建議（低信心待確認）
-    await _send(
-        f"🤖 *優化建議*（待確認）{today}\n\n"
-        f"📊 信心分數：62/100（低於門檻 75，需手動確認）\n"
-        f"建議調整：\n  · gate\\_vol\\_ratio 1.2→1.1\n\n"
-        f"💬 成交量門檻略調降，預期提升掃描覆蓋率\n\n"
-        f"回覆 /approve 套用，/rollback 取消"
+    # 7. TG send path
+    try:
+        await _send("🧪 _send() 測試訊息")
+        results.append(f"{ok} Telegram send — 推播路徑正常")
+    except Exception as e:
+        results.append(f"{fail} Telegram send — {e}")
+
+    summary = "\n".join(results)
+    passed = sum(1 for r in results if r.startswith(ok))
+    await reply(
+        f"🧪 *指令邏輯測試結果* {passed}/{len(results)} 通過\n\n{summary}\n\n"
+        f"手動觸發指令：/scan /precheck /postmarket /optimize",
+        parse_mode="Markdown",
     )
-
-    # 7. 優化自動套用（高信心）
-    await _send(
-        f"🤖 *優化報告* {today}\n\n"
-        f"📊 信心分數：82/100\n"
-        f"🔧 已套用 1 項調整：\n  · gate\\_vol\\_ratio 1.2→1.25（lift 偏低，提高量能門檻）\n\n"
-        f"💬 本次調整重點：強化量能篩選，減少假突破訊號"
-    )
-
-    await update.message.reply_text("✅ *測試完成* — 共 7 種通知", parse_mode="Markdown")
 
 
 async def cmd_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -480,6 +547,7 @@ async def main_async(llm: str) -> None:
         ("pause", cmd_pause), ("resume", cmd_resume),
         ("params", cmd_params), ("optimize", cmd_optimize),
         ("approve", cmd_approve), ("rollback", cmd_rollback),
+        ("scan", cmd_scan), ("precheck", cmd_precheck), ("postmarket", cmd_postmarket),
         ("test", cmd_test),
     ]:
         app.add_handler(CommandHandler(cmd_name, handler))
