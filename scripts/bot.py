@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import csv
 import json
 import logging
@@ -55,12 +56,25 @@ _PENDING_PATH = _ROOT / "config" / "pending_change.json"
 _LOG_PATH = _ROOT / "logs" / "bot.log"
 _LOG_PATH.parent.mkdir(exist_ok=True)
 
-# Write INFO+ to file, WARNING+ to stderr (hidden behind Live screen)
+# ── In-screen log buffer ─────────────────────────────────────────────────────
+_LOG_LINES: collections.deque[tuple[str, str, str]] = collections.deque(maxlen=12)
+# each entry: (time_str, level, message)
+
+class _PanelHandler(logging.Handler):
+    """Push formatted records into the in-screen ring buffer."""
+    def emit(self, record: logging.LogRecord) -> None:
+        level = record.levelname
+        msg = record.getMessage()[:120]   # trim very long lines
+        _LOG_LINES.append((datetime.now().strftime("%H:%M:%S"), level, msg))
+
+_panel_handler = _PanelHandler()
+_panel_handler.setLevel(logging.INFO)
+
 _file_handler = logging.FileHandler(_LOG_PATH, encoding="utf-8")
 _file_handler.setLevel(logging.INFO)
 _file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
 
-logging.basicConfig(level=logging.INFO, handlers=[_file_handler])
+logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _panel_handler])
 logger = logging.getLogger(__name__)
 
 # ── In-memory state ─────────────────────────────────────────────────────────
@@ -683,15 +697,15 @@ def _render_status_panel() -> Panel:
     # schedule reminder
     table.add_row("[dim]排程[/dim]", "[dim]掃描 09:05 · 重掃 10-13:05 · 盤後 17:00 · 優化 週二/五 18:00[/dim]")
     table.add_row("", "")
-    table.add_row("[dim]指令[/dim]", "[dim]/scan        手動觸發全市場掃描[/dim]")
-    table.add_row("",               "[dim]/precheck    盤中確認名單進場條件[/dim]")
-    table.add_row("",               "[dim]/postmarket  產生盤後報告（命中率+隔日名單）[/dim]")
-    table.add_row("",               "[dim]/optimize    手動觸發 AI 參數優化[/dim]")
-    table.add_row("",               "[dim]/approve     套用待確認的優化建議[/dim]")
-    table.add_row("",               "[dim]/rollback    還原上一版參數[/dim]")
-    table.add_row("",               "[dim]/top         查看今日名單[/dim]")
-    table.add_row("",               "[dim]/status      系統狀態摘要[/dim]")
-    table.add_row("",               "[dim]/test        指令邏輯自動測試[/dim]")
+    table.add_row("[dim]指令[/dim]", "[dim]/scan /precheck /postmarket /optimize /approve /rollback /top /status /test[/dim]")
+    table.add_row("", "")
+
+    # live log tail
+    table.add_row("[dim]── Log ──[/dim]", "")
+    level_color = {"INFO": "dim", "WARNING": "yellow", "ERROR": "red", "CRITICAL": "bold red"}
+    for t, lvl, msg in list(_LOG_LINES):
+        color = level_color.get(lvl, "dim")
+        table.add_row(f"[dim]{t}[/dim]", f"[{color}]{lvl:<8}[/{color}] {msg}")
 
     return Panel(table, title="[bold blue]股票信號機器人[/bold blue]", subtitle=f"[dim]{now.strftime('%Y-%m-%d')}[/dim]", border_style="blue")
 
