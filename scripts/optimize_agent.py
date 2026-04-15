@@ -129,12 +129,43 @@ def _call_openai(prompt: str) -> dict | None:
         return None
 
 
+def _call_glm(prompt: str) -> dict | None:
+    """Call Zhipu AI GLM via OpenAI-compatible endpoint.
+
+    Requires env vars:
+        ZHIPUAI_API_KEY  — API key from open.bigmodel.cn
+        GLM_MODEL        — optional override (default: glm-4-flash)
+    """
+    try:
+        from openai import OpenAI
+        import os
+        client = OpenAI(
+            api_key=os.environ["ZHIPUAI_API_KEY"],
+            base_url="https://open.bigmodel.cn/api/paas/v4/",
+        )
+        model = os.environ.get("GLM_MODEL", "glm-4-flash")
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        return json.loads(resp.choices[0].message.content)
+    except KeyError:
+        print("GLM error: ZHIPUAI_API_KEY not set in .env")
+        return None
+    except Exception as e:
+        print(f"GLM API error: {e}")
+        return None
+
+
 def _call_llm(llm_name: str, params: dict, factor_data: dict) -> dict | None:
     prompt = _build_prompt(params, factor_data)
     if llm_name == "gemini":
         return _call_gemini(prompt)
     elif llm_name == "openai":
         return _call_openai(prompt)
+    elif llm_name == "glm":
+        return _call_glm(prompt)
     else:
         return _call_claude(prompt)
 

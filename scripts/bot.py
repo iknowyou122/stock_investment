@@ -550,8 +550,9 @@ def _select_llm(arg: str | None) -> str:
     _console.print("  [1] Claude (claude-sonnet-4-6)  ← 預設")
     _console.print("  [2] Gemini (gemini-2.5-flash)")
     _console.print("  [3] OpenAI (gpt-4o)")
+    _console.print("  [4] GLM   (glm-4-flash，需 ZHIPUAI_API_KEY)")
     choice = input("選擇 (Enter = 1)：").strip()
-    return {"2": "gemini", "3": "openai"}.get(choice, "claude")
+    return {"2": "gemini", "3": "openai", "4": "glm"}.get(choice, "claude")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -619,7 +620,7 @@ async def main_async(llm: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Taiwan stock signal Telegram bot")
-    parser.add_argument("--llm", default=None, choices=["claude", "gemini", "openai"],
+    parser.add_argument("--llm", default=None, choices=["claude", "gemini", "openai", "glm"],
                         help="LLM for optimize_agent (skips interactive prompt)")
     args = parser.parse_args()
 
