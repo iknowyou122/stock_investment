@@ -28,8 +28,11 @@
 - `Makefile` 新增 `bot-setup` / `bot` targets
 
 **不包含（不改動）：**
-- `batch_scan.py`、`precheck.py`、`factor_report.py`、`optimize.py`
+- `batch_scan.py`、`precheck.py`、`optimize.py`
 - `engine_params.json`、資料庫 schema、現有 API
+
+**小幅改動（必要）：**
+- `factor_report.py`：新增 `--json` flag，輸出結構化 JSON 供 optimize_agent 解析（原有 Rich terminal 輸出保持不變）
 
 ---
 
@@ -38,15 +41,17 @@
 ```
 make bot-setup（首次）→ 寫入 .env（TG token + Chat ID）
 
-make bot（每日啟動）
+make bot（每日啟動）[或 make bot LLM=gemini 略過互動]
   → 互動選擇 LLM（Claude / Gemini / OpenAI，預設 Claude）
-  → 啟動 scripts/bot.py daemon
-       ├─ APScheduler（排程，見下表）
-       └─ Telegram long-poll（指令處理）
+  → 啟動 scripts/bot.py daemon（純 asyncio，使用 AsyncIOScheduler）
+       ├─ AsyncIOScheduler（apscheduler 3.x asyncio 模式）
+       └─ Telegram Application.run_polling()（同一 event loop）
 
-scripts/optimize_agent.py（由 bot.py 呼叫）
-  settle → factor_report → Claude API → 寫 engine_params.json → Telegram
+scripts/optimize_agent.py（由 bot.py 呼叫，await 方式）
+  settle → factor_report --json → 解析 JSON → LLM API → 寫 engine_params.json → Telegram
 ```
+
+**技術注意：** `bot.py` 使用 `python-telegram-bot >= 21`（純 asyncio），排程器使用 `AsyncIOScheduler`（apscheduler 3.x）並綁定同一 event loop，避免跨執行緒呼叫 `send_message` 的 deadlock。所有排程 job 定義為 `async def`。
 
 ---
 
@@ -54,11 +59,17 @@ scripts/optimize_agent.py（由 bot.py 呼叫）
 
 | 時間 | 動作 | 推播條件 |
 |------|------|---------|
-| 平日 09:05 | 全市場掃描，建立今日名單 | 固定推播開盤名單 |
-| 平日 09:05–13:25，每 10 分鐘 | precheck 今日名單 | 有達進場條件才推 |
+| 平日 09:05 | 全市場掃描，建立今日名單（上限 20 檔） | 固定推播開盤名單 |
+| 平日 09:05–13:25，每 10 分鐘 | precheck 今日名單 | 有達進場條件才推；若上一輪未完成則跳過 |
 | 平日 10:05、11:05、12:05、13:05 | 全市場重掃，更新排名 | 有名單異動才推 |
 | 平日 17:00 | 盤後報告 | 固定推播 |
 | 週二、週五 18:00 | optimize_agent | 固定推播優化報告 |
+
+**交易日判斷：** 排程 job 執行前呼叫 `is_trading_day(date)` 工具函式（複用 `batch_scan.py` 現有的 TWSE 休市邏輯）。非交易日自動 skip 並靜默（不推播）。
+
+**名單上限：** 今日監控名單最多 20 檔（取 confidence 最高者）。precheck 單輪若耗時超過 8 分鐘（即下一輪觸發前 2 分鐘仍在跑），自動 skip 下一輪並記錄 warning。
+
+**盤中命中記錄：** precheck 每輪結果寫入 `data/intraday_hits/{date}.json`（格式：`{ticker, time, price, triggered: bool}`），供 17:00 盤後報告計算命中率使用。
 
 ---
 
@@ -153,11 +164,11 @@ COILING_PRIME 近期勝率最高(61%)，建議提高權重（下次評估）。
 
 ### 執行流程
 
-1. `settle` — 補填近期 T+1/T+3/T+5 結果
-2. `factor_report` — 產出 lift 分析 + walk-forward grid search
-3. 解析輸出（lift 表、勝率、各因子貢獻度）
-4. 呼叫 LLM API（傳入當前參數 + 分析報告）
-5. 信心判斷 → auto-apply 或推 Telegram 等確認
+1. `settle` — 補填近期 T+1/T+3/T+5 結果（subprocess）
+2. `factor_report --json` — 產出結構化 JSON（lift 表、勝率、各因子貢獻度）
+3. 直接解析 JSON（不解析 terminal Rich 輸出）
+4. 呼叫 LLM API（傳入當前參數 + JSON 分析報告）
+5. 信心判斷 → auto-apply 或寫入 pending state 並推 Telegram 等 `/approve`
 6. 推送報告
 
 ### LLM Prompt 結構
@@ -192,7 +203,25 @@ COILING_PRIME 近期勝率最高(61%)，建議提高權重（下次評估）。
 | 信心門檻 | confidence ≥ 75 → auto-apply；< 75 → 推 Telegram 等 `/approve` |
 | 樣本數保護 | 樣本 < 20 個信號時，只報告不調整 |
 | Changelog | 每次調整寫入 `config/param_history.json` |
+| Changelog | 每次調整寫入 `config/param_history.json`（不自動清理，實作時加 100 筆上限 rotation） |
 | 回滾 | `/rollback` 指令還原上一版參數 |
+
+### `/approve` 與 `/rollback` 狀態機
+
+pending change 狀態持久化至 `config/pending_change.json`（bot 重啟後不遺失）：
+
+```
+狀態：none | awaiting_approval
+
+none：
+  /approve → 回覆「目前沒有待確認的建議」
+  /rollback → 從 param_history 還原上一版，推播確認
+
+awaiting_approval：
+  /approve → 套用 pending_change.json，清除狀態，推播已套用
+  /rollback → 捨棄 pending_change.json，回復 none，推播已捨棄
+  bot 重啟 → 讀取 pending_change.json，保持 awaiting_approval
+```
 
 ---
 
@@ -252,10 +281,12 @@ optimize_agent LLM：
 
 | 檔案 | 說明 |
 |------|------|
-| `scripts/bot.py` | 主 daemon（APScheduler + Telegram Bot） |
+| `scripts/bot.py` | 主 daemon（AsyncIOScheduler + Telegram Bot） |
 | `scripts/optimize_agent.py` | AI 優化 agent |
 | `scripts/bot_setup.py` | 一鍵安裝腳本 |
-| `config/param_history.json` | 參數變更 changelog |
+| `config/param_history.json` | 參數變更 changelog（100 筆 rotation） |
+| `config/pending_change.json` | 待確認的 LLM 建議（持久化狀態） |
+| `data/intraday_hits/{date}.json` | 每日盤中 precheck 命中記錄 |
 
 ### Makefile 新增
 
@@ -273,7 +304,7 @@ bot:
 
 ```
 python-telegram-bot>=21.0
-apscheduler>=3.10
+apscheduler>=3.10,<4.0   # 使用 AsyncIOScheduler，不升級至 4.x（API 變動大）
 ```
 
 （其餘依賴：`anthropic`、`google-generativeai`、`openai` 已在 extras 中）
