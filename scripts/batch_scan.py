@@ -25,6 +25,8 @@ import os
 import re
 import sys
 import time
+import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
@@ -1195,10 +1197,15 @@ def _tg_escape(text: str) -> str:
 
 def _notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int) -> None:
     """Read the saved CSV and push the opening list to Telegram."""
-    import csv as _csv
-    import urllib.parse
-    import urllib.request
+    try:
+        _do_notify_telegram(csv_path, scan_date, top, min_confidence)
+    except Exception as exc:
+        import traceback
+        _console.print(f"  [red]❌ _notify_telegram 例外：{exc}[/red]")
+        _console.print(traceback.format_exc())
 
+
+def _do_notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int) -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
@@ -1207,8 +1214,8 @@ def _notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int) -
 
     name_map = _build_name_map()
     signals: list[dict] = []
-    with open(csv_path, newline="") as f:
-        for row in _csv.DictReader(f):
+    with open(csv_path, newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
             if row.get("action") not in ("LONG", "WATCH"):
                 continue
             conf = int(row.get("confidence", 0) or 0)
@@ -1225,47 +1232,46 @@ def _notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int) -
                 "stop_loss": float(row.get("stop_loss", 0) or 0),
                 "flags": row.get("data_quality_flags", ""),
             })
-    # CSV is already trend-sorted; no re-sort needed
+
+    _console.print(f"  [dim]TG notify: {len(signals)} 筆 LONG/WATCH (min_conf={min_confidence}, top={top})[/dim]")
 
     if not signals:
-        _tg_send(token, chat_id, f"📋 {scan_date} 掃描結果\n無符合條件的標的")
+        _tg_send(token, chat_id, f"📋 {scan_date} 掃描結果\n無符合條件的標的（LONG/WATCH 0 筆）")
         return
 
-    def _trend_bar(score: int) -> str:
-        filled = min(score // 4, 5)   # 0–20 pts → 0–5 blocks
-        return "█" * filled + "░" * (5 - filled) + f" {score}"
-
-    lines = [f"📋 {scan_date} 掃描結果（共 {len(signals)} 檔，趨勢強度排序）\n"]
+    # CSV already sorted by trend_score descending from _save_csv
+    lines = [f"📋 {scan_date} 掃描結果（{len(signals)} 檔，趨勢強度排序）\n"]
     for i, s in enumerate(signals[:top], 1):
         action_icon = "🟢" if s["action"] == "LONG" else "🟡"
         name_str = f" {s['name']}" if s.get("name") else ""
         entry = f"{s['entry_bid']:.1f}" if s["entry_bid"] else "—"
         target = f"{s['target']:.1f}" if s["target"] else "—"
-        stop = f"{s['stop_loss']:.1f}" if s["stop_loss"] else "—"
+        stop  = f"{s['stop_loss']:.1f}" if s["stop_loss"] else "—"
+        filled = min(s["trend_score"] // 4, 5)
+        trend_bar = "█" * filled + "░" * (5 - filled) + f"({s['trend_score']})"
         upside = (
-            f" ↑{((s['target']-s['entry_bid'])/s['entry_bid']*100):.1f}%"
+            f" ↑{((s['target'] - s['entry_bid']) / s['entry_bid'] * 100):.1f}%"
             if s["entry_bid"] and s["target"] else ""
         )
-        trend = _trend_bar(s["trend_score"])
-        # highlight special flags
-        key_flags = [f for f in (s.get("flags") or "").split("|")
-                     if any(k in f for k in ("COILING", "BREAKOUT", "EMERGING", "RISING", "SECTOR_RANK"))]
+        key_flags = [
+            fl for fl in (s.get("flags") or "").split("|")
+            if any(k in fl for k in ("COILING", "BREAKOUT", "EMERGING", "RISING", "SECTOR_RANK"))
+        ]
         flag_str = f"\n    [{' | '.join(key_flags)}]" if key_flags else ""
         lines.append(
-            f"{i}. {action_icon} {s['ticker']}{name_str}  趨勢{trend}  信心{s['confidence']}\n"
-            f"   進 {entry} → 目標 {target}{upside}  停 {stop}{flag_str}"
+            f"{i}. {action_icon} {s['ticker']}{name_str}  趨勢{trend_bar}  信心{s['confidence']}\n"
+            f"   進{entry} 目標{target}{upside} 停{stop}{flag_str}"
         )
 
     msg = "\n".join(lines)
-    # Telegram message limit is 4096 chars
     if len(msg) > 4000:
         msg = msg[:4000] + "\n…（已截斷）"
 
     ok = _tg_send(token, chat_id, msg)
     if ok:
-        _console.print(f"  [green]✅ 結果已推送到 Telegram（{len(signals)} 檔）[/green]")
+        _console.print(f"  [green]✅ TG 推播成功（{len(signals)} 檔，顯示前 {min(top, len(signals))} 名）[/green]")
     else:
-        _console.print("  [red]❌ Telegram 推播失敗[/red]")
+        _console.print("  [red]❌ TG 推播失敗[/red]")
 
 
 def _tg_send(token: str, chat_id: str, text: str) -> bool:
