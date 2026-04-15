@@ -487,30 +487,30 @@ async def cmd_optimize(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _job_optimize()
 
 
-@_track("scan")
-async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("CMD /scan from user=%s", update.effective_user.id if update.effective_user else "?")
+@_track("plan")
+async def cmd_plan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("CMD /plan from user=%s", update.effective_user.id if update.effective_user else "?")
     if _state["scan_lock"].locked():
         await update.message.reply_text("⚠ 掃描進行中，請稍候")
         return
     await _job_opening_scan(force=True, notify_fn=_send)
 
 
-@_track("precheck")
-async def cmd_precheck(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("CMD /precheck from user=%s", update.effective_user.id if update.effective_user else "?")
+@_track("trade")
+async def cmd_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("CMD /trade from user=%s", update.effective_user.id if update.effective_user else "?")
     if not _state["shortlist"]:
-        await update.message.reply_text("⚠ 名單為空，請先執行 /scan")
+        await update.message.reply_text("⚠ 名單為空，請先執行 /plan")
         return
     if _state["precheck_lock"].locked():
-        await update.message.reply_text("⚠ precheck 進行中，請稍候")
+        await update.message.reply_text("⚠ trade 進行中，請稍候")
         return
     await _job_precheck(force=True, notify_fn=_send)
 
 
-@_track("postmarket")
-async def cmd_postmarket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("CMD /postmarket from user=%s", update.effective_user.id if update.effective_user else "?")
+@_track("report")
+async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("CMD /report from user=%s", update.effective_user.id if update.effective_user else "?")
     await _job_postmarket_report(force=True, notify_fn=_send)
 
 
@@ -606,7 +606,7 @@ async def cmd_test(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     passed = sum(1 for r in results if r.startswith(ok))
     await reply(
         f"🧪 *指令邏輯測試結果* {passed}/{len(results)} 通過\n\n{summary}\n\n"
-        f"手動觸發指令：/scan /precheck /postmarket /optimize",
+        f"手動觸發指令：/plan /trade /report /optimize",
         parse_mode="Markdown",
     )
 
@@ -649,9 +649,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "📖 *指令說明*\n"
         "\n"
         "*手動觸發*\n"
-        "/scan         全市場掃描，更新今日名單並推播\n"
-        "/precheck     對名單即時取報價，達進場條件發警報\n"
-        "/postmarket   盤後報告（命中率 \\+ 隔日名單）\n"
+        "/plan         全市場掃描，更新今日名單並推播\n"
+        "/trade        對名單即時取報價，達進場條件發警報\n"
+        "/report       盤後報告（命中率 \\+ 隔日名單）\n"
         "/optimize     啟動 AI 參數優化 Agent\n"
         "\n"
         "*查詢*\n"
@@ -724,7 +724,7 @@ def _render_status_panel() -> Panel:
     # schedule reminder
     table.add_row("[dim]排程[/dim]", "[dim]掃描 09:05 · 重掃 10-13:05 · 盤後 17:00 · 優化 週二/五 18:00[/dim]")
     table.add_row("", "")
-    table.add_row("[dim]指令[/dim]", "[dim]/scan /precheck /postmarket /optimize /approve /rollback /top /status /test[/dim]")
+    table.add_row("[dim]指令[/dim]", "[dim]/plan /trade /report /optimize /approve /rollback /top /status /test[/dim]")
     table.add_row("", "")
 
     # live log tail
@@ -775,7 +775,7 @@ async def main_async(llm: str) -> None:
         ("pause", cmd_pause), ("resume", cmd_resume),
         ("params", cmd_params), ("optimize", cmd_optimize),
         ("approve", cmd_approve), ("rollback", cmd_rollback),
-        ("scan", cmd_scan), ("precheck", cmd_precheck), ("postmarket", cmd_postmarket),
+        ("plan", cmd_plan), ("trade", cmd_trade), ("report", cmd_report),
         ("test", cmd_test), ("help", cmd_help),
     ]:
         app.add_handler(CommandHandler(cmd_name, handler))
