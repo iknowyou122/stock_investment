@@ -80,9 +80,11 @@ def is_trading_day(d: date) -> bool:
     return d.weekday() < 5
 ```
 
-Also create `src/taiwan_stock_agent/utils/__init__.py` if it does not exist:
-```python
-# src/taiwan_stock_agent/utils/__init__.py
+- [ ] **Step 3b: Create the `utils/` package directory**
+
+```bash
+mkdir -p src/taiwan_stock_agent/utils
+touch src/taiwan_stock_agent/utils/__init__.py
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -110,9 +112,37 @@ git commit -m "feat: add is_trading_day shared utility (extracted from backtest/
 - Create: `config/param_history.json`
 - Create: `config/pending_change.json`
 
-- [ ] **Step 1: Add `tunable_whitelist` to engine_params.json**
+- [ ] **Step 1: Write failing test for tunable_whitelist**
 
-Open `config/engine_params.json` and add the `tunable_whitelist` key. The whitelist contains parameter names the LLM is allowed to change. All existing numeric params are tunable except thresholds that relate to data availability (`rsi_momentum_lo` excluded — too low breaks RSI logic):
+Add to `tests/unit/test_bot_utils.py`:
+
+```python
+import json
+from pathlib import Path
+
+def test_engine_params_has_tunable_whitelist():
+    params_path = Path(__file__).parents[2] / "config" / "engine_params.json"
+    params = json.loads(params_path.read_text())
+    assert "tunable_whitelist" in params, "engine_params.json must have tunable_whitelist"
+    whitelist = params["tunable_whitelist"]
+    assert isinstance(whitelist, list)
+    assert len(whitelist) >= 5
+    # Every whitelisted key must exist as a numeric param
+    for key in whitelist:
+        assert key in params, f"whitelist key '{key}' not in params"
+        assert isinstance(params[key], (int, float))
+```
+
+- [ ] **Step 2: Run test to confirm it fails**
+
+```bash
+.venv/bin/pytest tests/unit/test_bot_utils.py::test_engine_params_has_tunable_whitelist -v
+```
+Expected: FAILED with `AssertionError: engine_params.json must have tunable_whitelist`
+
+- [ ] **Step 3: Add `tunable_whitelist` to engine_params.json**
+
+Open `config/engine_params.json` and add the `tunable_whitelist` key. The whitelist contains parameter names the LLM is allowed to change. All existing numeric params are tunable except `rsi_momentum_lo` (too low breaks RSI signal logic):
 
 ```json
 {
@@ -145,40 +175,14 @@ Open `config/engine_params.json` and add the `tunable_whitelist` key. The whitel
 }
 ```
 
-- [ ] **Step 2: Create param_history.json**
+- [ ] **Step 4: Create state files**
 
 ```bash
 echo '[]' > config/param_history.json
-```
-
-- [ ] **Step 3: Create pending_change.json**
-
-```bash
 echo 'null' > config/pending_change.json
 ```
 
-- [ ] **Step 4: Write test for param whitelist loading**
-
-Add to `tests/unit/test_bot_utils.py`:
-
-```python
-import json
-from pathlib import Path
-
-def test_engine_params_has_tunable_whitelist():
-    params_path = Path(__file__).parents[2] / "config" / "engine_params.json"
-    params = json.loads(params_path.read_text())
-    assert "tunable_whitelist" in params
-    whitelist = params["tunable_whitelist"]
-    assert isinstance(whitelist, list)
-    assert len(whitelist) >= 5
-    # Every whitelisted key must exist as a numeric param
-    for key in whitelist:
-        assert key in params
-        assert isinstance(params[key], (int, float))
-```
-
-- [ ] **Step 5: Run test**
+- [ ] **Step 5: Run test to confirm it passes**
 
 ```bash
 .venv/bin/pytest tests/unit/test_bot_utils.py::test_engine_params_has_tunable_whitelist -v
@@ -551,7 +555,7 @@ git commit -m "feat: Telegram message formatters (opening list, entry signal, po
 **Files:**
 - Create: `scripts/optimize_agent.py`
 
-The agent runs `settle`, then `factor_report` (which already writes JSON to `data/factor_reports/factor_report_{date}.json`), reads that JSON, calls the chosen LLM, validates changes, and applies or parks them for approval.
+The agent runs `settle`, then `factor_report` (which **already writes JSON** to `data/factor_reports/factor_report_{date}.json` via `_save_recommendations()` — confirmed in source), reads that JSON directly, calls the chosen LLM, validates changes, and applies or parks them for approval. No `--json` flag needed on `factor_report.py`.
 
 - [ ] **Step 1: Create optimize_agent.py**
 
@@ -1108,8 +1112,41 @@ async def _job_hourly_rescan() -> None:
             await _send("\n".join(lines))
 
 
+def _write_temp_shortlist_csv(signals: list[dict]) -> Path:
+    """Write shortlist to a temp CSV compatible with precheck.py's --csv format."""
+    import tempfile
+    today = date.today()
+    tmp = Path(tempfile.mktemp(suffix=".csv"))
+    fieldnames = [
+        "scan_date", "analysis_date", "ticker", "action", "confidence",
+        "free_tier", "halt", "entry_bid", "stop_loss", "target",
+        "momentum", "chip_analysis", "risk_factors", "data_quality_flags",
+    ]
+    with open(tmp, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for s in signals:
+            writer.writerow({
+                "scan_date": str(today),
+                "analysis_date": str(today),
+                "ticker": s["ticker"],
+                "action": s["action"],
+                "confidence": s["confidence"],
+                "free_tier": "True",
+                "halt": "False",
+                "entry_bid": s["entry_bid"],
+                "stop_loss": s["stop_loss"],
+                "target": s["target"],
+                "momentum": "",
+                "chip_analysis": "",
+                "risk_factors": "",
+                "data_quality_flags": s.get("flags", ""),
+            })
+    return tmp
+
+
 async def _job_precheck() -> None:
-    """Every 10 min — check entry conditions for shortlist."""
+    """Every 10 min — check entry conditions for shortlist via precheck.py --csv."""
     if not is_trading_day(date.today()):
         return
     if not _state["monitoring_active"]:
@@ -1120,16 +1157,25 @@ async def _job_precheck() -> None:
     async with _state["precheck_lock"]:
         if not _state["shortlist"]:
             return
-        tickers = ",".join(s["ticker"] for s in _state["shortlist"][:20])
-        code, out = _run_subprocess([
-            sys.executable, "scripts/precheck.py",
-            "--tickers", tickers, "--min-confidence", "0",
-        ])
-        # Parse stdout for triggered signals (precheck outputs structured lines)
-        # Record hits for post-market report
+        # Write shortlist to temp CSV (precheck.py reads CSV, has no --tickers flag)
+        tmp_csv = _write_temp_shortlist_csv(_state["shortlist"])
+        try:
+            code, out = _run_subprocess([
+                sys.executable, "scripts/precheck.py",
+                "--csv", str(tmp_csv), "--min-confidence", "0",
+            ])
+        finally:
+            tmp_csv.unlink(missing_ok=True)
+
+        # Parse per-ticker: find lines containing this specific ticker with ✅
+        # Using \b word boundary to avoid "6933" matching "69330"
+        import re
+        lines = out.split("\n")
         for s in _state["shortlist"]:
-            triggered = s["ticker"] in out and "✅" in out
-            _save_intraday_hit(s["ticker"], price=0.0, triggered=triggered)
+            ticker = s["ticker"]
+            ticker_lines = [l for l in lines if re.search(rf"\b{re.escape(ticker)}\b", l)]
+            triggered = any("✅" in l for l in ticker_lines)
+            _save_intraday_hit(s["ticker"], price=s["entry_bid"], triggered=triggered)
             if triggered:
                 await _send(
                     format_entry_signal(
@@ -1223,7 +1269,7 @@ async def cmd_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not ok:
         await update.message.reply_text(f"⚠ 驗證失敗：{'; '.join(errors)}")
         return
-    apply_changes(pending["changes"])
+    apply_changes(pending["changes"], params_path=_PARAMS_PATH, history_path=_ROOT / "config" / "param_history.json")
     _PENDING_PATH.write_text("null")
     await update.message.reply_text("✅ 已套用優化建議")
 
@@ -1442,12 +1488,12 @@ Expected: `syntax OK`
 
 ```bash
 .venv/bin/python -c "
-import scripts.optimize_agent
 from taiwan_stock_agent.utils.trading_calendar import is_trading_day
 from taiwan_stock_agent.utils.bot_formatters import format_opening_list
 from taiwan_stock_agent.utils.param_safety import validate_changes
 print('all imports OK')
 "
+# Note: optimize_agent imports via py_compile above, not as a module (scripts/ is not a package)
 ```
 Expected: `all imports OK`
 
