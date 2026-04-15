@@ -109,6 +109,7 @@ async def _run_subprocess_async(cmd: list[str], **_) -> tuple[int, str]:
     script = Path(cmd[1]).name if len(cmd) > 1 else "?"
     proc = await asyncio.create_subprocess_exec(
         *cmd,
+        stdin=asyncio.subprocess.DEVNULL,   # no TTY → batch_scan skips interactive menus
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=str(_ROOT),
