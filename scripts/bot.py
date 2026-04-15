@@ -22,7 +22,6 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ROOT — needed for scripts.optimize_agent
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -191,9 +190,9 @@ def _save_intraday_hit(ticker: str, price: float, triggered: bool) -> None:
 
 # ── Scheduled jobs ───────────────────────────────────────────────────────────
 
-async def _job_opening_scan() -> None:
+async def _job_opening_scan(force: bool = False) -> None:
     """09:05 — full market scan, build today's shortlist."""
-    if not is_trading_day(date.today()):
+    if not force and not is_trading_day(date.today()):
         return
     async with _state["scan_lock"]:
         _console.print(f"[dim]{datetime.now():%H:%M} 全市場掃描中...[/dim]")
@@ -245,9 +244,9 @@ async def _job_hourly_rescan() -> None:
             await _send(f"🔄 {datetime.now():%H:%M} 重掃完成，名單無異動（共 {len(new_list)} 檔）")
 
 
-async def _job_precheck() -> None:
+async def _job_precheck(force: bool = False) -> None:
     """Every 10 min — check entry conditions for shortlist via precheck.py --csv."""
-    if not is_trading_day(date.today()):
+    if not force and not is_trading_day(date.today()):
         return
     if not _state["monitoring_active"]:
         return
@@ -283,9 +282,9 @@ async def _job_precheck() -> None:
                 ))
 
 
-async def _job_postmarket_report() -> None:
+async def _job_postmarket_report(force: bool = False) -> None:
     """17:00 — post-market report with hit rate + tomorrow's list."""
-    if not is_trading_day(date.today()):
+    if not force and not is_trading_day(date.today()):
         return
     # Run new scan for tomorrow's list
     async with _state["scan_lock"]:
@@ -307,7 +306,7 @@ async def _job_postmarket_report() -> None:
 
 async def _job_optimize() -> None:
     """Tue/Fri 18:00 — run AI optimization agent."""
-    from scripts.optimize_agent import run_optimize  # noqa: PLC0415
+    from taiwan_stock_agent.optimize import run_optimize
     await run_optimize(_state["llm"], _send)
 
 
@@ -362,18 +361,7 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("⚠ 掃描進行中，請稍候")
         return
     await update.message.reply_text("🔍 手動觸發掃描，執行中（需數分鐘）...")
-    async with _state["scan_lock"]:
-        code, _ = await _run_subprocess_async([
-            sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db",
-        ])
-        if code != 0:
-            await update.message.reply_text("❌ 掃描失敗，請查看 terminal log")
-            return
-        csv_path = _latest_scan_csv(0)
-        if csv_path:
-            _state["shortlist"] = _parse_scan_csv(csv_path)
-            _state["last_scan_time"] = datetime.now()
-        await _send(format_opening_list(_state["shortlist"], str(date.today())))
+    await _job_opening_scan(force=True)
 
 
 async def cmd_precheck(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -385,49 +373,13 @@ async def cmd_precheck(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("⚠ precheck 進行中，請稍候")
         return
     await update.message.reply_text(f"🔔 手動 precheck — 監控 {len(_state['shortlist'])} 檔...")
-    async with _state["precheck_lock"]:
-        tmp_csv = _write_temp_shortlist_csv(_state["shortlist"])
-        try:
-            code, out = await _run_subprocess_async([
-                sys.executable, "scripts/precheck.py",
-                "--csv", str(tmp_csv), "--min-confidence", "0",
-            ])
-        finally:
-            tmp_csv.unlink(missing_ok=True)
-        lines = out.split("\n")
-        triggered_count = 0
-        for s in _state["shortlist"]:
-            ticker = s["ticker"]
-            ticker_lines = [l for l in lines if re.search(rf"\b{re.escape(ticker)}\b", l)]
-            triggered = any("✅" in l for l in ticker_lines)
-            _save_intraday_hit(ticker, s["entry_bid"], triggered)
-            if triggered:
-                triggered_count += 1
-                await _send(format_entry_signal(
-                    ticker, s.get("name", ""),
-                    price=s["entry_bid"],
-                    entry_low=s["entry_bid"] * 0.97,
-                    entry_high=s["entry_bid"] * 1.03,
-                    stop=s["stop_loss"],
-                ))
-        if triggered_count == 0:
-            await update.message.reply_text(f"⏳ precheck 完成，{len(_state['shortlist'])} 檔均未達進場條件")
+    await _job_precheck(force=True)
 
 
 async def cmd_postmarket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Manually trigger post-market report (bypasses trading-day check)."""
     await update.message.reply_text("📈 手動觸發盤後報告...")
-    yesterday_csv = _latest_scan_csv(1)
-    yesterday_signals = _parse_scan_csv(yesterday_csv) if yesterday_csv else []
-    intraday_hits = _load_intraday_hits(date.today())
-    tomorrow_csv = _latest_scan_csv(0)
-    tomorrow_signals = _parse_scan_csv(tomorrow_csv) if tomorrow_csv else []
-    await _send(format_postmarket_report(
-        yesterday_signals=yesterday_signals,
-        intraday_hits=intraday_hits,
-        tomorrow_signals=tomorrow_signals,
-        report_date=str(date.today()),
-    ))
+    await _job_postmarket_report(force=True)
 
 
 async def cmd_test(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
