@@ -48,6 +48,7 @@ from taiwan_stock_agent.utils.param_safety import validate_changes, apply_change
 _console = Console()
 _ROOT = Path(__file__).resolve().parents[1]
 _SCAN_DIR = _ROOT / "data" / "scans"
+_NAME_MAP_DIR = _ROOT / "data" / "watchlist_cache"
 _HITS_DIR = _ROOT / "data" / "intraday_hits"
 _PARAMS_PATH = _ROOT / "config" / "engine_params.json"
 _HISTORY_PATH = _ROOT / "config" / "param_history.json"
@@ -170,6 +171,18 @@ def _track(cmd_name: str):
 
 # ── CSV helpers ──────────────────────────────────────────────────────────────
 
+def _get_latest_name_map() -> dict[str, str]:
+    """Load the most recent name_map_YYYY-MM-DD.json from cache."""
+    paths = sorted(_NAME_MAP_DIR.glob("name_map_*.json"), reverse=True)
+    if not paths:
+        return {}
+    try:
+        return json.loads(paths[0].read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error(f"Failed to load name map: {e}")
+        return {}
+
+
 def _latest_scan_csv(offset_trading_days: int = 0) -> Path | None:
     """Find the scan CSV that is `offset_trading_days` trading days before today."""
     candidate = date.today()
@@ -186,17 +199,19 @@ def _latest_scan_csv(offset_trading_days: int = 0) -> Path | None:
 
 
 def _parse_scan_csv(path: Path, min_conf: int = 40, max_n: int = 20) -> list[dict]:
+    name_map = _get_latest_name_map()
     signals = []
-    with open(path, newline="") as f:
+    with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             if row.get("action") not in ("LONG", "WATCH"):
                 continue
             conf = int(row.get("confidence", 0) or 0)
             if conf < min_conf:
                 continue
+            ticker = row["ticker"]
             signals.append({
-                "ticker": row["ticker"],
-                "name": row.get("name", ""),
+                "ticker": ticker,
+                "name": name_map.get(ticker, ""),
                 "action": row["action"],
                 "confidence": conf,
                 "entry_bid": float(row.get("entry_bid", 0) or 0),

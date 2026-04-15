@@ -18,12 +18,10 @@ def format_opening_list(signals: list[dict], scan_date: str) -> str:
     lines = [f"📋 *開盤名單* {scan_date}\n"]
     for s in signals[:10]:
         emoji = _action_emoji(s["action"], s.get("flags", ""))
-        flags_str = s.get("flags", "")
-        flag_note = f"\n   ★ {flags_str.split('|')[0]}" if flags_str else ""
+        name = s.get("name", "")
         lines.append(
-            f"{emoji} *{s['ticker']}* {s.get('name','')}  conf:{s['confidence']}"
+            f"{emoji} *{s['ticker']} {name}* \n 信心:{s['confidence']}"
             f"  入場 {s['entry_bid']:.0f}  目標 {s['target']:.0f}  停損 {s['stop_loss']:.0f}"
-            f"{flag_note}"
         )
     lines.append(f"\n共 {len(signals)} 檔入監控，蓄積待噴發 {len(coiling)} 檔")
     return "\n".join(lines)
@@ -34,7 +32,7 @@ def format_entry_signal(ticker: str, name: str, price: float, entry_low: float, 
     status = "✅ 在入場區間" if in_zone else f"⏳ 等待（入場區 {entry_low:.0f}–{entry_high:.0f}）"
     return (
         f"🔔 *進場訊號*\n"
-        f"*{ticker}* {name}  現價 {price:.0f} {status}\n"
+        f"*{ticker} {name}*  現價 {price:.0f} {status}\n"
         f"停損 {stop:.0f}"
     )
 
@@ -52,14 +50,21 @@ def format_postmarket_report(
     lines = [f"📈 *盤後報告* {report_date}\n"]
     lines.append("━━ 今日命中率 ━━")
     lines.append(f"昨日名單 {total} 檔 → {hit_count} 檔達進場條件 ({hit_rate})")
+    
+    # 建立名稱查找表
+    name_map = {s["ticker"]: s.get("name", "") for s in yesterday_signals}
+    
     for h in intraday_hits:
         icon = "✅" if h.get("triggered") else "⏳"
-        lines.append(f"{icon} {h['ticker']}  現價 {h.get('price', '–')}")
+        ticker = h["ticker"]
+        name = name_map.get(ticker, "")
+        lines.append(f"{icon} *{ticker} {name}*  現價 {h.get('price', '–')}")
 
     lines.append("\n━━ 隔日建倉名單 ━━")
     for s in tomorrow_signals[:8]:
+        name = s.get("name", "")
         lines.append(
-            f"🟢 *{s['ticker']}* {s.get('name','')}  conf:{s['confidence']}"
+            f"🟢 *{s['ticker']} {name}*  信心:{s['confidence']}"
             f"  入場 {s['entry_bid']:.0f}  目標 {s['target']:.0f}  停損 {s['stop_loss']:.0f}"
         )
 
@@ -67,6 +72,7 @@ def format_postmarket_report(
     if coiling_tomorrow:
         lines.append("\n━━ 蓄積待噴發（T-1/T-2 佈局）━━")
         for s in coiling_tomorrow[:4]:
-            lines.append(f"⚡ *{s['ticker']}* {s.get('name','')}  {s.get('flags','')}")
+            name = s.get("name", "")
+            lines.append(f"⚡ *{s['ticker']} {name}*  {s.get('flags','')}")
 
     return "\n".join(lines)
