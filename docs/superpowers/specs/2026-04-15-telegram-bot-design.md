@@ -69,6 +69,8 @@ scripts/optimize_agent.py（由 bot.py 呼叫，await 方式）
 
 **名單上限：** 今日監控名單最多 20 檔（取 confidence 最高者）。precheck 單輪若耗時超過 8 分鐘（即下一輪觸發前 2 分鐘仍在跑），自動 skip 下一輪並記錄 warning。
 
+**全市場重掃並發保護：** 10:05/11:05/12:05/13:05 的重掃 job 若前一輪仍在執行，自動 skip 本輪（與 precheck 相同機制）。使用 asyncio.Lock 確保同一時間只有一個 `batch_scan` 進程在跑，防止同時打 FinMind/TWSE API。
+
 **盤中命中記錄：** precheck 每輪結果寫入 `data/intraday_hits/{date}.json`（格式：`{ticker, time, price, triggered: bool}`），供 17:00 盤後報告計算命中率使用。
 
 ---
@@ -165,6 +167,7 @@ COILING_PRIME 近期勝率最高(61%)，建議提高權重（下次評估）。
 ### 執行流程
 
 1. `settle` — 補填近期 T+1/T+3/T+5 結果（subprocess）
+   - 若 exit code ≠ 0 或輸出顯示「0 筆結算」→ 中止流程，推播「資料不足，本次跳過優化」並結束
 2. `factor_report --json` — 產出結構化 JSON（lift 表、勝率、各因子貢獻度）
 3. 直接解析 JSON（不解析 terminal Rich 輸出）
 4. 呼叫 LLM API（傳入當前參數 + JSON 分析報告）
@@ -292,10 +295,13 @@ optimize_agent LLM：
 
 ```makefile
 bot-setup:
-    $(PYTHON) scripts/bot_setup.py
+	$(PYTHON) scripts/bot_setup.py
 
+LLM ?=
 bot:
-    $(PYTHON) scripts/bot.py
+	$(PYTHON) scripts/bot.py $(if $(LLM),--llm $(LLM))
+# 用法: make bot          # 互動選 LLM
+#       make bot LLM=gemini  # 略過互動，直接指定
 ```
 
 ---
