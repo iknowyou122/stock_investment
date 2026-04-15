@@ -70,6 +70,38 @@ def test_apply_changes_writes_history(tmp_path):
     assert len(history) == 1
     assert history[0]["changes"] == changes
 
+from taiwan_stock_agent.utils.bot_formatters import (
+    format_opening_list, format_entry_signal, format_postmarket_report,
+)
+
+_SAMPLE_SIGNALS = [
+    {"ticker": "6933", "name": "信驊", "action": "WATCH", "confidence": 59,
+     "entry_bid": 320.0, "target": 358.0, "stop_loss": 312.0, "flags": "COILING_PRIME"},
+    {"ticker": "3704", "name": "合一", "action": "WATCH", "confidence": 57,
+     "entry_bid": 85.0, "target": 95.0, "stop_loss": 82.0, "flags": "EMERGING_SETUP"},
+]
+
+def test_format_opening_list_contains_ticker():
+    msg = format_opening_list(_SAMPLE_SIGNALS, scan_date="2026-04-15")
+    assert "6933" in msg and "信驊" in msg
+
+def test_format_opening_list_shows_coiling():
+    msg = format_opening_list(_SAMPLE_SIGNALS, scan_date="2026-04-15")
+    assert "蓄積" in msg or "COILING" in msg
+
+def test_format_opening_list_empty():
+    msg = format_opening_list([], scan_date="2026-04-15")
+    assert "0" in msg or "無" in msg
+
+def test_format_entry_signal():
+    msg = format_entry_signal("6933", "信驊", price=322.0, entry_low=318.0, entry_high=328.0, stop=312.0)
+    assert "6933" in msg and "322" in msg and "✅" in msg
+
+def test_format_postmarket_hit_rate():
+    hits = [{"ticker": "6933", "triggered": True, "price": 322.0}]
+    msg = format_postmarket_report(_SAMPLE_SIGNALS, hits, _SAMPLE_SIGNALS, "2026-04-15")
+    assert "命中率" in msg
+
 def test_rollback_restores_previous(tmp_path):
     params_file = tmp_path / "engine_params.json"
     history_file = tmp_path / "param_history.json"
