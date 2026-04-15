@@ -189,7 +189,7 @@ def _parse_scan_csv(path: Path, min_conf: int = 40, max_n: int = 20) -> list[dic
     signals = []
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
-            if row.get("action") not in ("BUY", "WATCH"):
+            if row.get("action") not in ("LONG", "WATCH"):
                 continue
             conf = int(row.get("confidence", 0) or 0)
             if conf < min_conf:

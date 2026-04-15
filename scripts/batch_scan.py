@@ -1209,7 +1209,7 @@ def _notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int) -
     signals: list[dict] = []
     with open(csv_path, newline="") as f:
         for row in _csv.DictReader(f):
-            if row.get("action") not in ("BUY", "WATCH"):
+            if row.get("action") not in ("LONG", "WATCH"):
                 continue
             conf = int(row.get("confidence", 0) or 0)
             if conf < min_confidence:
@@ -1237,7 +1237,7 @@ def _notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int) -
 
     lines = [f"📋 {scan_date} 掃描結果（共 {len(signals)} 檔，趨勢強度排序）\n"]
     for i, s in enumerate(signals[:top], 1):
-        action_icon = "🟢" if s["action"] == "BUY" else "🟡"
+        action_icon = "🟢" if s["action"] == "LONG" else "🟡"
         name_str = f" {s['name']}" if s.get("name") else ""
         entry = f"{s['entry_bid']:.1f}" if s["entry_bid"] else "—"
         target = f"{s['target']:.1f}" if s["target"] else "—"
