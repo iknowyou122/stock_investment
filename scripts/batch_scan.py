@@ -576,27 +576,37 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
 
 
 CSV_FIELDS = [
-    "scan_date", "analysis_date", "ticker", "action", "confidence",
+    "scan_date", "analysis_date", "ticker", "action", "confidence", "trend_score",
     "free_tier", "halt", "entry_bid", "stop_loss", "target",
     "momentum", "chip_analysis", "risk_factors", "data_quality_flags",
 ]
 
 
-def _save_csv(results: list[dict], analysis_date: date, csv_path: Path) -> None:
-    """Write scan results to a CSV file (overwrites if already exists for this date)."""
+def _save_csv(results: list[dict], analysis_date: date, csv_path: Path, sort_by: str = "trend") -> None:
+    """Write scan results to a CSV file sorted by trend_score (then confidence)."""
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     scan_date = date.today().isoformat()
+
+    # Sort before saving so CSV row order matches what the table shows
+    ordered = sorted(
+        results,
+        key=lambda r: (r.get("trend_score", 0), r["confidence"]),
+        reverse=True,
+    ) if sort_by == "trend" else sorted(
+        results, key=lambda r: r["confidence"], reverse=True
+    )
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         writer.writeheader()
-        for r in results:
+        for r in ordered:
             writer.writerow({
                 "scan_date": scan_date,
                 "analysis_date": analysis_date.isoformat(),
                 "ticker": r["ticker"],
                 "action": r["action"],
                 "confidence": r["confidence"],
+                "trend_score": r.get("trend_score", 0),
                 "free_tier": r.get("free_tier", ""),
                 "halt": r["halt"],
                 "entry_bid": r["entry_bid"],
@@ -941,7 +951,7 @@ def run_batch(
     _print_table(results, top, min_confidence, scan_date=str(analysis_date), name_map=name_map, sort_by=sort_by)
 
     if csv_path:
-        _save_csv(results, analysis_date, csv_path)
+        _save_csv(results, analysis_date, csv_path, sort_by=sort_by)
 
 
 def main() -> None:
@@ -1195,6 +1205,7 @@ def _notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int) -
         _console.print("  [yellow]⚠ TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未設定，略過推播[/yellow]")
         return
 
+    name_map = _build_name_map()
     signals: list[dict] = []
     with open(csv_path, newline="") as f:
         for row in _csv.DictReader(f):
@@ -1205,20 +1216,25 @@ def _notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int) -
                 continue
             signals.append({
                 "ticker": row["ticker"],
-                "name": row.get("name", ""),
+                "name": name_map.get(row["ticker"], ""),
                 "action": row["action"],
                 "confidence": conf,
+                "trend_score": int(row.get("trend_score", 0) or 0),
                 "entry_bid": float(row.get("entry_bid", 0) or 0),
                 "target": float(row.get("target", 0) or 0),
                 "stop_loss": float(row.get("stop_loss", 0) or 0),
                 "flags": row.get("data_quality_flags", ""),
             })
+    # CSV is already trend-sorted; no re-sort needed
 
     if not signals:
-        _tg_send(token, chat_id, f"📋 *{scan_date} 掃描結果*\n無符合條件的標的")
+        _tg_send(token, chat_id, f"📋 {scan_date} 掃描結果\n無符合條件的標的")
         return
 
-    # Build message — plain text to avoid MarkdownV2 escape complexity
+    def _trend_bar(score: int) -> str:
+        filled = min(score // 4, 5)   # 0–20 pts → 0–5 blocks
+        return "█" * filled + "░" * (5 - filled) + f" {score}"
+
     lines = [f"📋 {scan_date} 掃描結果（共 {len(signals)} 檔，趨勢強度排序）\n"]
     for i, s in enumerate(signals[:top], 1):
         action_icon = "🟢" if s["action"] == "BUY" else "🟡"
@@ -1230,10 +1246,14 @@ def _notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int) -
             f" ↑{((s['target']-s['entry_bid'])/s['entry_bid']*100):.1f}%"
             if s["entry_bid"] and s["target"] else ""
         )
-        flags = f"\n    [{s['flags']}]" if s.get("flags") else ""
+        trend = _trend_bar(s["trend_score"])
+        # highlight special flags
+        key_flags = [f for f in (s.get("flags") or "").split("|")
+                     if any(k in f for k in ("COILING", "BREAKOUT", "EMERGING", "RISING", "SECTOR_RANK"))]
+        flag_str = f"\n    [{' | '.join(key_flags)}]" if key_flags else ""
         lines.append(
-            f"{i}. {action_icon} {s['ticker']}{name_str}  {s['confidence']}分\n"
-            f"   進 {entry} → 目標 {target}{upside}  停 {stop}{flags}"
+            f"{i}. {action_icon} {s['ticker']}{name_str}  趨勢{trend}  信心{s['confidence']}\n"
+            f"   進 {entry} → 目標 {target}{upside}  停 {stop}{flag_str}"
         )
 
     msg = "\n".join(lines)
