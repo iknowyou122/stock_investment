@@ -2,7 +2,7 @@
 
 工作流程：
     收盤後  make scan --save-csv   → 產出 watchlist
-    隔日    make precheck          → 即時確認哪些還能進場
+    隔日    make trade          → 即時確認哪些還能進場
 
 確認條件：
     1. 現價在 entry_bid ±3% 範圍內（還沒跑掉）
@@ -10,10 +10,10 @@
     3. 大盤（加權指數）今日不是大跌（≥ -1.5%）
 
 Usage:
-    python scripts/precheck.py
-    python scripts/precheck.py --min-confidence 50
-    python scripts/precheck.py --csv data/scans/scan_2026-04-07.csv
-    make precheck
+    python scripts/trade.py
+    python scripts/trade.py --min-confidence 50
+    python scripts/trade.py --csv data/scans/scan_2026-04-07.csv
+    make trade
 """
 from __future__ import annotations
 
@@ -627,6 +627,11 @@ def run_precheck(csv_path: Path | None, min_confidence: int, top: int) -> None:
     # 5. Output
     _print_results(checked, taiex, csv_path, t_ratio, emerging=emerging_raw)
 
+    # Machine-readable summary for bot integration (parsed by bot.py _job_precheck)
+    import json as _json
+    result_map = {r["ticker"]: r["status"] for r in checked}
+    print(f"PRECHECK_RESULTS:{_json.dumps(result_map)}", flush=True)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="盤前/盤中確認 — 即時報價 vs 昨日 watchlist")
@@ -646,7 +651,7 @@ def main() -> None:
                 "[yellow]找不到 T+2 的 scan CSV。\n\n"
                 f"今天是 {today}，需要 2 個交易日前的掃描檔（data/scans/scan_YYYY-MM-DD.csv）。\n"
                 "請確認當天有執行 [bold]make scan[/bold] 並存下 CSV。[/yellow]",
-                title="[bold yellow]precheck --t2：找不到 CSV[/bold yellow]",
+                title="[bold yellow]trade --t2：找不到 CSV[/bold yellow]",
                 border_style="yellow",
                 padding=(0, 2),
             ))

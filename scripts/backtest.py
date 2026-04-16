@@ -206,7 +206,7 @@ def _load_industry_map(analysis_date: date, data_dir: Path) -> dict[str, str]:
 
     # No cache found — fetch live
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from batch_scan import _build_industry_map  # type: ignore[import]
+    from batch_plan import _build_industry_map  # type: ignore[import]
     return _build_industry_map() or {}
 
 

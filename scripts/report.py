@@ -850,7 +850,7 @@ def run_review(review_date: date) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    # Raise fd limit (same as batch_scan.py)
+    # Raise fd limit (same as batch_plan.py)
     try:
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)

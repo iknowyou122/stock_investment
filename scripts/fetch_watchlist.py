@@ -1,6 +1,6 @@
 """從 TWSE / TPEX openapi 抓取所有上市上櫃普通股，並依量價條件預篩選。
 
-輸出: 符合條件的股票代碼清單，直接餵給 batch_scan.py
+輸出: 符合條件的股票代碼清單，直接餵給 batch_plan.py
 
 Usage:
     # 只列出代碼（給 batch_scan 用）
@@ -16,7 +16,7 @@ Usage:
     python scripts/fetch_watchlist.py --top-volume 100 --min-change 1.0 --save
 
     # 和 batch_scan 串接
-    python scripts/fetch_watchlist.py --top-volume 80 | xargs python scripts/batch_scan.py --tickers
+    python scripts/fetch_watchlist.py --top-volume 80 | xargs python scripts/batch_plan.py --tickers
 """
 from __future__ import annotations
 

@@ -1,16 +1,16 @@
 """Batch scanner — runs StrategistAgent on multiple tickers and ranks by confidence.
 
 Usage:
-    python scripts/batch_scan.py                                    # 互動式選擇產業
-    python scripts/batch_scan.py --sectors 1 4                      # 非互動：用產業代號
-    python scripts/batch_scan.py --date 2026-03-25
-    python scripts/batch_scan.py --tickers 2330 2454 2317 --date 2026-03-25
-    python scripts/batch_scan.py --min-confidence 40
-    python scripts/batch_scan.py --top 10 --date 2026-03-25
-    python scripts/batch_scan.py --no-llm                           # 純 deterministic scoring
-    python scripts/batch_scan.py --llm gemini --llm-top 5           # 非互動：Gemini，只對前5名
-    python scripts/batch_scan.py --save-csv                         # 存到 data/scans/
-    python scripts/batch_scan.py --save-csv --csv-path results.csv
+    python scripts/batch_plan.py                                    # 互動式選擇產業
+    python scripts/batch_plan.py --sectors 1 4                      # 非互動：用產業代號
+    python scripts/batch_plan.py --date 2026-03-25
+    python scripts/batch_plan.py --tickers 2330 2454 2317 --date 2026-03-25
+    python scripts/batch_plan.py --min-confidence 40
+    python scripts/batch_plan.py --top 10 --date 2026-03-25
+    python scripts/batch_plan.py --no-llm                           # 純 deterministic scoring
+    python scripts/batch_plan.py --llm gemini --llm-top 5           # 非互動：Gemini，只對前5名
+    python scripts/batch_plan.py --save-csv                         # 存到 data/scans/
+    python scripts/batch_plan.py --save-csv --csv-path results.csv
 
 Interactive (make scan):
     產業選單 → LLM 選單（provider + 前幾名）→ 自動兩階段執行
@@ -339,7 +339,7 @@ def _apply_sector_ranks(results: list[dict], industry_map: dict[str, str]) -> in
         top_n = max(1, len(sorted_rs) // 5)  # top 20%
         for rank, r in enumerate(sorted_rs[:top_n], 1):
             r["confidence"] = min(100, r["confidence"] + 5)
-            r["flags"] = list(r.get("flags") or []) + [f"SECTOR_RANK:{rank}/{len(sorted_rs)}"]
+            #r["flags"] = list(r.get("flags") or []) + [f"SECTOR_RANK:{rank}/{len(sorted_rs)}"]
             boosted += 1
 
     return boosted
@@ -1267,7 +1267,7 @@ def _do_notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int
         flag_str = f"  [{' | '.join(key_flags)}]" if key_flags else ""
         lines.append(
             f"{i}. {action_icon} {ticker_name}\n"
-            f"   趨勢 {trend_bar}  信心 {s['confidence']}\n"
+            f"   信心 {s['confidence']}\n"
             f"   進場 {entry} → 目標 {target}{upside}  停損 {stop}{flag_str}"
         )
 

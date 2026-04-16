@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan trade precheck-t2 report settle backtest factor-report optimize test setup migrate api install flow show bot-setup bot
+.PHONY: plan trade trade-t2 report settle backtest factor-report optimize test setup migrate api install flow show bot-setup bot
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -25,9 +25,9 @@ NOTIFY  ?= 1
 
 plan:
 ifeq ($(DATE),$(_TODAY))
-	$(PYTHON) scripts/batch_scan.py --save-csv --save-db --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
+	$(PYTHON) scripts/batch_plan.py --save-csv --save-db --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
 else
-	$(PYTHON) scripts/batch_scan.py --save-csv --save-db --date $(DATE) --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
+	$(PYTHON) scripts/batch_plan.py --save-csv --save-db --date $(DATE) --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
 endif
 
 # ── 盤中執行交易 (Trade) ──────────────────────────────────────────────────────
@@ -39,15 +39,15 @@ MIN_CONF ?= 40
 CSV     ?=
 
 trade:
-	$(PYTHON) scripts/precheck.py \
+	$(PYTHON) scripts/trade.py \
 		--top $(TOP) \
 		--min-confidence $(MIN_CONF) \
 		$(if $(CSV),--csv $(CSV))
 
 # T+2 進場確認：自動載入 2 個交易日前的 CSV（D+2 勝率 55.6% > D+0 38.5%）
-# 用法: make precheck-t2
-precheck-t2:
-	$(PYTHON) scripts/precheck.py \
+# 用法: make trade-t2
+trade-t2:
+	$(PYTHON) scripts/trade.py \
 		--t2 \
 		--top $(TOP) \
 		--min-confidence $(MIN_CONF)
@@ -57,7 +57,7 @@ precheck-t2:
 #       make show SHOW_DATE=2026-04-10
 SHOW_DATE ?=
 show:
-	$(PYTHON) scripts/batch_scan.py --show "$(SHOW_DATE)" --top $(TOP) --min-confidence $(MIN_CONF)
+	$(PYTHON) scripts/batch_plan.py --show "$(SHOW_DATE)" --top $(TOP) --min-confidence $(MIN_CONF)
 
 # ── 週末結算 ─────────────────────────────────────────────────────────────────
 # 補填 T+1/T+3/T+5 漲跌幅（每週末跑一次）
@@ -124,9 +124,9 @@ api:
 #       make report DATE=2026-04-09
 report:
 ifeq ($(DATE),$(_TODAY))
-	$(PYTHON) scripts/review.py
+	$(PYTHON) scripts/report.py
 else
-	$(PYTHON) scripts/review.py --date $(DATE)
+	$(PYTHON) scripts/report.py --date $(DATE)
 endif
 
 # ── 完整每日流程 (Flow) ────────────────────────────────────────────────────────

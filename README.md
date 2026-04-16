@@ -2,8 +2,8 @@
 
 台股籌碼面信號系統。每日收盤後分析指定股票，輸出 **LONG / READY / WATCH / CAUTION** 四級信號，幫助判斷主力是否在進場。
 
-> **Last updated:** 2026-04-14
-> **Current focus:** Phase 4.16 完成（流動性硬門檻 + COILING 蓄積偵測 + 盤後復盤 T+1 結算 + A/B 優化）
+> **Last updated:** 2026-04-16
+> **Current focus:** Phase 4.19 完成（Bot 即時看板 Watchlist Prices + 市場資料 30s 刷新）
 > **Tests:** 224 unit passed
 > **Scan watchlist:** 全市場上市+上櫃（每日自動更新），互動式選擇產業 + LLM 兩階段優化
 
@@ -91,6 +91,29 @@
 
 ---
 
+## Telegram Bot 即時看板
+
+`make bot` 啟動後會在終端機顯示四格 Rich 看板，**每 30 秒自動刷新**：
+
+| 格子 | 內容 |
+|------|------|
+| **Bot Status** | Watchlist 名單數、上次掃描時間、Alert 狀態、Last Cmd、以及 **Watchlist Prices 即時股價表** |
+| **Market Monitor** | TAIEX 即時指數 + 28 個 TWSE 產業指數熱力圖 |
+| **Global Markets** | 外匯、美股四大指數、VIX、商品、比特幣 |
+| **Activity Log** | 滾動 12 行執行紀錄 |
+
+**Watchlist Prices 欄位說明：**
+
+| 欄位 | 說明 |
+|------|------|
+| 代號 | 青色 = LONG，黃色 = WATCH |
+| 現價 | 盤中彩色顯示；盤後 fallback 前收價（暗灰色） |
+| 漲跌% | ▲紅漲 ▼綠跌（台灣慣例）；盤後顯示 `--` |
+| 信心 | 引擎評分 0–100 |
+| vs進場 | 現價相對 entry_bid 的漲跌幅；正=紅、負=綠 |
+
+---
+
 ## 每日使用流程
 
 ### 標準每日工作流
@@ -163,9 +186,10 @@ stock_investment/
 │   ├── agents/
 │   │   └── strategist_agent.py     # 決策主控 + LLM reasoning
 ├── scripts/
-│   ├── batch_scan.py               # make plan 核心腳本
-│   ├── precheck.py                 # make trade 核心腳本
-│   ├── review.py                   # make report 核心腳本
+│   ├── batch_plan.py               # make plan 核心腳本
+│   ├── trade.py                    # make trade 核心腳本
+│   ├── report.py                   # make report 核心腳本
+│   ├── bot.py                      # Telegram bot daemon + Rich 即時看板
 │   └── daily_runner.py             # make flow / settle 核心腳本
 └── docs/design/                    # 因子規格與產品計畫
 ```

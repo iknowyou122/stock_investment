@@ -30,9 +30,15 @@ load_dotenv()
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from rich.console import Console
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+from rich.console import Console, Group
+from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
+from rich.rule import Rule
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from rich import box
@@ -92,6 +98,222 @@ _state: dict = {
 }
 
 
+# ── Market data cache ────────────────────────────────────────────────────────
+
+_MARKET_CACHE: dict = {
+    "global": {},      # key → {"price": float, "change_pct": float}  (yfinance)
+    "sectors": [],     # list[{"code", "abbr", "price", "change_pct"}]  (TWSE MIS)
+    "watchlist": {},   # ticker → {"price", "change_pct", "prev_close", "is_live"}
+    "updated_at": None,
+}
+
+# Global / forex / US market symbols via yfinance (TW sectors fetched separately via MIS).
+_MARKET_SYMBOLS: dict[str, str] = {
+    # Taiwan index
+    "taiex":    "^TWII",
+    # Forex
+    "usd_twd":  "TWD=X",
+    "usd_jpy":  "JPY=X",
+    "dxy":      "DX-Y.NYB",
+    # US equity
+    "sox":      "^SOX",
+    "nasdaq":   "^IXIC",
+    "sp500":    "^GSPC",
+    "vix":      "^VIX",
+    "dow":      "^DJI",
+    # Commodities
+    "gold":     "GC=F",
+    "silver":   "SI=F",
+    "oil_wti":  "CL=F",
+    "copper":   "HG=F",
+    "natgas":   "NG=F",
+    # Crypto
+    "btc":      "BTC-USD",
+}
+
+# 28 TWSE official sector indices accessible via MIS batch API.
+# 4 newer sectors (綠能環保/數位雲端/運動休閒/居家生活) are not yet available via MIS.
+_TW_SECTOR_CODES: list[tuple[str, str]] = [
+    ("IX0010", "水泥"),
+    ("IX0011", "食品"),
+    ("IX0012", "塑膠"),
+    ("IX0016", "紡織纖維"),
+    ("IX0017", "電機機械"),
+    ("IX0018", "電器電纜"),
+    ("IX0020", "化學"),
+    ("IX0021", "生技醫療"),
+    ("IX0022", "玻璃陶瓷"),
+    ("IX0023", "造紙"),
+    ("IX0024", "鋼鐵"),
+    ("IX0025", "橡膠"),
+    ("IX0026", "汽車"),
+    ("IX0028", "半導體"),
+    ("IX0029", "電腦週邊"),
+    ("IX0030", "光電"),
+    ("IX0031", "通信網路"),
+    ("IX0032", "電子零組件"),
+    ("IX0033", "電子通路"),
+    ("IX0034", "資訊服務"),
+    ("IX0035", "其他電子"),
+    ("IX0036", "建材營造"),
+    ("IX0037", "航運"),
+    ("IX0038", "觀光餐旅"),
+    ("IX0039", "金融保險"),
+    ("IX0040", "貿易百貨"),
+    ("IX0041", "油電燃氣"),
+    ("IX0042", "其他"),
+]
+
+
+def _get_latest_market_map() -> dict[str, str]:
+    """Load the most recent market_map_YYYY-MM-DD.json from cache."""
+    paths = sorted(_NAME_MAP_DIR.glob("market_map_*.json"), reverse=True)
+    if not paths:
+        return {}
+    try:
+        return json.loads(paths[0].read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.debug("Failed to load market map: %s", e)
+        return {}
+
+
+def _fetch_watchlist_prices_sync(tickers: list[str]) -> dict[str, dict | None]:
+    """Fetch real-time prices for watchlist tickers via TWSE/TPEx MIS API.
+
+    Returns dict[ticker → {"price", "change_pct", "prev_close", "is_live"}].
+    During non-trading hours `z` is "-" so we fall back to prev_close with
+    is_live=False to signal the panel to render it as a reference price.
+    """
+    if not tickers:
+        return {}
+    import requests
+    market_map = _get_latest_market_map()
+
+    parts = []
+    for ticker in tickers:
+        market = market_map.get(ticker, "TSE")
+        prefix = "otc" if market == "TPEx" else "tse"
+        parts.append(f"{prefix}_{ticker}.tw")
+
+    ex_ch = "|".join(parts)
+    try:
+        resp = requests.get(
+            "https://mis.twse.com.tw/stock/api/getStockInfo.jsp",
+            params={"ex_ch": ex_ch},
+            timeout=10,
+            verify=False,
+        )
+        items = resp.json().get("msgArray", [])
+        lookup = {item["c"]: item for item in items if item.get("c")}
+        result: dict[str, dict | None] = {}
+        for ticker in tickers:
+            item = lookup.get(ticker)
+            if not item:
+                result[ticker] = None
+                continue
+            try:
+                z = item.get("z", "-")
+                y = item.get("y", "-")
+                prev = float(y) if y not in ("-", "") else None
+                if z not in ("-", "") and prev:
+                    price = float(z)
+                    chg = (price - prev) / prev * 100
+                    is_live = True
+                elif prev:
+                    price = prev
+                    chg = 0.0
+                    is_live = False
+                else:
+                    result[ticker] = None
+                    continue
+                result[ticker] = {
+                    "price": price,
+                    "change_pct": chg,
+                    "prev_close": prev,
+                    "is_live": is_live,
+                }
+            except (ValueError, ZeroDivisionError):
+                result[ticker] = None
+        return result
+    except Exception as e:
+        logger.debug("watchlist price fetch error: %s", e)
+        return {}
+
+
+def _fetch_global_markets_sync() -> dict:
+    """Batch-fetch global/forex/US symbols via yfinance fast_info."""
+    import yfinance as yf
+    result: dict = {}
+    for key, sym in _MARKET_SYMBOLS.items():
+        try:
+            fi = yf.Ticker(sym).fast_info
+            price = fi.last_price
+            prev = fi.previous_close
+            chg = ((price - prev) / prev * 100) if prev else 0.0
+            result[key] = {"price": price, "change_pct": chg}
+        except Exception as e:
+            logger.debug("yfinance %s failed: %s", sym, e)
+            result[key] = None
+    return result
+
+
+def _fetch_tw_sectors_sync() -> list[dict]:
+    """Fetch 28 TWSE sector indices via MIS batch API (tse_IXnnnn.tw)."""
+    import requests
+    ex_ch = "|".join(f"tse_{code}.tw" for code, _ in _TW_SECTOR_CODES)
+    try:
+        resp = requests.get(
+            "https://mis.twse.com.tw/stock/api/getStockInfo.jsp",
+            params={"ex_ch": ex_ch},
+            timeout=10,
+            verify=False,
+        )
+        items = resp.json().get("msgArray", [])
+        lookup = {item["c"]: item for item in items if item.get("c")}
+        result = []
+        for code, abbr in _TW_SECTOR_CODES:
+            item = lookup.get(code)
+            price, chg = None, 0.0
+            if item:
+                try:
+                    z = item.get("z", "-")
+                    y = item.get("y", "-")
+                    if z not in ("-", "") and y not in ("-", ""):
+                        price = float(z)
+                        prev = float(y)
+                        chg = (price - prev) / prev * 100 if prev else 0.0
+                except (ValueError, ZeroDivisionError):
+                    pass
+            result.append({"code": code, "abbr": abbr, "price": price, "change_pct": chg})
+        return result
+    except Exception as e:
+        logger.debug("MIS sector fetch error: %s", e)
+        return [{"code": c, "abbr": a, "price": None, "change_pct": 0.0} for c, a in _TW_SECTOR_CODES]
+
+
+async def _refresh_market_loop() -> None:
+    """Background task: refresh global (yfinance) + TW sectors (MIS) + watchlist prices every 60 s."""
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            tickers = [s["ticker"] for s in _state.get("shortlist", [])]
+            global_data, sector_data, wl_data = await asyncio.gather(
+                loop.run_in_executor(None, _fetch_global_markets_sync),
+                loop.run_in_executor(None, _fetch_tw_sectors_sync),
+                loop.run_in_executor(None, _fetch_watchlist_prices_sync, tickers),
+            )
+            if global_data:
+                _MARKET_CACHE["global"] = global_data
+            if sector_data:
+                _MARKET_CACHE["sectors"] = sector_data
+            if wl_data:
+                _MARKET_CACHE["watchlist"] = wl_data
+            _MARKET_CACHE["updated_at"] = datetime.now()
+        except Exception as e:
+            logger.debug("market refresh error: %s", e)
+        await asyncio.sleep(30)
+
+
 # ── Subprocess helper ────────────────────────────────────────────────────────
 
 import re as _re
@@ -110,7 +332,7 @@ async def _run_subprocess_async(cmd: list[str], **_) -> tuple[int, str]:
     script = Path(cmd[1]).name if len(cmd) > 1 else "?"
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        stdin=asyncio.subprocess.DEVNULL,   # no TTY → batch_scan skips interactive menus
+        stdin=asyncio.subprocess.DEVNULL,   # no TTY → batch_plan skips interactive menus
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=str(_ROOT),
@@ -290,7 +512,7 @@ async def _job_opening_scan(force: bool = False, notify_fn=None) -> None:
         logger.info("opening_scan START force=%s", force)
         await notify(f"🔍 *掃描開始* {t0:%H:%M}\n正在執行全市場分析，請稍候...")
         code, out = await _run_subprocess_async([
-            sys.executable, "scripts/batch_scan.py",
+            sys.executable, "scripts/batch_plan.py",
             "--save-csv", "--save-db",
             "--llm", _state["llm"], "--llm-top", "5",
         ])
@@ -299,7 +521,7 @@ async def _job_opening_scan(force: bool = False, notify_fn=None) -> None:
             logger.error("opening_scan FAILED code=%d elapsed=%ds\n%s", code, elapsed, out[:500])
             await notify(f"❌ 掃描失敗（{elapsed}s）")
             return
-        logger.info("opening_scan batch_scan done elapsed=%ds", elapsed)
+        logger.info("opening_scan batch_plan done elapsed=%ds", elapsed)
         await notify(f"📡 掃描完成（{elapsed}s），正在讀取結果...")
         csv_path = _latest_scan_csv(0)
         if csv_path:
@@ -322,7 +544,7 @@ async def _job_hourly_rescan() -> None:
         t0 = datetime.now()
         logger.info("hourly_rescan START %s", t0.strftime("%H:%M"))
         code, out = await _run_subprocess_async([
-            sys.executable, "scripts/batch_scan.py",
+            sys.executable, "scripts/batch_plan.py",
             "--save-csv", "--save-db",
             "--llm", _state["llm"], "--llm-top", "5",
         ])
@@ -367,6 +589,7 @@ async def _job_precheck(force: bool = False, notify_fn=None) -> None:
     async with _state["precheck_lock"]:
         if not _state["shortlist"]:
             logger.info("precheck skipped — shortlist empty")
+            await notify("⚠ 名單為空，請先執行 /plan 掃描")
             return
         n = len(_state["shortlist"])
         logger.info("precheck START n=%d force=%s", n, force)
@@ -375,7 +598,7 @@ async def _job_precheck(force: bool = False, notify_fn=None) -> None:
         try:
             t0 = datetime.now()
             code, out = await _run_subprocess_async([
-                sys.executable, "scripts/precheck.py",
+                sys.executable, "scripts/trade.py",
                 "--csv", str(tmp_csv), "--min-confidence", "0",
             ])
         finally:
@@ -383,12 +606,22 @@ async def _job_precheck(force: bool = False, notify_fn=None) -> None:
         elapsed = int((datetime.now() - t0).total_seconds())
         await notify(f"📡 報價取得完成（{elapsed}s），正在分析進場條件...")
 
+        # Parse machine-readable result line: PRECHECK_RESULTS:{"ticker": "PASS"|"WARN"|"SKIP"|"NO_DATA"}
         lines = out.split("\n")
+        results_map: dict[str, str] = {}
+        for line in lines:
+            if line.startswith("PRECHECK_RESULTS:"):
+                try:
+                    results_map = json.loads(line.split(":", 1)[1])
+                except Exception:
+                    pass
+                break
+
         triggered_count = 0
         for s in _state["shortlist"]:
             ticker = s["ticker"]
-            ticker_lines = [l for l in lines if re.search(rf"\b{re.escape(ticker)}\b", l)]
-            triggered = any("✅" in l for l in ticker_lines)
+            status = results_map.get(ticker, "")
+            triggered = status == "PASS"
             _save_intraday_hit(ticker, s["entry_bid"], triggered)
             if triggered:
                 triggered_count += 1
@@ -400,7 +633,12 @@ async def _job_precheck(force: bool = False, notify_fn=None) -> None:
                     entry_high=s["entry_bid"] * 1.03,
                     stop=s["stop_loss"],
                 ))
-        if triggered_count == 0:
+
+        if not results_map:
+            # precheck.py exited before market hours or no CSV found
+            logger.warning("precheck got no PRECHECK_RESULTS line (exit code=%d)", code)
+            await notify("⚠ Precheck 無結果（可能非盤中時段或找不到 CSV）")
+        elif triggered_count == 0:
             logger.info("precheck DONE triggered=0/%d", n)
             await notify(f"⏳ Precheck 完成，{n} 檔均未達進場條件")
         else:
@@ -418,7 +656,7 @@ async def _job_postmarket_report(force: bool = False, notify_fn=None) -> None:
     await notify(f"📈 *盤後報告生成中* {datetime.now():%H:%M}\n正在執行隔日掃描...")
     async with _state["scan_lock"]:
         t0 = datetime.now()
-        code, out = await _run_subprocess_async([sys.executable, "scripts/batch_scan.py", "--save-csv", "--save-db"])
+        code, out = await _run_subprocess_async([sys.executable, "scripts/batch_plan.py", "--save-csv", "--save-db"])
         elapsed = int((datetime.now() - t0).total_seconds())
         if code != 0:
             logger.error("postmarket_report scan FAILED code=%d\n%s", code, out[:300])
@@ -689,67 +927,353 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "⏰ *自動排程*\n"
         "09:05          開盤掃描 \\+ 推播名單\n"
         "10–13:05       每小時重掃，有異動才推\n"
-        "09:05–13:55    每 10 分鐘 precheck\n"
+        "09:05–13:25    每 10 分鐘 precheck\n"
         "17:00          盤後報告\n"
         "週二/五 18:00  AI 優化"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
-# ── Rich CLI display ─────────────────────────────────────────────────────────
+# ── Visual helpers (Taiwan convention: 紅漲綠跌) ──────────────────────────────
+
+def _chg_color(chg: float) -> str:
+    """Color with intensity. Taiwan: red = gain, green = loss."""
+    if chg >  2.0: return "bold bright_red"
+    if chg >  0.5: return "red"
+    if chg >  0.1: return "bright_red"
+    if chg > -0.1: return "dim"
+    if chg > -0.5: return "bright_green"
+    if chg > -2.0: return "green"
+    return "bold bright_green"
+
+def _arrow(chg: float) -> str:
+    if chg >  0.1: return "[red]▲[/red]"
+    if chg < -0.1: return "[green]▼[/green]"
+    return "[dim]─[/dim]"
+
+def _bar(chg: float, width: int = 5) -> str:
+    """Unicode block bar proportional to |chg|, max at ±3%."""
+    filled = min(width, round(abs(chg) / 3.0 * width))
+    b = "█" * filled + "░" * (width - filled)
+    color = "red" if chg >= 0 else "green"
+    return f"[{color}]{b}[/{color}]"
+
+def _heat_bg(chg: float) -> str:
+    """256-color background for heat map tiles. Taiwan: red = gain, green = loss."""
+    if   chg >  3.0: return "color(88)"    # deep red
+    elif chg >  1.5: return "color(124)"   # dark red
+    elif chg >  0.5: return "color(160)"   # medium red
+    elif chg >  0.1: return "color(196)"   # bright red
+    elif chg > -0.1: return "color(238)"   # neutral dark gray
+    elif chg > -0.5: return "color(34)"    # medium green
+    elif chg > -1.5: return "color(28)"    # dark green
+    else:            return "color(22)"    # deep green
+
+def _heat_tile(label: str, ticker: str, chg: float, price: float) -> Text:
+    """Colored heat map tile: name + price + change %."""
+    bg = _heat_bg(chg)
+    bold = abs(chg) > 1.5
+    fg = Style(bgcolor=bg, color="white", bold=bold)
+    t = Text(justify="center", no_wrap=True)
+    t.append(f" {label}  {ticker} \n", style=fg)
+    t.append(f" {price:>7.2f}  {chg:>+.2f}% ", style=fg)
+    return t
+
+
+def _heat_tile_compact(abbr: str, chg: float, price: float | None) -> Text:
+    """2-line sector tile: Chinese name on top, change% below."""
+    t = Text(justify="center", no_wrap=True)
+    if price is None:
+        t.append(f"{abbr}\n", style="dim")
+        t.append(" -- ", style="dim")
+        return t
+    clr = _chg_color(chg)
+    sign = "+" if chg >= 0 else ""
+    t.append(f"{abbr}\n", style="dim")
+    t.append(f"{sign}{chg:.2f}%", style=clr)
+    return t
+
+
+# ── Rich CLI display — header + 4-quadrant layout ─────────────────────────────
+
+def _render_header() -> Panel:
+    """Full-width top bar: title · date · clock · market status · LLM."""
+    now = datetime.now()
+    is_weekday = now.weekday() < 5
+    market_open  = now.replace(hour=9,  minute=0,  second=0, microsecond=0)
+    market_close = now.replace(hour=13, minute=30, second=0, microsecond=0)
+    is_open = is_weekday and market_open <= now <= market_close
+    mkt_status = "[bold green]● OPEN[/bold green]" if is_open else "[dim]○ CLOSED[/dim]"
+    weekday = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][now.weekday()]
+
+    t = Table(box=None, show_header=False, padding=(0, 2), expand=True)
+    t.add_column("title",  justify="left",   ratio=2)
+    t.add_column("date",   justify="center", ratio=2)
+    t.add_column("clock",  justify="center", ratio=2)
+    t.add_column("market", justify="center", ratio=1)
+    t.add_column("llm",    justify="right",  ratio=2)
+    t.add_row(
+        "[bold cyan]STOCK SIGNAL BOT[/bold cyan]",
+        f"[dim]{now.strftime('%Y-%m-%d')}  {weekday}[/dim]",
+        f"[bold white]{now.strftime('%H:%M:%S')}[/bold white]",
+        mkt_status,
+        f"[dim]engine: {_state['llm']}[/dim]",
+    )
+    return Panel(t, box=box.HEAVY_HEAD, border_style="blue", padding=(0, 0))
+
 
 def _render_status_panel() -> Panel:
+    """Top-left: bot operational status."""
     now = datetime.now()
-    table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
-    table.add_column("key", style="dim", min_width=16)
-    table.add_column("val")
+    t = Table(box=None, show_header=False, padding=(0, 1), expand=True)
+    t.add_column("label", style="dim", min_width=11, no_wrap=True)
+    t.add_column("value", no_wrap=True)
 
-    # clock
-    table.add_row("時間", f"[bold cyan]{now.strftime('%H:%M:%S')}[/bold cyan]")
-    table.add_row("", "")
+    # Watchlist with fill bar
+    n = len(_state["shortlist"])
+    fill = min(10, n)
+    wl_bar = f"[cyan]{'█' * fill}{'░' * (10 - fill)}[/cyan]"
+    t.add_row("Watchlist", f"{wl_bar}  [bold]{n}[/bold] stocks")
 
-    # watchlist
-    shortlist = _state["shortlist"]
-    table.add_row("今日名單", f"[green]{len(shortlist)} 檔[/green]")
+    # Last scan with age
     last = _state["last_scan_time"]
-    table.add_row("上次掃描", last.strftime("%H:%M") if last else "[dim]尚未執行[/dim]")
-    table.add_row("推播監控", "✅ 開啟" if _state["monitoring_active"] else "[yellow]⏸ 暫停[/yellow]")
-    table.add_row("LLM", _state["llm"])
-    table.add_row("", "")
+    if last:
+        age_m = int((now - last).total_seconds() / 60)
+        scan_val = f"[white]{last.strftime('%H:%M')}[/white]  [dim]{age_m}m ago[/dim]"
+    else:
+        scan_val = "[dim]not run yet[/dim]"
+    t.add_row("Last Scan", scan_val)
 
-    # last command
+    # Alerts
+    if _state["monitoring_active"]:
+        t.add_row("Alerts", "[green]● Active[/green]")
+    else:
+        t.add_row("Alerts", "[yellow]⏸ Paused[/yellow]")
+
+    t.add_row("LLM", f"[dim]{_state['llm']}[/dim]")
+    t.add_row("", "")
+
+    # Last command
     cmd = _state.get("last_cmd")
     if cmd:
         cmd_name, cmd_status, cmd_time = cmd
         age = int((now - cmd_time).total_seconds())
-        age_str = f"{age}s ago" if age < 60 else f"{age//60}m ago"
-        color = "green" if "✅" in cmd_status else "yellow" if "⏳" in cmd_status else "red"
-        table.add_row("最後指令", f"[{color}]/{cmd_name}  {cmd_status}  ({age_str})[/{color}]")
+        age_str = f"{age}s" if age < 60 else f"{age // 60}m"
+        clr = "green" if "✅" in cmd_status else "yellow" if "⏳" in cmd_status else "red"
+        t.add_row("Last Cmd", f"[{clr}]/{cmd_name}[/{clr}]  {cmd_status}  [dim]{age_str} ago[/dim]")
     else:
-        table.add_row("最後指令", "[dim]—[/dim]")
+        t.add_row("Last Cmd", "[dim]—[/dim]")
 
-    # pending change
+    # Pending AI suggestion
     pending_raw = _PENDING_PATH.read_text().strip() if _PENDING_PATH.exists() else "null"
     if pending_raw not in ("null", ""):
-        table.add_row("待確認", "[yellow]有優化建議 → /approve[/yellow]")
+        t.add_row("Pending", "[yellow]⚡ AI suggestion  →  /approve[/yellow]")
     else:
-        table.add_row("待確認", "[dim]無[/dim]")
-    table.add_row("", "")
+        t.add_row("Pending", "[dim]none[/dim]")
 
-    # schedule reminder
-    table.add_row("[dim]排程[/dim]", "[dim]掃描 09:05 · 重掃 10-13:05 · 盤後 17:00 · 優化 週二/五 18:00[/dim]")
-    table.add_row("", "")
-    table.add_row("[dim]指令[/dim]", "[dim]/plan /trade /report /optimize /approve /rollback /top /status /test[/dim]")
-    table.add_row("", "")
+    t.add_row("", "")
+    t.add_row("[dim]Schedule[/dim]", "[dim]09:05 scan · 10-13 rescan · 09:05-13:25 trade/10min · 17:00 report · Tue/Fri optimize[/dim]")
+    t.add_row("[dim]Commands[/dim]", "[dim]/plan  /trade  /report  /optimize  /approve  /rollback  /top  /test[/dim]")
 
-    # live log tail
-    table.add_row("[dim]── Log ──[/dim]", "")
-    level_color = {"INFO": "dim", "WARNING": "yellow", "ERROR": "red", "CRITICAL": "bold red"}
-    for t, lvl, msg in list(_LOG_LINES):
-        color = level_color.get(lvl, "dim")
-        table.add_row(f"[dim]{t}[/dim]", f"[{color}]{lvl:<8}[/{color}] {msg}")
+    # ── Watchlist live prices ────────────────────────────────────────────────
+    shortlist = _state["shortlist"]
+    wl_data = _MARKET_CACHE.get("watchlist", {})
 
-    return Panel(table, title="[bold blue]股票信號機器人[/bold blue]", subtitle=f"[dim]{now.strftime('%Y-%m-%d')}[/dim]", border_style="blue")
+    if shortlist:
+        wl_tbl = Table(box=None, show_header=True, padding=(0, 1), expand=True)
+        wl_tbl.add_column("代號",  style="dim",   width=5,  no_wrap=True)
+        wl_tbl.add_column("名稱",               max_width=6, no_wrap=True)
+        wl_tbl.add_column("現價",  justify="right", min_width=7, no_wrap=True)
+        wl_tbl.add_column("漲跌%", justify="right", min_width=8, no_wrap=True)
+        wl_tbl.add_column("信心",  justify="right", width=4,  no_wrap=True)
+        wl_tbl.add_column("vs進場", justify="right", min_width=7, no_wrap=True)
+
+        for s in shortlist[:12]:
+            ticker  = s["ticker"]
+            name    = (s.get("name") or "")[:5]
+            conf    = s.get("confidence", 0)
+            entry   = s.get("entry_bid") or 0.0
+            action  = s.get("action", "")
+            d       = wl_data.get(ticker)
+
+            # action badge: LONG = cyan dot, WATCH = yellow dot
+            badge_clr = "cyan" if action == "LONG" else "yellow"
+
+            if d and d.get("price") is not None:
+                price = d["price"]
+                chg   = d["change_pct"]
+                live  = d.get("is_live", False)
+                clr   = _chg_color(chg)
+                sign  = "+" if chg >= 0 else ""
+                # dim price when market is closed (prev_close fallback)
+                price_str = f"[{clr}]{price:.2f}[/{clr}]" if live else f"[dim]{price:.2f}[/dim]"
+                chg_str   = f"[{clr}]{_arrow(chg)} {sign}{chg:.2f}%[/{clr}]" if live else "[dim] --  --[/dim]"
+
+                if entry > 0:
+                    diff = (price - entry) / entry * 100
+                    vs_clr = "red" if diff >= 0 else "green"
+                    vs_str = f"[{vs_clr}]{diff:+.1f}%[/{vs_clr}]"
+                else:
+                    vs_str = "[dim]--[/dim]"
+            else:
+                price_str = "[dim]--[/dim]"
+                chg_str   = "[dim]--[/dim]"
+                vs_str    = "[dim]--[/dim]"
+
+            wl_tbl.add_row(
+                f"[{badge_clr}]{ticker}[/{badge_clr}]",
+                name,
+                price_str,
+                chg_str,
+                f"[dim]{conf}[/dim]",
+                vs_str,
+            )
+
+        content = Group(t, Rule(title="[dim bold]Watchlist Prices[/dim bold]", style="dim"), wl_tbl)
+    else:
+        content = t
+
+    return Panel(content, title="[bold blue]Bot Status[/bold blue]", border_style="blue", box=box.ROUNDED)
+
+
+def _render_log_panel() -> Panel:
+    """Bottom-left: live rolling activity log."""
+    t = Table(box=None, show_header=False, padding=(0, 0), expand=True)
+    t.add_column("dot",  width=2, no_wrap=True)
+    t.add_column("time", width=9, style="dim", no_wrap=True)
+    t.add_column("msg",  no_wrap=True)
+
+    level_cfg = {
+        "INFO":     ("[dim]·[/dim]",            "dim"),
+        "WARNING":  ("[yellow]●[/yellow]",       "yellow"),
+        "ERROR":    ("[bold red]●[/bold red]",   "red"),
+        "CRITICAL": ("[bold red]◆[/bold red]",   "bold red"),
+    }
+    entries = list(_LOG_LINES)
+    if entries:
+        for ts, lvl, msg in entries:
+            dot, clr = level_cfg.get(lvl, ("[dim]·[/dim]", "dim"))
+            t.add_row(dot, f" {ts}", f"[{clr}]{msg}[/{clr}]")
+    else:
+        t.add_row("[dim]·[/dim]", "", "[dim]Waiting for activity...[/dim]")
+
+    return Panel(t, title="[bold]Activity Log[/bold]", border_style="dim", box=box.ROUNDED)
+
+
+def _render_market_panel() -> Panel:
+    """Top-right: TAIEX headline + 4×7 sector heat map (28 TWSE sectors via MIS)."""
+    global_data = _MARKET_CACHE.get("global", {})
+    sectors = _MARKET_CACHE.get("sectors", [])
+
+    # ── TAIEX headline ──────────────────────────────────────────────────────
+    taiex_d = global_data.get("taiex")
+    if taiex_d:
+        chg   = taiex_d["change_pct"]
+        price = taiex_d["price"]
+        clr   = _chg_color(chg)
+        taiex_row = Table(box=None, show_header=False, padding=(0, 1), expand=True)
+        taiex_row.add_column("a", no_wrap=True)
+        taiex_row.add_column("b", justify="right", no_wrap=True)
+        taiex_row.add_column("c", justify="right", no_wrap=True)
+        taiex_row.add_column("d", no_wrap=True)
+        taiex_row.add_row(
+            f"[bold]{_arrow(chg)} TAIEX[/bold]",
+            f"[{clr}][bold]{price:,.0f}[/bold][/{clr}]",
+            f"[{clr}]{chg:+.2f}%[/{clr}]",
+            _bar(chg, 8),
+        )
+    else:
+        taiex_row = Text("[dim] TAIEX  --[/dim]")
+
+    # ── 4-column × 7-row sector heat map ────────────────────────────────────
+    COLS = 4
+    grid = Table(box=None, show_header=False, padding=(0, 0), expand=True)
+    for _ in range(COLS):
+        grid.add_column(ratio=1)
+
+    # Pad to full multiple of COLS (28 = 4×7, already exact)
+    tiles = list(sectors)
+    while len(tiles) % COLS:
+        tiles.append({"abbr": "", "price": None, "change_pct": 0.0})
+
+    for row_start in range(0, len(tiles), COLS):
+        row = tiles[row_start : row_start + COLS]
+        grid.add_row(*[
+            _heat_tile_compact(s["abbr"], s["change_pct"], s["price"])
+            for s in row
+        ])
+
+    if not sectors:
+        loading = Text("[dim]  Loading sector data...[/dim]")
+        content = Group(taiex_row, Rule(style="dim"), loading)
+    else:
+        content = Group(taiex_row, Rule(style="dim"), grid)
+
+    updated = _MARKET_CACHE.get("updated_at")
+    sub = f"[dim]Last update {updated.strftime('%H:%M:%S')}[/dim]" if updated else "[dim]loading...[/dim]"
+    return Panel(
+        content,
+        title="[bold green]Market Monitor[/bold green]",
+        subtitle=sub,
+        border_style="green",
+        box=box.ROUNDED,
+    )
+
+
+def _render_global_panel() -> Panel:
+    """Bottom-right: forex / US equity / commodities / crypto with trend bars."""
+    data = _MARKET_CACHE.get("global", {})
+
+    t = Table(box=None, show_header=False, padding=(0, 0), expand=True)
+    t.add_column("arr",   width=2,  no_wrap=True)
+    t.add_column("name",  min_width=12, no_wrap=True)
+    t.add_column("price", justify="right", min_width=11, no_wrap=True)
+    t.add_column("chg",   justify="right", min_width=7,  no_wrap=True)
+    t.add_column("bar",   min_width=6, no_wrap=True)
+
+    def _sec(title: str) -> None:
+        t.add_row("", f"[dim]{title}[/dim]", "", "", "")
+
+    def _row(label: str, key: str, fmt: str) -> None:
+        d = data.get(key)
+        if d and d.get("price") is not None:
+            price, chg = d["price"], d["change_pct"]
+            clr = _chg_color(chg)
+            t.add_row(
+                _arrow(chg), f" {label}",
+                f"[{clr}]{fmt.format(price)}[/{clr}]",
+                f"[{clr}]{chg:+.2f}%[/{clr}]",
+                _bar(chg),
+            )
+        else:
+            t.add_row("[dim]─[/dim]", f" {label}", "[dim]  --[/dim]", "[dim]  --[/dim]", "[dim]░░░░░[/dim]")
+
+    _sec("── Forex ──────────────────────")
+    _row("USD/TWD", "usd_twd", "{:.3f}")
+    _row("USD/JPY", "usd_jpy", "{:.2f}")
+    _row("DXY",     "dxy",     "{:.2f}")
+
+    _sec("── US Markets ─────────────────")
+    _row("SOX (Semi)", "sox",    "{:,.0f}")
+    _row("NASDAQ",     "nasdaq", "{:,.0f}")
+    _row("S&P 500",    "sp500",  "{:,.0f}")
+    _row("Dow Jones",  "dow",    "{:,.0f}")
+    _row("VIX",        "vix",    "{:.2f}")
+
+    _sec("── Commodities ────────────────")
+    _row("Gold",    "gold",    "${:,.0f}")
+    _row("Silver",  "silver",  "${:.2f}")
+    _row("WTI Oil", "oil_wti", "${:.2f}")
+    _row("Copper",  "copper",  "${:.3f}")
+    _row("Nat Gas", "natgas",  "${:.3f}")
+
+    _sec("── Crypto ─────────────────────")
+    _row("Bitcoin", "btc", "${:,.0f}")
+
+    updated = _MARKET_CACHE.get("updated_at")
+    sub = f"[dim]Last update {updated.strftime('%H:%M:%S')}[/dim]" if updated else "[dim]loading...[/dim]"
+    return Panel(t, title="[bold yellow]Global Markets[/bold yellow]", subtitle=sub,
+                 border_style="yellow", box=box.ROUNDED)
 
 
 # ── LLM selection ────────────────────────────────────────────────────────────
@@ -757,16 +1281,30 @@ def _render_status_panel() -> Panel:
 def _select_llm(arg: str | None) -> str:
     if arg:
         return arg
-    _console.print("\n[bold]optimize_agent LLM：[/bold]")
-    _console.print("  [1] Claude (claude-sonnet-4-6)  ← 預設")
+    _console.print("\n[bold]Select LLM for optimize_agent:[/bold]")
+    _console.print("  [1] Claude (claude-sonnet-4-6)  ← default")
     _console.print("  [2] Gemini (gemini-2.5-flash)")
     _console.print("  [3] OpenAI (gpt-4o)")
-    _console.print("  [4] GLM   (glm-4-flash，需 ZHIPUAI_API_KEY)")
-    choice = input("選擇 (Enter = 1)：").strip()
+    _console.print("  [4] GLM   (glm-4-flash, requires ZHIPUAI_API_KEY)")
+    choice = input("Choice (Enter = 1): ").strip()
     return {"2": "gemini", "3": "openai", "4": "glm"}.get(choice, "claude")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
+
+def _try_preload_shortlist() -> None:
+    """On startup, populate shortlist from the most recent scan CSV (today or yesterday)."""
+    for offset in (0, 1, 2):
+        csv_path = _latest_scan_csv(offset)
+        if csv_path:
+            signals = _parse_scan_csv(csv_path)
+            if signals:
+                _state["shortlist"] = signals
+                _state["last_scan_time"] = datetime.fromtimestamp(csv_path.stat().st_mtime)
+                logger.info("startup: preloaded shortlist n=%d from %s", len(signals), csv_path.name)
+                return
+    logger.info("startup: no scan CSV found, shortlist empty")
+
 
 async def main_async(llm: str) -> None:
     _state["llm"] = llm
@@ -779,6 +1317,7 @@ async def main_async(llm: str) -> None:
         _console.print("[red]❌ 請先執行 make bot-setup 設定 Telegram[/red]")
         sys.exit(1)
     _state["chat_id"] = chat_id
+    _try_preload_shortlist()
     logger.info("Bot START llm=%s chat_id=%s log=%s", llm, chat_id, _LOG_PATH)
 
     app = Application.builder().token(token).build()
@@ -801,12 +1340,18 @@ async def main_async(llm: str) -> None:
     # Hourly rescan 10:05–13:05
     for h in [10, 11, 12, 13]:
         scheduler.add_job(_job_hourly_rescan, "cron", day_of_week="mon-fri", hour=h, minute=5)
-    # 10-min precheck 09:05–13:55 (market hours)
+    # 10-min precheck 09:05–13:25 (market hours, close at 13:30)
     scheduler.add_job(
         _job_precheck, "cron",
         day_of_week="mon-fri",
-        hour="9-13",
+        hour="9-12",
         minute="5,15,25,35,45,55",
+    )
+    scheduler.add_job(
+        _job_precheck, "cron",
+        day_of_week="mon-fri",
+        hour="13",
+        minute="5,15,25",
     )
     # 17:00 post-market report
     scheduler.add_job(_job_postmarket_report, "cron", day_of_week="mon-fri", hour=17, minute=0)
@@ -817,14 +1362,44 @@ async def main_async(llm: str) -> None:
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
+
+    # Start background market data refresh
+    market_task = asyncio.create_task(_refresh_market_loop())
+
+    # Build dashboard: header strip + 4-quadrant body
+    layout = Layout()
+    layout.split_column(
+        Layout(name="header", size=3),
+        Layout(name="top",    ratio=1),
+        Layout(name="bottom", ratio=1),
+    )
+    layout["top"].split_row(
+        Layout(name="tl"),
+        Layout(name="tr"),
+    )
+    layout["bottom"].split_row(
+        Layout(name="bl"),
+        Layout(name="br"),
+    )
+
+    def _update_layout() -> None:
+        layout["header"].update(_render_header())
+        layout["tl"].update(_render_status_panel())
+        layout["bl"].update(_render_log_panel())
+        layout["tr"].update(_render_market_panel())
+        layout["br"].update(_render_global_panel())
+
+    _update_layout()
     try:
-        with Live(_render_status_panel(), console=_console, refresh_per_second=1, screen=True) as live:
+        with Live(layout, console=_console, refresh_per_second=1, screen=True) as live:
             while True:
-                live.update(_render_status_panel())
+                _update_layout()
+                live.refresh()
                 await asyncio.sleep(1)
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        market_task.cancel()
         scheduler.shutdown(wait=False)
         await app.updater.stop()
         await app.stop()
@@ -837,10 +1412,10 @@ def main() -> None:
                         help="LLM for optimize_agent (skips interactive prompt)")
     args = parser.parse_args()
 
-    _console.print("[bold blue]股票信號機器人 v1.0[/bold blue]")
+    _console.print("[bold blue]Stock Signal Bot v1.0[/bold blue]")
     _console.print("─" * 40)
     llm = _select_llm(args.llm)
-    _console.print(f"\n啟動中... LLM={llm}")
+    _console.print(f"\nStarting... LLM={llm}")
 
     asyncio.run(main_async(llm))
 
