@@ -30,12 +30,32 @@ Both tracks share the same ticker universe, OHLCV data, and institutional data f
 ### File
 `src/taiwan_stock_agent/domain/accumulation_engine.py`
 
+### New Indicator Implementations Required
+
+Three technical indicators do not exist in the current codebase and must be implemented as static methods on `AccumulationEngine` (or in a shared `src/taiwan_stock_agent/domain/_indicators.py` module):
+
+| Method | Signature | Notes |
+|--------|-----------|-------|
+| `_obv(history)` | `list[DailyOHLCV] → float \| None` | On-Balance Volume; return 5-day linear slope |
+| `_atr(history, period=14)` | `list[DailyOHLCV] → float \| None` | True Range average over `period` days |
+| `_atr_percentile(history, period=14, window=252)` | `list[DailyOHLCV] → float \| None` | ATR value as percentile of rolling `window`-day ATR history |
+| `_kd_d(history, k_period=9, d_smooth=3)` | `list[DailyOHLCV] → float \| None` | Stochastic %D (slow); return `None` if insufficient history |
+
+The existing `_calculate_bb`, `_rsi`, `_calculate_dmi` static methods on `TripleConfirmationEngine` are **not** to be imported into `AccumulationEngine` — duplicate if needed to maintain clean separation.
+
+### Minimum History Requirement
+
+Two factors (BB bandwidth percentile, ATR percentile) require a 252-trading-day window (~14 calendar months). The engine must:
+1. Check `len(history) >= 252` before computing percentile-based factors.
+2. If history is shorter: score those two factors as 0 pts (no partial credit), and append flag `ACCUM_SHORT_HISTORY:{n}` to the result flags.
+3. The gate layer requires only 60 days of history (same as existing COILING detector).
+
 ### Gate Layer (4 mandatory conditions — all must pass)
 
 | Gate | Condition | Rationale |
 |------|-----------|-----------|
-| G1 Trend floor | MA20 > MA60, MA20 slope ≥ 0 | Mid-term uptrend; no counter-trend trades |
-| G2 Not yet broken out | Close < 60-day high × 1.03 for all last 10 sessions | Exclude stocks already in breakout |
+| G1 Trend floor | MA20 > MA60; MA20 today ≥ MA20 5 sessions ago | Mid-term uptrend; same computation as `_coiling_detect` G2 (lines 1700–1707 of triple_confirmation_engine.py) |
+| G2 Not yet broken out | max(close[-10:]) < 60-day high × 1.03 | Exclude stocks already in breakout. Intentionally replaces `_coiling_detect` G5 (20-day high) with a wider 60-day window, and drops the 5-session pivot-range gate (G4) and platform-top gate (G6) from the existing detector — those conditions are too strict for early accumulation. |
 | G3 Market regime | TAIEX regime ≠ downtrend | Same as existing COILING G3 |
 | G4 Liquidity | 20-day avg turnover ≥ TSE 20M / TPEx 8M TWD | Same as existing liquidity gate |
 
@@ -64,8 +84,8 @@ Both tracks share the same ticker universe, OHLCV data, and institutional data f
 
 | Factor | Max pts | Trigger |
 |--------|---------|---------|
-| Institutional consecutive buy days | 20 | Foreign or trust: ≥5 days → 20pts; ≥3 days → 12pts; ≥1 day → 5pts |
-| Institutional net buy trend (10d) | 10 | Cumulative foreign net buy last 10 days > 0 → 10pts |
+| Institutional consecutive buy days | 20 | Foreign or trust: ≥5 days → 20pts; ≥3 days → 12pts; ≥1 day → 5pts. Uses `TWSEChipProxy.foreign_consecutive_buy_days` / `trust_consecutive_buy_days` — already pre-computed by `ChipProxyFetcher`, no additional API call needed. |
+| Institutional net buy trend (10d) | 10 | Use `foreign_consecutive_buy_days >= 3` as proxy (data available without additional API calls). Full 10-day cumulative net buy requires a `ChipProxyFetcher.fetch_history(ticker, n_days=10)` extension — **deferred to Phase 4.21**. For Phase 4.20, award 10pts if `foreign_consecutive_buy_days >= 3`, 5pts if >= 1. |
 | Up-day vs down-day volume structure | 8 | Avg volume on up-days > avg volume on down-days (last 10 sessions) → 8pts |
 | Market-relative strength | 7 | On days TAIEX fell, stock fell less than half of TAIEX's decline (last 5 sessions) → 7pts |
 | Price proximity to resistance | 5 | Close within 95–100% of 60-day high → 5pts (coiling just below ceiling) |
@@ -101,18 +121,42 @@ make plan
        └─ coil_YYYY-MM-DD.csv
 ```
 
+### coil CSV Schema
+
+`coil_YYYY-MM-DD.csv` columns:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `scan_date` | str (YYYY-MM-DD) | Date the scan was run |
+| `analysis_date` | str (YYYY-MM-DD) | Trading date analyzed |
+| `ticker` | str | Stock ticker |
+| `name` | str | Stock name (from name_map cache) |
+| `market` | str | TSE or TPEx |
+| `grade` | str | COIL_PRIME / COIL_MATURE / COIL_EARLY |
+| `score` | int | Normalized 0–100 score |
+| `bb_pct` | float | BB width percentile (0–100); lower = more compressed |
+| `vol_ratio` | float | 5-day avg vol / 20-day avg vol; lower = more dry-up |
+| `consol_range_pct` | float | 20-day high/low spread as % of close |
+| `inst_consec_days` | int | Max of foreign/trust consecutive buy days |
+| `weeks_consolidating` | int | Approx sessions in consolidation range / 5 |
+| `vs_60d_high_pct` | float | (close / 60-day high - 1) × 100; negative = below resistance |
+| `score_breakdown` | JSON str | Dict of all 15 factor sub-scores for backtest replay |
+| `flags` | str (pipe-separated) | Gate pass/fail flags and quality flags |
+
+**Display column mapping** (terminal table → CSV field):
+- `BB壓縮` → `bb_pct` (display as percentile tier: 極致/收窄/正常)
+- `法人連買` → `inst_consec_days`
+- `橫盤週` → `weeks_consolidating`
+- `vs前高` → `vs_60d_high_pct`
+
 ### Terminal Output
 
 Two tables displayed sequentially after scan completes:
 
 1. Existing `BATCH SCAN RESULTS` table (unchanged)
-2. New `蓄積雷達` table:
+2. New `蓄積雷達` table with columns: Rank / Ticker / 名稱 / 等級 / 分數 / BB壓縮 / 法人連買 / 橫盤週 / vs前高
 
-```
-Rank | Ticker | 名稱 | 等級 | 分數 | BB壓縮 | 法人連買 | 橫盤週 | vs前高
-```
-
-Only COIL_EARLY and above shown. Sorted by score descending.
+**Display scope**: COIL_EARLY and above shown in terminal (for exploration). Only COIL_MATURE and above pushed to Telegram (for actionable signals). This asymmetry is intentional. Sorted by score descending.
 
 ### Telegram Notifications
 
@@ -171,7 +215,8 @@ Either condition alone counts as success.
 - Walk-forward validation (train on older data, test on recent 60 days)
 - Results written to `config/accumulation_params.json`
 - `make tune-review` interactive gate before applying (same pattern as existing engine)
-- `make optimize` automatically includes both momentum and accumulation optimization
+- `make optimize-coil` runs accumulation-only optimization (new target in `scripts/optimize_coil.py`, mirrors `scripts/optimize.py` pattern)
+- `make optimize` is **not modified** — momentum and accumulation optimization remain separate commands to avoid scope creep
 
 ### New Makefile Targets
 
@@ -180,6 +225,7 @@ Either condition alone counts as success.
 | `make coil` | Run accumulation scan only (skip momentum engine) |
 | `make coil-backtest` | Historical backtest of accumulation signals |
 | `make coil-factor-report` | Factor lift analysis + weight recommendations |
+| `make optimize-coil` | Grid search + walk-forward optimization for accumulation params |
 
 ---
 
