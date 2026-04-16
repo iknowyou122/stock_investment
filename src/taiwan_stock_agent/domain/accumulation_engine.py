@@ -1,11 +1,70 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pandas as pd
 
 from taiwan_stock_agent.domain.models import DailyOHLCV
 
+_PARAMS_PATH = Path(__file__).resolve().parents[3] / "config" / "accumulation_params.json"
+
 
 class AccumulationEngine:
+
+    def __init__(self, market: str = "TSE"):
+        self._market = market
+        self._params = self._load_params()
+
+    @staticmethod
+    def _load_params() -> dict:
+        try:
+            return json.loads(_PARAMS_PATH.read_text())
+        except Exception:
+            return {}
+
+    def _gate_check(
+        self,
+        history: list[DailyOHLCV],
+        taiex_regime: str,
+        turnover_20ma: float,
+    ) -> tuple[bool, list[str]]:
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        closes = [d.close for d in sorted_h]
+        flags: list[str] = []
+
+        # G1: MA20 > MA60 and MA20 slope >= 0
+        if len(closes) < 60:
+            return False, ["ACCUM_SKIP:INSUFFICIENT_HISTORY"]
+        ma20 = sum(closes[-20:]) / 20
+        ma60 = sum(closes[-60:]) / 60
+        if ma20 <= ma60:
+            return False, ["ACCUM_FAIL:G1_MA20_LE_MA60"]
+        if len(closes) >= 25:
+            ma20_5d_ago = sum(closes[-25:-5]) / 20
+            if ma20 < ma20_5d_ago:
+                return False, ["ACCUM_FAIL:G1_MA20_SLOPE_DOWN"]
+
+        # G2: not yet broken out (max of last 10 closes < 60d high × 1.03)
+        sixty_day_high = max(closes[-60:])
+        last10_closes = closes[-10:]
+        if max(last10_closes) >= sixty_day_high * 1.03:
+            return False, ["ACCUM_FAIL:G2_ALREADY_BROKE"]
+
+        # G3: market regime
+        if taiex_regime == "downtrend":
+            return False, ["G3_TAIEX_DOWNTREND"]
+
+        # G4: liquidity
+        tse_threshold = 20_000_000
+        tpex_threshold = 8_000_000
+        threshold = tse_threshold if self._market == "TSE" else tpex_threshold
+        if turnover_20ma < threshold:
+            return False, [f"G4_LOW_LIQUIDITY:{turnover_20ma/1e6:.1f}M<{threshold/1e6:.0f}M"]
+
+        flags.append("ACCUM_GATE_PASS")
+        return True, flags
+
 
     @staticmethod
     def _obv_slope(history: list[DailyOHLCV]) -> float | None:
