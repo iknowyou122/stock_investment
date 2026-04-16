@@ -1,0 +1,362 @@
+[
+  {
+    "ticker": "2388",
+    "time": "2026-04-16T11:15:01.463172",
+    "price": 62.09,
+    "triggered": false
+  },
+  {
+    "ticker": "6224",
+    "time": "2026-04-16T11:15:01.469718",
+    "price": 57.41,
+    "triggered": false
+  },
+  {
+    "ticker": "6278",
+    "time": "2026-04-16T11:15:01.474948",
+    "price": 136.31,
+    "triggered": false
+  },
+  {
+    "ticker": "2401",
+    "time": "2026-04-16T11:15:01.480598",
+    "price": 22.49,
+    "triggered": false
+  },
+  {
+    "ticker": "2460",
+    "time": "2026-04-16T11:15:01.485816",
+    "price": 35.12,
+    "triggered": false
+  },
+  {
+    "ticker": "4960",
+    "time": "2026-04-16T11:15:01.494767",
+    "price": 27.91,
+    "triggered": false
+  },
+  {
+    "ticker": "3673",
+    "time": "2026-04-16T11:15:01.501050",
+    "price": 66.17,
+    "triggered": false
+  },
+  {
+    "ticker": "4989",
+    "time": "2026-04-16T11:15:01.506856",
+    "price": 97.81,
+    "triggered": false
+  },
+  {
+    "ticker": "5434",
+    "time": "2026-04-16T11:15:01.512270",
+    "price": 409.94,
+    "triggered": false
+  },
+  {
+    "ticker": "2493",
+    "time": "2026-04-16T11:15:01.516531",
+    "price": 151.74,
+    "triggered": false
+  },
+  {
+    "ticker": "2495",
+    "time": "2026-04-16T11:15:01.520518",
+    "price": 44.97,
+    "triggered": false
+  },
+  {
+    "ticker": "6735",
+    "time": "2026-04-16T11:15:01.524230",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "6761",
+    "time": "2026-04-16T11:15:01.527557",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "6829",
+    "time": "2026-04-16T11:15:01.530226",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "7711",
+    "time": "2026-04-16T11:15:01.533245",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "7704",
+    "time": "2026-04-16T11:15:01.536000",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "2409",
+    "time": "2026-04-16T11:15:01.539111",
+    "price": 19.95,
+    "triggered": false
+  },
+  {
+    "ticker": "3388",
+    "time": "2026-04-16T11:15:01.541800",
+    "price": 81.69,
+    "triggered": false
+  },
+  {
+    "ticker": "6175",
+    "time": "2026-04-16T11:15:01.544775",
+    "price": 62.09,
+    "triggered": false
+  },
+  {
+    "ticker": "2330",
+    "time": "2026-04-16T11:15:01.547751",
+    "price": 2069.6,
+    "triggered": false
+  },
+  {
+    "ticker": "2388",
+    "time": "2026-04-16T11:25:02.793298",
+    "price": 62.09,
+    "triggered": false
+  },
+  {
+    "ticker": "6224",
+    "time": "2026-04-16T11:25:02.803671",
+    "price": 57.41,
+    "triggered": false
+  },
+  {
+    "ticker": "6278",
+    "time": "2026-04-16T11:25:02.811739",
+    "price": 136.31,
+    "triggered": false
+  },
+  {
+    "ticker": "2401",
+    "time": "2026-04-16T11:25:02.819068",
+    "price": 22.49,
+    "triggered": false
+  },
+  {
+    "ticker": "2460",
+    "time": "2026-04-16T11:25:02.826501",
+    "price": 35.12,
+    "triggered": false
+  },
+  {
+    "ticker": "4960",
+    "time": "2026-04-16T11:25:02.832883",
+    "price": 27.91,
+    "triggered": false
+  },
+  {
+    "ticker": "3673",
+    "time": "2026-04-16T11:25:02.839893",
+    "price": 66.17,
+    "triggered": false
+  },
+  {
+    "ticker": "4989",
+    "time": "2026-04-16T11:25:02.846360",
+    "price": 97.81,
+    "triggered": false
+  },
+  {
+    "ticker": "5434",
+    "time": "2026-04-16T11:25:02.852453",
+    "price": 409.94,
+    "triggered": false
+  },
+  {
+    "ticker": "2493",
+    "time": "2026-04-16T11:25:02.858727",
+    "price": 151.74,
+    "triggered": false
+  },
+  {
+    "ticker": "2495",
+    "time": "2026-04-16T11:25:02.864242",
+    "price": 44.97,
+    "triggered": false
+  },
+  {
+    "ticker": "6735",
+    "time": "2026-04-16T11:25:02.870765",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "6761",
+    "time": "2026-04-16T11:25:02.876882",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "6829",
+    "time": "2026-04-16T11:25:02.882230",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "7711",
+    "time": "2026-04-16T11:25:02.888180",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "7704",
+    "time": "2026-04-16T11:25:02.895218",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "2409",
+    "time": "2026-04-16T11:25:02.901268",
+    "price": 19.95,
+    "triggered": false
+  },
+  {
+    "ticker": "3388",
+    "time": "2026-04-16T11:25:02.907400",
+    "price": 81.69,
+    "triggered": false
+  },
+  {
+    "ticker": "6175",
+    "time": "2026-04-16T11:25:02.913815",
+    "price": 62.09,
+    "triggered": false
+  },
+  {
+    "ticker": "2330",
+    "time": "2026-04-16T11:25:02.928303",
+    "price": 2069.6,
+    "triggered": false
+  },
+  {
+    "ticker": "2388",
+    "time": "2026-04-16T14:11:47.819493",
+    "price": 62.09,
+    "triggered": false
+  },
+  {
+    "ticker": "6224",
+    "time": "2026-04-16T14:11:47.829093",
+    "price": 57.41,
+    "triggered": false
+  },
+  {
+    "ticker": "6278",
+    "time": "2026-04-16T14:11:47.836912",
+    "price": 136.31,
+    "triggered": false
+  },
+  {
+    "ticker": "2401",
+    "time": "2026-04-16T14:11:47.844094",
+    "price": 22.49,
+    "triggered": false
+  },
+  {
+    "ticker": "2460",
+    "time": "2026-04-16T14:11:47.851585",
+    "price": 35.12,
+    "triggered": false
+  },
+  {
+    "ticker": "4960",
+    "time": "2026-04-16T14:11:47.868716",
+    "price": 27.91,
+    "triggered": false
+  },
+  {
+    "ticker": "3673",
+    "time": "2026-04-16T14:11:47.873982",
+    "price": 66.17,
+    "triggered": false
+  },
+  {
+    "ticker": "4989",
+    "time": "2026-04-16T14:11:47.878062",
+    "price": 97.81,
+    "triggered": false
+  },
+  {
+    "ticker": "5434",
+    "time": "2026-04-16T14:11:47.881600",
+    "price": 409.94,
+    "triggered": false
+  },
+  {
+    "ticker": "2493",
+    "time": "2026-04-16T14:11:47.885373",
+    "price": 151.74,
+    "triggered": false
+  },
+  {
+    "ticker": "2495",
+    "time": "2026-04-16T14:11:47.888763",
+    "price": 44.97,
+    "triggered": false
+  },
+  {
+    "ticker": "6735",
+    "time": "2026-04-16T14:11:47.891959",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "6761",
+    "time": "2026-04-16T14:11:47.895120",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "6829",
+    "time": "2026-04-16T14:11:47.898167",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "7711",
+    "time": "2026-04-16T14:11:47.901145",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "7704",
+    "time": "2026-04-16T14:11:47.904728",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "2409",
+    "time": "2026-04-16T14:11:47.908125",
+    "price": 19.95,
+    "triggered": false
+  },
+  {
+    "ticker": "3388",
+    "time": "2026-04-16T14:11:47.910964",
+    "price": 81.69,
+    "triggered": false
+  },
+  {
+    "ticker": "6175",
+    "time": "2026-04-16T14:11:47.914349",
+    "price": 62.09,
+    "triggered": false
+  },
+  {
+    "ticker": "2330",
+    "time": "2026-04-16T14:11:47.918148",
+    "price": 2069.6,
+    "triggered": false
+  }
+]
