@@ -39,9 +39,9 @@ Three technical indicators do not exist in the current codebase and must be impl
 | `_obv(history)` | `list[DailyOHLCV] → float \| None` | On-Balance Volume; return 5-day linear slope |
 | `_atr(history, period=14)` | `list[DailyOHLCV] → float \| None` | True Range average over `period` days |
 | `_atr_percentile(history, period=14, window=252)` | `list[DailyOHLCV] → float \| None` | ATR value as percentile of rolling `window`-day ATR history |
-| `_kd_d(history, k_period=9, d_smooth=3)` | `list[DailyOHLCV] → float \| None` | Stochastic %D (slow); return `None` if insufficient history |
+| `_kd_d(history, k_period=9, d_smooth=3)` | `list[DailyOHLCV] → list[float] \| None` | Stochastic %D (slow); return list of recent %D values (last N sessions), or `None` if insufficient history |
 
-The existing `_calculate_bb`, `_rsi`, `_calculate_dmi` static methods on `TripleConfirmationEngine` are **not** to be imported into `AccumulationEngine` — duplicate if needed to maintain clean separation.
+The existing `_calculate_bb`, `_rsi`, `_calculate_dmi` static methods on `TripleConfirmationEngine` are **not** to be imported into `AccumulationEngine` — duplicate if needed to maintain clean separation. **When duplicating `_calculate_bb`, set `percentile_window=252`** (the existing implementation defaults to 60; using that default would silently produce incorrect percentiles for the BB compression factor).
 
 ### Minimum History Requirement
 
@@ -76,8 +76,8 @@ Two factors (BB bandwidth percentile, ATR percentile) require a 252-trading-day 
 | Factor | Max pts | Trigger |
 |--------|---------|---------|
 | MA convergence | 10 | Max gap among MA5/MA10/MA20 as % of price: <2% → 10pts; <4% → 5pts |
-| OBV trend | 8 | OBV 5-day slope > 0 while price flat (accumulation signal) → 8pts |
-| KD low-range consolidation | 7 | KD-D < 30 and flat for ≥3 sessions → 7pts |
+| OBV trend | 8 | OBV 5-day linear slope > 0 AND abs(5-day price return) < 2% (price flat definition) → 8pts (buying while price does not move = hidden accumulation) |
+| KD low-range consolidation | 7 | Latest KD-D < 30 AND max(%D[-3:]) - min(%D[-3:]) < 5 points (flat definition) → 7pts (stochastic in low-range lock-up) |
 | Close above BB midline | 5 | Close > 20-day MA (BB midline) → 5pts (bulls in control) |
 
 #### Dimension C — Chip Behavior (籌碼行為)
@@ -138,7 +138,7 @@ make plan
 | `vol_ratio` | float | 5-day avg vol / 20-day avg vol; lower = more dry-up |
 | `consol_range_pct` | float | 20-day high/low spread as % of close |
 | `inst_consec_days` | int | Max of foreign/trust consecutive buy days |
-| `weeks_consolidating` | int | Approx sessions in consolidation range / 5 |
+| `weeks_consolidating` | int | Count consecutive sessions working backwards from scan date where close stays within the 20-day high/low spread recorded at scan date; divide by 5 and floor |
 | `vs_60d_high_pct` | float | (close / 60-day high - 1) × 100; negative = below resistance |
 | `score_breakdown` | JSON str | Dict of all 15 factor sub-scores for backtest replay |
 | `flags` | str (pipe-separated) | Gate pass/fail flags and quality flags |
