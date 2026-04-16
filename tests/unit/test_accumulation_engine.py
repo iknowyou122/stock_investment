@@ -39,11 +39,21 @@ def test_atr_positive():
 def test_atr_percentile_low_for_compressed():
     # Needs >= period(14) + window(252) = 266 bars minimum → use 300
     hist_high_vol = _make_history(300, base_vol=10_000)
-    # Make last 14 bars have tiny range
-    for bar in hist_high_vol[-14:]:
-        bar.high = bar.close + 0.1
-        bar.low = bar.close - 0.1
-    pct = AccumulationEngine._atr_percentile(hist_high_vol)
+    # Replace last 14 bars with tiny-range bars (cannot mutate Pydantic v2 models in-place)
+    compressed = [
+        DailyOHLCV(
+            ticker=bar.ticker,
+            trade_date=bar.trade_date,
+            open=bar.close - 0.05,
+            high=bar.close + 0.1,
+            low=bar.close - 0.1,
+            close=bar.close,
+            volume=bar.volume,
+        )
+        for bar in hist_high_vol[-14:]
+    ]
+    hist = hist_high_vol[:-14] + compressed
+    pct = AccumulationEngine._atr_percentile(hist)
     assert pct is not None and pct < 30.0
 
 
@@ -56,7 +66,7 @@ def test_atr_percentile_none_insufficient():
 def test_kd_d_returns_list_of_values():
     hist = _make_history(60)
     vals = AccumulationEngine._kd_d(hist)
-    assert vals is not None and len(vals) >= 3
+    assert vals is not None and len(vals) == 5
 
 
 def test_kd_d_none_insufficient():

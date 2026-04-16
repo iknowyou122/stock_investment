@@ -1,26 +1,22 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 
 from taiwan_stock_agent.domain.models import DailyOHLCV
-
-_PARAMS_PATH = Path(__file__).resolve().parents[3] / "config" / "accumulation_params.json"
 
 
 class AccumulationEngine:
 
     @staticmethod
     def _obv_slope(history: list[DailyOHLCV]) -> float | None:
-        """5-day linear slope of OBV. Returns None if < 5 bars."""
-        if len(history) < 5:
+        """5-day linear slope of OBV. Returns None if < 6 bars."""
+        if len(history) < 6:
             return None
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         obv = 0.0
         obvs = []
         prev_close = sorted_h[0].close
-        for bar in sorted_h:
+        for bar in sorted_h[1:]:
             if bar.close > prev_close:
                 obv += bar.volume
             elif bar.close < prev_close:
@@ -37,7 +33,10 @@ class AccumulationEngine:
 
     @staticmethod
     def _atr(history: list[DailyOHLCV], period: int = 14) -> float | None:
-        """Average True Range over `period` bars. Returns None if insufficient history."""
+        """Average True Range over `period` bars. Returns None if insufficient history.
+
+        Note: uses SMA of True Range (not Wilder smoothing).
+        """
         if len(history) < period + 1:
             return None
         sorted_h = sorted(history, key=lambda x: x.trade_date)
@@ -54,6 +53,8 @@ class AccumulationEngine:
         """
         Percentile rank of current ATR within the trailing `window` ATR values.
         Returns None if len(history) < period + window.
+
+        Note: uses SMA of True Range (not Wilder smoothing).
         """
         if len(history) < period + window:
             return None
@@ -76,6 +77,8 @@ class AccumulationEngine:
         """
         Returns last `lookback` Stochastic %D values, or None if insufficient history.
         Minimum bars required: k_period + d_smooth + lookback.
+
+        Applies one SMA smoothing to raw %K, equivalent to Fast Stochastic %D convention.
         """
         min_needed = k_period + d_smooth + lookback
         if len(history) < min_needed:
