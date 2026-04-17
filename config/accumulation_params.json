@@ -1,0 +1,9 @@
+{
+  "_comment": "Tunable parameters for AccumulationEngine (Phase 4.20)",
+  "grade_thresholds": {
+    "COIL_PRIME": 70,
+    "COIL_MATURE": 50,
+    "COIL_EARLY": 35
+  },
+  "raw_max_pts": 150
+}

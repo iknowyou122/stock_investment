@@ -319,14 +319,29 @@ def test_score_prior_advance():
 # ===========================================================================
 
 def test_score_full_prime_grade():
-    """A well-constructed accumulation setup should return COIL_PRIME or COIL_MATURE."""
-    hist = _make_history(300, trending_up=True, base_close=50.0)
-    # Flat compressed last 30 bars (use model_copy)
-    compressed = [
-        bar.model_copy(update={"high": 65.1, "low": 64.9, "close": 65.0, "open": 65.0, "volume": 3_000})
-        for bar in hist[-30:]
-    ]
-    hist_mod = hist[:-30] + compressed
+    """A well-constructed accumulation setup should return COIL_PRIME or COIL_MATURE.
+
+    Setup: 270 bars trending up from 50→85, then last 30 bars compressed at 85±0.1.
+    MA20 ≈ 85, MA60 ≈ rising into 85 — MA20 > MA60 holds.
+    Close (85) < 60d high × 1.03 — not yet broken out.
+    """
+    d = date(2024, 1, 2)
+    # 270 bars trending up from 50 to ~85 (step ~0.13/bar)
+    base_bars: list[DailyOHLCV] = []
+    for i in range(270):
+        close = 50.0 + i * (35.0 / 270)
+        base_bars.append(DailyOHLCV(
+            ticker="TEST", trade_date=d + timedelta(days=i),
+            open=close - 0.3, high=close + 0.8, low=close - 0.8, close=close, volume=10_000
+        ))
+    # Last 30 bars compressed at 85.0 with very tight range
+    compress_bars: list[DailyOHLCV] = []
+    for i in range(30):
+        compress_bars.append(DailyOHLCV(
+            ticker="TEST", trade_date=d + timedelta(days=270 + i),
+            open=85.0, high=85.2, low=84.8, close=85.0, volume=3_000
+        ))
+    hist_mod = base_bars + compress_bars
     proxy = _make_proxy(foreign_days=5)
     taiex = _make_history(30, trending_up=True, base_close=18_000.0)
     eng = AccumulationEngine(market="TSE")
