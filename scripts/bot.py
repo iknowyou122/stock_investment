@@ -1001,6 +1001,7 @@ def _heat_tile_compact(abbr: str, chg: float, price: float | None) -> Text:
 _COIL_GRADE_LABEL_TG = {
     "COIL_PRIME":  "⭐⭐ 極強蓄積",
     "COIL_MATURE": "⭐ 成熟蓄積",
+    "COIL_EARLY":  "蓄積初形",
 }
 
 def _load_latest_coil_csv() -> list[dict]:
