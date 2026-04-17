@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan trade trade-t2 report settle backtest factor-report optimize test setup migrate api install flow show bot-setup bot
+.PHONY: plan trade trade-t2 report settle backtest factor-report optimize test setup migrate api install flow show bot-setup bot coil coil-backtest coil-factor-report optimize-coil
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -174,3 +174,21 @@ bot-setup:
 
 bot:
 	$(PYTHON) scripts/bot.py $(if $(LLM),--llm $(LLM))
+
+# ── 蓄積雷達掃描 ──────────────────────────────────────────────────────────────
+coil:
+	$(PYTHON) scripts/coil_scan.py --save-csv $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(DATE),--date $(DATE))
+
+# ── 蓄積信號回測 ──────────────────────────────────────────────────────────────
+coil-backtest:
+	$(PYTHON) scripts/coil_backtest.py \
+		$(if $(DATE_FROM),--date-from $(DATE_FROM)) \
+		$(if $(DATE_TO),--date-to $(DATE_TO))
+
+# ── 蓄積因子分析 ──────────────────────────────────────────────────────────────
+coil-factor-report:
+	$(PYTHON) scripts/coil_factor_report.py
+
+# ── 蓄積引擎參數優化 ──────────────────────────────────────────────────────────
+optimize-coil:
+	$(PYTHON) scripts/optimize_coil.py
