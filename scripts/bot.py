@@ -64,7 +64,7 @@ _LOG_PATH = _ROOT / "logs" / "bot.log"
 _LOG_PATH.parent.mkdir(exist_ok=True)
 
 # ── In-screen log buffer ─────────────────────────────────────────────────────
-_LOG_LINES: collections.deque[tuple[str, str, str]] = collections.deque(maxlen=12)
+_LOG_LINES: collections.deque[tuple[str, str, str]] = collections.deque(maxlen=6)
 # each entry: (time_str, level, message)
 
 class _PanelHandler(logging.Handler):
@@ -529,6 +529,7 @@ async def _job_opening_scan(force: bool = False, notify_fn=None) -> None:
             _state["last_scan_time"] = datetime.now()
             logger.info("opening_scan shortlist loaded n=%d from %s", len(_state["shortlist"]), csv_path.name)
         await notify(format_opening_list(_state["shortlist"], str(date.today())))
+        await _send_coil_results(str(date.today()))
         logger.info("opening_scan DONE n=%d", len(_state["shortlist"]))
 
 
@@ -677,6 +678,7 @@ async def _job_postmarket_report(force: bool = False, notify_fn=None) -> None:
         tomorrow_signals=tomorrow_signals,
         report_date=str(date.today()),
     ))
+    await _send_coil_results(str(date.today()))
     logger.info("postmarket_report DONE")
 
 
@@ -994,7 +996,12 @@ def _heat_tile_compact(abbr: str, chg: float, price: float | None) -> Text:
     return t
 
 
-# ── Coil CSV loader ──────────────────────────────────────────────────────────
+# ── Coil CSV loader + Telegram push ─────────────────────────────────────────
+
+_COIL_GRADE_LABEL_TG = {
+    "COIL_PRIME":  "⭐⭐ 極強蓄積",
+    "COIL_MATURE": "⭐ 成熟蓄積",
+}
 
 def _load_latest_coil_csv() -> list[dict]:
     """Load top 5 rows from latest coil_*.csv. Returns [] if not found."""
@@ -1006,6 +1013,42 @@ def _load_latest_coil_csv() -> list[dict]:
             return list(csv.DictReader(f))[:5]
     except Exception:
         return []
+
+
+async def _send_coil_results(scan_date: str) -> None:
+    """Push COIL_MATURE+ results from latest coil CSV to Telegram."""
+    coil_files = sorted(_SCAN_DIR.glob("coil_*.csv"), reverse=True)
+    if not coil_files:
+        return
+    try:
+        with coil_files[0].open(newline="", encoding="utf-8") as f:
+            rows = [r for r in csv.DictReader(f) if r.get("grade") in _COIL_GRADE_LABEL_TG]
+    except Exception:
+        return
+    if not rows:
+        return
+
+    name_map = _get_latest_name_map()
+    lines = [f"🔭 *蓄積雷達觀察清單* `{scan_date}`\n"]
+    for row in rows[:10]:
+        grade  = row.get("grade", "")
+        ticker = row.get("ticker", "")
+        name   = name_map.get(ticker) or row.get("name") or ""
+        score  = row.get("score", "--")
+        vs_high = row.get("vs_60d_high_pct", "--")
+        consec  = row.get("inst_consec_days", "--")
+        weeks   = row.get("weeks_consolidating", "--")
+        label   = _COIL_GRADE_LABEL_TG.get(grade, grade)
+        try:
+            vs_f = f"{float(vs_high):+.1f}%"
+        except (ValueError, TypeError):
+            vs_f = "--"
+        lines.append(
+            f"{label} *{ticker}* {name}\n"
+            f"  分數 {score}　vs前高 {vs_f}　法人連買 {consec}d　橫盤 {weeks}w"
+        )
+
+    await _send("\n".join(lines))
 
 
 # ── Rich CLI display — header + 4-quadrant layout ─────────────────────────────
@@ -1151,18 +1194,26 @@ def _render_status_panel() -> Panel:
     coil_rows = _load_latest_coil_csv()
     if coil_rows:
         _COIL_GRADE_COLOR = {
-            "COIL_PRIME":   "bold magenta",
-            "COIL_MATURE":  "bold cyan",
-            "COIL_EARLY":   "yellow",
+            "COIL_PRIME":  "bold magenta",
+            "COIL_MATURE": "bold cyan",
+            "COIL_EARLY":  "yellow",
+        }
+        _COIL_GRADE_LABEL = {
+            "COIL_PRIME":  "★★ 極強蓄積",
+            "COIL_MATURE": "★ 成熟蓄積",
+            "COIL_EARLY":  "蓄積初形",
         }
         coil_tbl = Table(box=None, show_header=True, padding=(0, 1), expand=True)
-        coil_tbl.add_column("代號",  style="dim",    width=6,  no_wrap=True)
-        coil_tbl.add_column("等級",               min_width=10, no_wrap=True)
-        coil_tbl.add_column("分數", justify="right", width=4, no_wrap=True)
+        coil_tbl.add_column("代號",   style="dim",     width=6,  no_wrap=True)
+        coil_tbl.add_column("名稱",                    max_width=6, no_wrap=True)
+        coil_tbl.add_column("等級",                    min_width=10, no_wrap=True)
+        coil_tbl.add_column("分數",  justify="right",  width=4,  no_wrap=True)
         coil_tbl.add_column("vs前高", justify="right", min_width=7, no_wrap=True)
+        name_map = _get_latest_name_map()
         for row in coil_rows:
             grade  = row.get("grade", "")
             ticker = row.get("ticker", "")
+            name   = (name_map.get(ticker) or row.get("name") or "")[:5]
             score  = row.get("score", "--")
             vs_raw = row.get("vs_60d_high_pct", "")
             try:
@@ -1171,9 +1222,11 @@ def _render_status_panel() -> Panel:
             except (ValueError, TypeError):
                 vs_str = "[dim]--[/dim]"
             style = _COIL_GRADE_COLOR.get(grade, "white")
+            label = _COIL_GRADE_LABEL.get(grade, grade)
             coil_tbl.add_row(
                 f"[{style}]{ticker}[/{style}]",
-                f"[{style}]{grade}[/{style}]",
+                name,
+                f"[{style}]{label}[/{style}]",
                 str(score),
                 vs_str,
             )
