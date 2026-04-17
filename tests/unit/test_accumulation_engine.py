@@ -1,5 +1,7 @@
 from __future__ import annotations
 from datetime import date, timedelta
+import sys as _sys
+_sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2] / "scripts"))
 import pytest
 from taiwan_stock_agent.domain.models import DailyOHLCV
 from taiwan_stock_agent.domain.accumulation_engine import AccumulationEngine
@@ -375,3 +377,22 @@ def test_score_full_grade_thresholds():
     assert eng._grade(55) == "COIL_MATURE"
     assert eng._grade(40) == "COIL_EARLY"
     assert eng._grade(20) is None
+
+
+# ── _weeks_consolidating tests ────────────────────────────────────────────────
+
+def test_weeks_consolidating_flat():
+    from coil_scan import _weeks_consolidating
+    hist = _make_history(30, flat=True, base_close=100.0)
+    weeks = _weeks_consolidating(hist)
+    assert weeks >= 4  # 30 flat sessions → at least 6 weeks (30//5=6)
+
+
+def test_weeks_consolidating_volatile_breaks_early():
+    from coil_scan import _weeks_consolidating
+    # Build flat history, then replace a bar near the end with a spike (outside 20d spread)
+    hist = _make_history(30, flat=True, base_close=100.0)
+    spike = hist[-5].model_copy(update={"close": 115.0})  # outside 20d spread
+    hist_mod = hist[:-5] + [spike] + hist[-4:]
+    weeks = _weeks_consolidating(hist_mod)
+    assert weeks <= 1
