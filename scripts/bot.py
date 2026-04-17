@@ -994,6 +994,20 @@ def _heat_tile_compact(abbr: str, chg: float, price: float | None) -> Text:
     return t
 
 
+# ── Coil CSV loader ──────────────────────────────────────────────────────────
+
+def _load_latest_coil_csv() -> list[dict]:
+    """Load top 5 rows from latest coil_*.csv. Returns [] if not found."""
+    coil_files = sorted(_SCAN_DIR.glob("coil_*.csv"), reverse=True)
+    if not coil_files:
+        return []
+    try:
+        with coil_files[0].open(newline="", encoding="utf-8") as f:
+            return list(csv.DictReader(f))[:5]
+    except Exception:
+        return []
+
+
 # ── Rich CLI display — header + 4-quadrant layout ─────────────────────────────
 
 def _render_header() -> Panel:
@@ -1132,6 +1146,38 @@ def _render_status_panel() -> Panel:
         content = Group(t, Rule(title="[dim bold]Watchlist Prices[/dim bold]", style="dim"), wl_tbl)
     else:
         content = t
+
+    # ── 蓄積雷達 block ────────────────────────────────────────────────────────
+    coil_rows = _load_latest_coil_csv()
+    if coil_rows:
+        _COIL_GRADE_COLOR = {
+            "COIL_PRIME":   "bold magenta",
+            "COIL_MATURE":  "bold cyan",
+            "COIL_EARLY":   "yellow",
+        }
+        coil_tbl = Table(box=None, show_header=True, padding=(0, 1), expand=True)
+        coil_tbl.add_column("代號",  style="dim",    width=6,  no_wrap=True)
+        coil_tbl.add_column("等級",               min_width=10, no_wrap=True)
+        coil_tbl.add_column("分數", justify="right", width=4, no_wrap=True)
+        coil_tbl.add_column("vs前高", justify="right", min_width=7, no_wrap=True)
+        for row in coil_rows:
+            grade  = row.get("grade", "")
+            ticker = row.get("ticker", "")
+            score  = row.get("score", "--")
+            vs_raw = row.get("vs_60d_high_pct", "")
+            try:
+                vs_val = float(vs_raw)
+                vs_str = f"{vs_val:+.1f}%"
+            except (ValueError, TypeError):
+                vs_str = "[dim]--[/dim]"
+            style = _COIL_GRADE_COLOR.get(grade, "white")
+            coil_tbl.add_row(
+                f"[{style}]{ticker}[/{style}]",
+                f"[{style}]{grade}[/{style}]",
+                str(score),
+                vs_str,
+            )
+        content = Group(content, Rule(title="[dim bold magenta]蓄積雷達[/dim bold magenta]", style="dim"), coil_tbl)
 
     return Panel(content, title="[bold blue]Bot Status[/bold blue]", border_style="blue", box=box.ROUNDED)
 
