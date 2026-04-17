@@ -175,6 +175,8 @@ class AccumulationEngine:
             return 0, ["ACCUM_SHORT_HISTORY:" + str(len(width_vals))]
         recent = width_vals.iloc[-window:]
         current = width_vals.iloc[-1]
+        # pct = percentile rank of current bandwidth in the 252-day window.
+        # Low pct = narrow band (compressed). High pct = wide band (not compressed).
         pct = float((recent < current).sum()) / len(recent) * 100
         if pct < 15:
             return 20, [f"ACCUM_BB_PCT:{pct:.0f}"]
@@ -326,8 +328,8 @@ class AccumulationEngine:
         last10 = sorted_h[-10:] if len(sorted_h) >= 10 else sorted_h
         if len(last10) < 4:
             return 0, []
-        up_vols = [b.volume for i, b in enumerate(last10[1:], 1) if b.close > last10[i - 1].close]
-        dn_vols = [b.volume for i, b in enumerate(last10[1:], 1) if b.close < last10[i - 1].close]
+        up_vols = [b.volume for a, b in zip(last10, last10[1:]) if b.close > a.close]
+        dn_vols = [b.volume for a, b in zip(last10, last10[1:]) if b.close < a.close]
         if not up_vols or not dn_vols:
             return 0, []
         if sum(up_vols) / len(up_vols) > sum(dn_vols) / len(dn_vols):
@@ -378,14 +380,12 @@ class AccumulationEngine:
     # ------------------------------------------------------------------
 
     def _grade(self, score: int) -> str | None:
-        thresholds = self._params.get("grade_thresholds", {
-            "COIL_PRIME": 70, "COIL_MATURE": 50, "COIL_EARLY": 35
-        })
-        if score >= thresholds["COIL_PRIME"]:
+        t = self._params.get("grade_thresholds", {})
+        if score >= t.get("COIL_PRIME", 70):
             return "COIL_PRIME"
-        if score >= thresholds["COIL_MATURE"]:
+        if score >= t.get("COIL_MATURE", 50):
             return "COIL_MATURE"
-        if score >= thresholds["COIL_EARLY"]:
+        if score >= t.get("COIL_EARLY", 35):
             return "COIL_EARLY"
         return None
 
@@ -438,7 +438,8 @@ class AccumulationEngine:
 
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         closes = [d.close for d in sorted_h]
-        high60 = max(closes[-60:]) if len(closes) >= 60 else closes[-1]
+        # Use bar.high for resistance — consistent with _score_proximity_to_resistance and gate G2
+        high60 = max(bar.high for bar in sorted_h[-60:]) if len(sorted_h) >= 60 else sorted_h[-1].high
         vols = [d.volume for d in sorted_h]
         avg20v = sum(vols[-20:]) / 20 if len(vols) >= 20 else 0
         avg5v = sum(vols[-5:]) / 5 if len(vols) >= 5 else 0
@@ -450,12 +451,12 @@ class AccumulationEngine:
             "raw_pts": raw,
             "flags": all_flags,
             "score_breakdown": breakdown,
-            "bb_pct": next((float(f.split(":")[1]) for f in all_flags if f.startswith("ACCUM_BB_PCT:")), None),
+            "bb_pct": next((float(f.split(":", 1)[1]) for f in all_flags if f.startswith("ACCUM_BB_PCT:")), None),
             "vol_ratio": round(vol_ratio, 2),
             "inst_consec_days": max(proxy.foreign_consecutive_buy_days, proxy.trust_consecutive_buy_days) if proxy and proxy.is_available else 0,
             "vs_60d_high_pct": round((closes[-1] / high60 - 1) * 100, 2) if high60 > 0 else 0.0,
             "consol_range_pct": next(
-                (float(f.split(":")[1].replace("PCT", "")) for f in all_flags if f.startswith("ACCUM_RANGE:")),
+                (float(f.split(":", 1)[1].replace("PCT", "")) for f in all_flags if f.startswith("ACCUM_RANGE:")),
                 None
             ),
         }
