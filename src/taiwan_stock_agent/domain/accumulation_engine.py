@@ -217,7 +217,7 @@ class AccumulationEngine:
     def _score_atr_contraction(self, history: list[DailyOHLCV]) -> tuple[int, list[str]]:
         pct = self._atr_percentile(history)
         if pct is None:
-            return 0, ["ACCUM_SHORT_HISTORY:ATR"]
+            return 0, [f"ACCUM_SHORT_HISTORY:{len(history)}"]
         if pct < 20:
             return 10, [f"ACCUM_ATR_PCT:{pct:.0f}"]
         if pct < 35:
@@ -356,7 +356,8 @@ class AccumulationEngine:
         closes = [d.close for d in sorted_h]
         if len(closes) < 60:
             return 0, []
-        high60 = max(closes[-60:])
+        # Use bar.high for resistance — consistent with gate layer G2 which also uses bar.high
+        high60 = max(bar.high for bar in sorted_h[-60:])
         ratio = closes[-1] / high60 if high60 > 0 else 0
         if 0.95 <= ratio < 1.03:
             return 5, [f"ACCUM_VS_HIGH:{(ratio - 1) * 100:.1f}PCT"]
