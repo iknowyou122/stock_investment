@@ -141,23 +141,31 @@ def _notify_coil_telegram(coil_csv_path: Path, scan_date: str) -> None:
         rows = []
         with open(coil_csv_path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                if row.get("grade", "") in ("COIL_PRIME", "COIL_MATURE"):
+                if row.get("grade", "") in ("COIL_PRIME", "COIL_MATURE", "COIL_EARLY"):
                     rows.append(row)
         if not rows:
             return
 
-        lines = [f"*蓄積雷達觀察清單* `{scan_date}`\n"]
-        grade_label = {"COIL_PRIME": "⭐⭐ PRIME", "COIL_MATURE": "⭐ MATURE"}
-        for row in rows[:10]:
+        lines = [f"蓄積雷達觀察清單 {scan_date}\n"]
+        grade_text = {
+            "COIL_PRIME": "PRIME",
+            "COIL_MATURE": "MATURE",
+            "COIL_EARLY": "EARLY"
+        }
+        for row in rows[:12]:
             grade = row.get("grade", "")
+            grade_label = grade_text.get(grade, grade)
             ticker = row.get("ticker", "")
             name = row.get("name", "")
             score = row.get("score", "--")
             vs_high = row.get("vs_60d_high_pct", "--")
-            consec = row.get("inst_consec_days", "--")
-            weeks = row.get("weeks_consolidating", "--")
-            label = grade_label.get(grade, grade)
-            lines.append(f"{label} *{ticker}* {name} 分{score} vs前高{vs_high}% 法人{consec}d 橫盤{weeks}w")
+            consec = row.get("inst_consec_days", "0")
+            weeks = row.get("weeks_consolidating", "0")
+
+            # 第一行：代號 名稱 分數 等級
+            lines.append(f"*{ticker}* {name}  `{score}分` ({grade_label})")
+            # 第二行：縮排數據 
+            lines.append(f"   前高:{vs_high}%  法人:{consec}d  橫盤:{weeks}w\n")
 
         text = "\n".join(lines)
         payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}).encode()
@@ -341,10 +349,23 @@ def main() -> None:
     parser.add_argument("--save-csv", action="store_true", default=True, help="儲存 CSV（預設開啟）")
     parser.add_argument("--no-save", action="store_true", help="不儲存 CSV")
     parser.add_argument("--notify", action="store_true", help="推播 Telegram")
+    parser.add_argument("--only-notify", action="store_true", help="僅執行推播而不掃描")
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
 
     analysis_date = date.fromisoformat(args.date) if args.date else _default_date()
+
+    # Pre-calculate CSV path
+    scan_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
+    csv_path = scan_dir / f"coil_{analysis_date.isoformat()}.csv"
+
+    if args.only_notify:
+        if csv_path.exists():
+            _notify_coil_telegram(csv_path, analysis_date.isoformat())
+            _console.print(f"  [green]已針對現有 CSV 執行推播:[/green] {csv_path}")
+        else:
+            _console.print(f"  [red]找不到 CSV 檔案，無法推播:[/red] {csv_path}")
+        return
 
     industry_map = _build_industry_map()
     name_map = _build_name_map()

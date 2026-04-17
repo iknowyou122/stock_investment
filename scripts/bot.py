@@ -1470,8 +1470,8 @@ async def main_async(llm: str) -> None:
     layout = Layout()
     layout.split_column(
         Layout(name="header", size=3),
-        Layout(name="top",    ratio=1),
-        Layout(name="bottom", ratio=1),
+        Layout(name="top",    ratio=3),
+        Layout(name="bottom", ratio=2),
     )
     layout["top"].split_row(
         Layout(name="tl"),

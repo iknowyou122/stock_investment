@@ -177,7 +177,7 @@ bot:
 
 # ── 蓄積雷達掃描 ──────────────────────────────────────────────────────────────
 coil:
-	$(PYTHON) scripts/coil_scan.py --save-csv $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(DATE),--date $(DATE))
+	$(PYTHON) scripts/coil_scan.py --save-csv --notify $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(DATE),--date $(DATE))
 
 # ── 蓄積信號回測 ──────────────────────────────────────────────────────────────
 coil-backtest:

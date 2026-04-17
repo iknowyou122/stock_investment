@@ -969,7 +969,7 @@ def run_batch(
             market_map=market_map,
             name_map=name_map,
             csv_path=coil_csv,
-            notify=False,
+            notify=True,
         )
     except ImportError:
         _console.print("  [dim yellow]coil_scan not available, skipping Pass 2[/dim yellow]")
