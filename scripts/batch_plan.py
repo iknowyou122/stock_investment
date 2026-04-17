@@ -955,6 +955,25 @@ def run_batch(
     if csv_path:
         _save_csv(results, analysis_date, csv_path, sort_by=sort_by)
 
+    # --- Pass 2: Accumulation scan (local import avoids circular dependency) ---
+    try:
+        from coil_scan import run_coil_scan as _run_coil_scan
+        _console.rule("[bold magenta]蓄積雷達 Pass 2[/bold magenta]")
+        coil_csv = None
+        if csv_path:
+            coil_csv = csv_path.parent / f"coil_{analysis_date.isoformat()}.csv"
+        _run_coil_scan(
+            tickers=tickers,
+            analysis_date=analysis_date,
+            workers=workers,
+            market_map=market_map,
+            name_map=name_map,
+            csv_path=coil_csv,
+            notify=False,
+        )
+    except ImportError:
+        _console.print("  [dim yellow]coil_scan not available, skipping Pass 2[/dim yellow]")
+
 
 def main() -> None:
     # 大批次掃描（728 檔）會消耗大量 socket fd；macOS 預設只有 256。
