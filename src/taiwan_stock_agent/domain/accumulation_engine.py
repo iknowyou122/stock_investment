@@ -45,8 +45,9 @@ class AccumulationEngine:
             if ma20 < ma20_5d_ago:
                 return False, ["ACCUM_FAIL:G1_MA20_SLOPE_DOWN"]
 
-        # G2: not yet broken out (max of last 10 closes < 60d high × 1.03)
-        sixty_day_high = max(closes[-60:])
+        # G2: not yet broken out (max of last 10 closes < 60d resistance × 1.03)
+        # Use bar.high for resistance level — close can exceed prior closes while highs define resistance
+        sixty_day_high = max(bar.high for bar in sorted_h[-60:])
         last10_closes = closes[-10:]
         if max(last10_closes) >= sixty_day_high * 1.03:
             return False, ["ACCUM_FAIL:G2_ALREADY_BROKE"]

@@ -83,14 +83,25 @@ def test_gate_passes_uptrend_not_broken_out():
 
 
 def test_gate_fails_already_broken_out():
-    hist = _make_history(80, trending_up=True)
-    # Replace last 10 bars with very high closes (above 60d high × 1.03)
-    modified = hist[:-10] + [
-        bar.model_copy(update={"close": 9999.0, "high": 9999.0})
-        for bar in hist[-10:]
+    # Flat consolidation: prior bars have resistance at high=102.
+    # Last 10 bars close at 107, which is > 102 × 1.03 = 105.06 — breakout detected.
+    d = date(2024, 1, 2)
+    base = [
+        DailyOHLCV(
+            ticker="TEST", trade_date=d + timedelta(days=i),
+            open=100.0, high=102.0, low=99.0, close=100.5, volume=10_000,
+        )
+        for i in range(70)
+    ]
+    breakout = [
+        DailyOHLCV(
+            ticker="TEST", trade_date=d + timedelta(days=70 + i),
+            open=105.0, high=102.5, low=104.0, close=107.0, volume=20_000,
+        )
+        for i in range(10)
     ]
     eng = AccumulationEngine(market="TSE")
-    passed, flags = eng._gate_check(modified, taiex_regime="neutral", turnover_20ma=30_000_000)
+    passed, flags = eng._gate_check(base + breakout, taiex_regime="neutral", turnover_20ma=30_000_000)
     assert passed is False
     assert any("G2_ALREADY_BROKE" in f for f in flags)
 
