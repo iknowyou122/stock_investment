@@ -103,7 +103,11 @@ def _run_with_params(
                 if signal is None:
                     continue
 
-                # Re-grade using custom thresholds (override engine's stored grade)
+                # Re-grade using custom thresholds (post-hoc override).
+                # score_full() computes the normalized 0-100 score independently of
+                # grade thresholds; _grade() is a pure threshold lookup on that score.
+                # Re-applying thresholds here is equivalent to eng._params override —
+                # provided _grade() never adds compound logic beyond simple comparisons.
                 score = signal["score"]
                 if score >= prime_thresh:
                     new_grade = "COIL_PRIME"
