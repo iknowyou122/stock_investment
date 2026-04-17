@@ -31,6 +31,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from taiwan_stock_agent.domain.accumulation_engine import AccumulationEngine
+from taiwan_stock_agent.domain.models import DailyOHLCV
 from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
 
 _console = Console()
@@ -77,8 +78,22 @@ def _scan_one_coil(
     try:
         # Fetch 330 trading days (need 266 for ATR percentile + buffer)
         start = analysis_date - timedelta(days=490)
-        history = finmind.fetch_ohlcv(ticker, start_date=start, end_date=analysis_date)
-        if not history or len(history) < 60:
+        history_df = finmind.fetch_ohlcv(ticker, start_date=start, end_date=analysis_date)
+        if history_df is None or history_df.empty:
+            return None
+        history: list[DailyOHLCV] = []
+        for _, row in history_df.iterrows():
+            history.append(DailyOHLCV(
+                ticker=ticker,
+                trade_date=row["trade_date"],
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=int(row["volume"]),
+            ))
+        history = sorted(history, key=lambda x: x.trade_date)
+        if len(history) < 60:
             return None
         proxy = chip_fetcher.fetch(ticker, analysis_date)
 
@@ -245,12 +260,24 @@ def run_coil_scan(
         name_map = {}
 
     finmind = FinMindClient()
-    chip_fetcher = ChipProxyFetcher(finmind_client=finmind)
+    chip_fetcher = ChipProxyFetcher()
 
     # Fetch TAIEX history once (shared across all tickers)
-    taiex_start = analysis_date - timedelta(days=120)
     try:
-        taiex_history = finmind.fetch_ohlcv("^TWII", start_date=taiex_start, end_date=analysis_date)
+        taiex_df = finmind.fetch_taiex_history(analysis_date, lookback_days=130)
+        taiex_history: list[DailyOHLCV] = []
+        if taiex_df is not None and not taiex_df.empty:
+            for _, row in taiex_df.iterrows():
+                taiex_history.append(DailyOHLCV(
+                    ticker="TAIEX",
+                    trade_date=row["trade_date"],
+                    open=float(row["open"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                    volume=int(row.get("volume", 0)),
+                ))
+            taiex_history = sorted(taiex_history, key=lambda x: x.trade_date)
     except Exception:
         taiex_history = []
 
