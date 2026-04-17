@@ -139,3 +139,224 @@ def test_gate_fails_ma20_below_ma60():
     passed, flags = eng._gate_check(hist, taiex_regime="neutral", turnover_20ma=30_000_000)
     assert passed is False
     assert any("G1" in f for f in flags)
+
+
+# ===========================================================================
+# Task 3: Dimension A — Compression Pattern
+# ===========================================================================
+
+def test_score_bb_compression_extreme():
+    # Build 300-bar history where last 20 bars are very compressed (tiny range)
+    hist = _make_history(300, trending_up=True)
+    compressed = [
+        bar.model_copy(update={"high": bar.close + 0.05, "low": bar.close - 0.05})
+        for bar in hist[-20:]
+    ]
+    hist_mod = hist[:-20] + compressed
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_bb_compression(hist_mod)
+    assert pts >= 10
+
+
+def test_score_volume_dryup_extreme():
+    hist = _make_history(30, base_vol=10_000)
+    low_vol = [bar.model_copy(update={"volume": 3_000}) for bar in hist[-5:]]
+    hist_mod = hist[:-5] + low_vol
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_volume_dryup(hist_mod)
+    assert pts == 15
+
+
+def test_score_volume_dryup_moderate():
+    hist = _make_history(30, base_vol=10_000)
+    mod_vol = [bar.model_copy(update={"volume": 8_000}) for bar in hist[-5:]]
+    hist_mod = hist[:-5] + mod_vol
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_volume_dryup(hist_mod)
+    assert pts == 8
+
+
+def test_score_consolidation_tight():
+    # 20 days with spread < 5%: high=101, low=99.5 → spread = 1.5/99.5 ≈ 1.5% < 5%
+    d = date(2024, 1, 2)
+    hist = [
+        DailyOHLCV(ticker="TEST", trade_date=d + timedelta(days=i),
+                   open=100.0, high=101.0, low=99.5, close=100.0, volume=10_000)
+        for i in range(30)
+    ]
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_consolidation_range(hist)
+    assert pts == 15
+
+
+def test_score_inside_bars():
+    # Create 6 bars where the last bar is inside the second-to-last bar
+    d = date(2024, 1, 2)
+    hist = [
+        DailyOHLCV(ticker="TEST", trade_date=d + timedelta(days=i),
+                   open=100.0, high=102.0, low=98.0, close=100.0, volume=10_000)
+        for i in range(5)
+    ]
+    # Last bar is inside: high=101.5, low=98.5 (inside prev 102/98)
+    hist.append(DailyOHLCV(ticker="TEST", trade_date=d + timedelta(days=5),
+                            open=100.0, high=101.5, low=98.5, close=100.0, volume=10_000))
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_inside_bars(hist)
+    assert pts >= 2
+
+
+# ===========================================================================
+# Task 4: Dimension B — Technical Confirmation
+# ===========================================================================
+
+def test_score_ma_convergence_tight():
+    hist = _make_history(30, flat=True, base_close=100.0)
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_ma_convergence(hist)
+    assert pts == 10  # flat history → MA5/10/20 all equal → gap=0 < 2%
+
+
+def test_score_obv_trend_rising_price_flat():
+    # Build flat-ish history (< 2% price change in last 5 bars)
+    # with rising volume on up days to generate positive OBV slope
+    d = date(2024, 1, 2)
+    # 25 bars flat at 100, then last 5 bars inch up with high volume
+    hist = [
+        DailyOHLCV(ticker="TEST", trade_date=d + timedelta(days=i),
+                   open=100.0, high=100.8, low=99.2, close=100.0, volume=5_000)
+        for i in range(25)
+    ]
+    for i in range(5):
+        close = 100.0 + i * 0.1  # tiny up moves, total < 2%
+        hist.append(DailyOHLCV(
+            ticker="TEST", trade_date=d + timedelta(days=25 + i),
+            open=close - 0.05, high=close + 0.3, low=close - 0.3, close=close, volume=20_000
+        ))
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_obv_trend(hist)
+    assert pts == 8
+
+
+def test_score_kd_low_flat():
+    # Close near the bottom of range → KD-D will be low
+    d = date(2024, 1, 2)
+    hist = [
+        DailyOHLCV(ticker="TEST", trade_date=d + timedelta(days=i),
+                   open=16.0, high=25.0, low=15.0, close=16.0, volume=10_000)
+        for i in range(60)
+    ]
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_kd_low_flat(hist)
+    assert pts == 7
+
+
+def test_score_close_above_midline():
+    hist = _make_history(30, trending_up=True, base_close=100.0)
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_close_above_midline(hist)
+    assert pts == 5
+
+
+# ===========================================================================
+# Task 5: Dimension C — Chip Behavior
+# ===========================================================================
+
+def _make_proxy(foreign_days: int = 0, trust_days: int = 0):
+    from taiwan_stock_agent.domain.models import TWSEChipProxy
+    return TWSEChipProxy(
+        ticker="TEST", trade_date=date(2025, 1, 1),
+        foreign_net_buy=10_000 if foreign_days > 0 else 0,
+        trust_net_buy=5_000 if trust_days > 0 else 0,
+        dealer_net_buy=0,
+        avg_20d_volume=10_000,
+        foreign_consecutive_buy_days=foreign_days,
+        trust_consecutive_buy_days=trust_days,
+        dealer_consecutive_buy_days=0,
+        is_available=True,
+    )
+
+
+def test_score_inst_consec_prime():
+    proxy = _make_proxy(foreign_days=5)
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_institutional_consec(proxy)
+    assert pts == 20
+
+
+def test_score_inst_consec_mid():
+    proxy = _make_proxy(foreign_days=3)
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_institutional_consec(proxy)
+    assert pts == 12
+
+
+def test_score_updown_volume_structure():
+    d = date(2025, 1, 2)
+    prev_close = 100.0
+    hist = []
+    for i in range(10):
+        close = prev_close + (1 if i % 2 == 0 else -0.5)
+        vol = 20_000 if close > prev_close else 5_000
+        hist.append(DailyOHLCV(
+            ticker="T", trade_date=d + timedelta(days=i),
+            open=prev_close, high=close + 0.5, low=close - 0.5, close=close, volume=vol
+        ))
+        prev_close = close
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_updown_volume(hist)
+    assert pts == 8
+
+
+def test_score_prior_advance():
+    hist = _make_history(70, trending_up=True, base_close=100.0)
+    eng = AccumulationEngine(market="TSE")
+    pts, flags = eng._score_prior_advance(hist)
+    assert pts == 5  # close ~135 / min60 >= 1.15
+
+
+# ===========================================================================
+# Task 6: score_full() + _grade()
+# ===========================================================================
+
+def test_score_full_prime_grade():
+    """A well-constructed accumulation setup should return COIL_PRIME or COIL_MATURE."""
+    hist = _make_history(300, trending_up=True, base_close=50.0)
+    # Flat compressed last 30 bars (use model_copy)
+    compressed = [
+        bar.model_copy(update={"high": 65.1, "low": 64.9, "close": 65.0, "open": 65.0, "volume": 3_000})
+        for bar in hist[-30:]
+    ]
+    hist_mod = hist[:-30] + compressed
+    proxy = _make_proxy(foreign_days=5)
+    taiex = _make_history(30, trending_up=True, base_close=18_000.0)
+    eng = AccumulationEngine(market="TSE")
+    result = eng.score_full(
+        history=hist_mod, proxy=proxy,
+        taiex_regime="neutral", taiex_history=taiex,
+        turnover_20ma=30_000_000,
+    )
+    assert result is not None
+    assert result["grade"] in ("COIL_PRIME", "COIL_MATURE")
+    assert result["score"] >= 50
+    assert "flags" in result
+    assert "score_breakdown" in result
+
+
+def test_score_full_gate_fail_returns_none():
+    # Flat history → MA20 will equal MA60 → G1 fails
+    hist = _make_history(80, flat=True, base_close=100.0)
+    eng = AccumulationEngine(market="TSE")
+    result = eng.score_full(
+        history=hist, proxy=None,
+        taiex_regime="neutral", taiex_history=[],
+        turnover_20ma=30_000_000,
+    )
+    assert result is None
+
+
+def test_score_full_grade_thresholds():
+    eng = AccumulationEngine(market="TSE")
+    assert eng._grade(72) == "COIL_PRIME"
+    assert eng._grade(55) == "COIL_MATURE"
+    assert eng._grade(40) == "COIL_EARLY"
+    assert eng._grade(20) is None
