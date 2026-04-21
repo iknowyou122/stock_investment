@@ -14,3 +14,4 @@ venv/
 .gstack/
 .worktrees/
 db/coil_track.db
+logs/*.log

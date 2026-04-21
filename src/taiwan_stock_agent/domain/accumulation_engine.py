@@ -33,16 +33,23 @@ class AccumulationEngine:
         closes = [d.close for d in sorted_h]
         flags: list[str] = []
 
-        # G1: MA20 > MA60 and MA20 slope >= 0
+        # G1: close within MA20 ± 8% AND MA20 slope flat or rising
         if len(closes) < 60:
             return False, ["ACCUM_SKIP:INSUFFICIENT_HISTORY"]
         ma20 = sum(closes[-20:]) / 20
-        ma60 = sum(closes[-60:]) / 60
-        if ma20 <= ma60:
-            return False, ["ACCUM_FAIL:G1_MA20_LE_MA60"]
+        if ma20 <= 0:
+            return False, ["ACCUM_FAIL:G1_MA20_ZERO"]
+
+        # Sub-condition 1: close within ± 8% of MA20
+        proximity = abs(closes[-1] - ma20) / ma20
+        if proximity > 0.08:
+            direction = "ABOVE" if closes[-1] > ma20 else "BELOW"
+            return False, [f"ACCUM_FAIL:G1_CLOSE_FAR_FROM_MA20:{direction}:{proximity*100:.1f}%"]
+
+        # Sub-condition 2: MA20 slope flat or rising (≥ -1% over 5 days)
         if len(closes) >= 25:
             ma20_5d_ago = sum(closes[-25:-5]) / 20
-            if ma20 < ma20_5d_ago:
+            if ma20_5d_ago > 0 and (ma20 - ma20_5d_ago) / ma20_5d_ago < -0.01:
                 return False, ["ACCUM_FAIL:G1_MA20_SLOPE_DOWN"]
 
         # G2: not yet broken out (max of last 10 closes < 60d resistance × 1.03)

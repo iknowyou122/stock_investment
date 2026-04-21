@@ -77,15 +77,6 @@ def recompute_score(breakdown: dict, params: dict) -> tuple[int, str]:
         hi = params.get("rsi_momentum_hi", DEFAULT_PARAMS["rsi_momentum_hi"])
         pts["rsi_momentum_pts"] = 4 if lo <= rsi <= hi else 0
 
-    # --- Re-evaluate breakout volume pts ---
-    vol_ratio = raw.get("volume_vs_20ma")
-    if vol_ratio is not None:
-        bv_thresh = params.get("breakout_vol_ratio", DEFAULT_PARAMS["breakout_vol_ratio"])
-        had_breakout = pts.get("breakout_20d_pts", 0) > 0
-        pts["breakout_volume_pts"] = (
-            3 if (had_breakout and vol_ratio >= bv_thresh) else 0
-        )
-
     # --- Pillar 4: Accumulation Points ---
     flags = breakdown.get("flags", [])
     if "EMERGING_SETUP" in flags:
@@ -95,13 +86,21 @@ def recompute_score(breakdown: dict, params: dict) -> tuple[int, str]:
     if "BB_SQUEEZE_COILING" in flags:
         pts["bb_squeeze_coiling_pts"] = params.get("bb_squeeze_coiling_pts", 3)
 
-    # --- Re-evaluate gate_vol ---
+    # --- Re-evaluate gate_vol & breakout_volume_pts ---
+    vol_ratio = raw.get("volume_vs_20ma")
     if vol_ratio is not None:
         gate_vol = params.get("gate_vol_ratio", DEFAULT_PARAMS["gate_vol_ratio"])
         flags = breakdown.get("flags", [])
         gate_vol_passed = any(f == "GATE_PASS:VOL" for f in flags)
         if gate_vol_passed and vol_ratio < gate_vol:
             return 0, "CAUTION"
+
+        # Also re-evaluate breakout_volume_pts based on breakout_vol_ratio
+        breakout_vol_ratio = params.get("breakout_vol_ratio", DEFAULT_PARAMS["breakout_vol_ratio"])
+        if vol_ratio >= breakout_vol_ratio:
+            pts["breakout_volume_pts"] = 3
+        else:
+            pts["breakout_volume_pts"] = 0
 
     score = _sum_pts(pts)
 

@@ -394,9 +394,12 @@ class StrategistAgent:
   - 免費版 - 借券壓力: {breakdown.sbl_pressure_pts} 分
 
 空間指標 (Pillar 3):
-  - 突破20日高點: {breakdown.breakout_20d_pts} 分
-  - 突破60日高點: {breakdown.breakout_60d_pts} 分
-  - 突破量能確認: {breakdown.breakout_volume_pts} 分
+  - 接近高點 (Proximity): {breakdown.proximity_pts} 分
+  - 布林壓縮 (BB Compression): {breakdown.bb_compression_pts} 分
+  - 均線收斂 (MA Convergence): {breakdown.ma_convergence_pts} 分
+  - 盤整週數 (Consolidation): {breakdown.consolidation_weeks_pts} 分
+  - 內困K線 (Inside Bars): {breakdown.inside_bar_streak_pts} 分
+  - 蓄勢前期漲幅 (Prior Advance): {breakdown.prior_advance_pts} 分
   - MA多頭排列: {breakdown.ma_alignment_pts} 分
   - MA20斜率: {breakdown.ma20_slope_pts} 分
   - 相對強弱: {breakdown.relative_strength_pts} 分

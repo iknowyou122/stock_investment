@@ -188,7 +188,7 @@ class SentimentClient:
 @dataclass
 class MarketSentiment:
     label: str          # "多頭熱絡" | "中性震盪" | "偏空謹慎"
-    emoji: str          # 🟢 | 🟡 | 🔴
+    emoji: str          # 🔴 | 🟡 | 🟢
     ad_ratio: float
     taiex_rsi: float
     volume_ratio: float
@@ -200,8 +200,8 @@ def compute_sentiment(breadth: BreadthData, headlines: list[str], taiex_rsi: flo
 ```
 
 **Label logic:**
-- 🟢 `多頭熱絡`: ad_ratio > 2.0 AND RSI 50–70 AND volume_ratio > 1.0
-- 🔴 `偏空謹慎`: ad_ratio < 0.8 OR RSI < 40 OR TAIEX < MA20
+- 🔴 `多頭熱絡`: ad_ratio > 2.0 AND RSI 50–70 AND volume_ratio > 1.0
+- 🟢 `偏空謹慎`: ad_ratio < 0.8 OR RSI < 40 OR TAIEX < MA20
 - 🟡 `中性震盪`: everything else
 
 **Keyword lists:**
@@ -213,7 +213,7 @@ def compute_sentiment(breadth: BreadthData, headlines: list[str], taiex_rsi: flo
 Add a new sentiment widget to `_render_status_panel()` (bottom of Bot Status panel):
 
 ```
-市場輿情  🟢 多頭熱絡
+市場輿情  🔴 多頭熱絡
 漲跌比 2.3 · RSI 61 · 量 1.2×
 ⚠ 台積電法說上調目標價
 ```
@@ -243,3 +243,21 @@ The sentiment is refreshed every 30 seconds alongside market data (use `_MARKET_
 - make plan output sentiment header (removed per user request)
 - Paid FinMind broker-level data (no change to paid/free tier split)
 - Historical backtest of new engine (separate task after implementation)
+
+---
+
+## Implementation Status — COMPLETE ✅
+
+**2026-04-21** All components implemented and tested:
+
+1. ✅ **Triple Confirmation Engine v2.3**: Gate rewritten (4 hard conditions for pre-breakout), Pillar 3 fully rewritten (compression quality factors)
+2. ✅ **AccumulationEngine**: G1 condition updated (close within MA20±8% + MA20 slope flat/rising)
+3. ✅ **market_sentiment.py**: Created with sentiment label logic (多頭熱絡/中性震盪/偏空謹慎)
+4. ✅ **sentiment_client.py**: Created with TWSE breadth fetch + Yahoo RSS headlines
+5. ✅ **batch_plan.py**: Industry-grouped output with strength calculation (industry_strength dict, sorted by median change)
+6. ✅ **bot.py**: Sentiment widget integrated (_fetch_sentiment_sync + 市場輿情 panel in status display)
+7. ✅ **Tests**: 
+   - test_market_sentiment.py: 6 tests passing (label logic, keyword extraction)
+   - test_triple_confirmation_engine_v2_fix.py: 8 tests passing (Gate conditions, Pillar 3 factors, AccumulationEngine G1)
+
+**Next phase:** Historical backtest of new pre-breakout engine (separate task)

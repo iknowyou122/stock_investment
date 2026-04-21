@@ -1,0 +1,122 @@
+[
+  {
+    "ticker": "2388",
+    "time": "2026-04-17T09:14:27.455753",
+    "price": 62.09,
+    "triggered": true
+  },
+  {
+    "ticker": "6224",
+    "time": "2026-04-17T09:14:27.899881",
+    "price": 57.41,
+    "triggered": true
+  },
+  {
+    "ticker": "6278",
+    "time": "2026-04-17T09:14:28.338532",
+    "price": 136.31,
+    "triggered": false
+  },
+  {
+    "ticker": "2401",
+    "time": "2026-04-17T09:14:28.342190",
+    "price": 22.49,
+    "triggered": false
+  },
+  {
+    "ticker": "2460",
+    "time": "2026-04-17T09:14:28.350394",
+    "price": 35.12,
+    "triggered": true
+  },
+  {
+    "ticker": "4960",
+    "time": "2026-04-17T09:14:28.803532",
+    "price": 27.91,
+    "triggered": false
+  },
+  {
+    "ticker": "3673",
+    "time": "2026-04-17T09:14:28.809135",
+    "price": 66.17,
+    "triggered": true
+  },
+  {
+    "ticker": "4989",
+    "time": "2026-04-17T09:14:29.260640",
+    "price": 97.81,
+    "triggered": false
+  },
+  {
+    "ticker": "5434",
+    "time": "2026-04-17T09:14:29.264040",
+    "price": 409.94,
+    "triggered": true
+  },
+  {
+    "ticker": "2493",
+    "time": "2026-04-17T09:14:29.704928",
+    "price": 151.74,
+    "triggered": false
+  },
+  {
+    "ticker": "2495",
+    "time": "2026-04-17T09:14:29.709416",
+    "price": 44.97,
+    "triggered": false
+  },
+  {
+    "ticker": "6735",
+    "time": "2026-04-17T09:14:29.713672",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "6761",
+    "time": "2026-04-17T09:14:29.717874",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "6829",
+    "time": "2026-04-17T09:14:29.721823",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "7711",
+    "time": "2026-04-17T09:14:29.725640",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "7704",
+    "time": "2026-04-17T09:14:29.729302",
+    "price": 162.68,
+    "triggered": false
+  },
+  {
+    "ticker": "2409",
+    "time": "2026-04-17T09:14:29.733017",
+    "price": 19.95,
+    "triggered": true
+  },
+  {
+    "ticker": "3388",
+    "time": "2026-04-17T09:14:30.173555",
+    "price": 81.69,
+    "triggered": false
+  },
+  {
+    "ticker": "6175",
+    "time": "2026-04-17T09:14:30.181644",
+    "price": 62.09,
+    "triggered": true
+  },
+  {
+    "ticker": "2330",
+    "time": "2026-04-17T09:14:30.629874",
+    "price": 2069.6,
+    "triggered": true
+  }
+]

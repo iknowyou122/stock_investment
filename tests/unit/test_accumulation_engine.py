@@ -76,6 +76,42 @@ def test_kd_d_none_insufficient():
     assert AccumulationEngine._kd_d(hist) is None
 
 
+def test_gate_passes_when_close_near_ma20_with_flat_slope():
+    """close within MA20 ± 8% AND slope flat → G1 passes."""
+    # Build history: 65 bars flat at 100.0 → MA20 ≈ MA60 ≈ 100, slope = 0
+    hist = _make_history(n=65, base_close=100.0, flat=True)
+    eng = AccumulationEngine(market="TSE")
+    passed, flags = eng._gate_check(hist, taiex_regime="neutral", turnover_20ma=25_000_000)
+    # With flat MA and close near MA20, G1 should pass
+    assert "ACCUM_FAIL:G1_MA20_LE_MA60" not in flags
+    assert "ACCUM_FAIL:G1_CLOSE_FAR_FROM_MA20" not in flags
+    assert passed is True
+
+def test_gate_fails_when_close_too_far_from_ma20():
+    """close > MA20 × 1.08 (more than 8% above MA20) → G1 fails."""
+    hist = _make_history(n=65, base_close=100.0, flat=True)
+    # Override last bar with close far above MA20
+    hist[-1] = DailyOHLCV(ticker="TEST", trade_date=hist[-1].trade_date,
+                           open=110.0, high=111.0, low=109.0, close=112.0, volume=20_000)
+    eng = AccumulationEngine(market="TSE")
+    passed, flags = eng._gate_check(hist, taiex_regime="neutral", turnover_20ma=25_000_000)
+    assert any("G1_CLOSE_FAR_FROM_MA20" in f for f in flags)
+    assert passed is False
+
+def test_gate_fails_when_ma20_slope_falling():
+    """MA20 slope < -1% in 5 days → G1 fails."""
+    # Declining history: MA20 is falling
+    result = []
+    d = date(2025, 1, 2)
+    for i in range(65):
+        c = 110.0 - i * 0.5  # declining 0.5/day → MA20 clearly falling
+        result.append(DailyOHLCV(ticker="TEST", trade_date=d + timedelta(days=i),
+                               open=c, high=c+0.3, low=c-0.3, close=c, volume=20_000))
+    eng = AccumulationEngine(market="TSE")
+    passed, flags = eng._gate_check(result, taiex_regime="neutral", turnover_20ma=25_000_000)
+    assert "ACCUM_FAIL:G1_MA20_SLOPE_DOWN" in flags
+    assert passed is False
+
 def test_gate_passes_uptrend_not_broken_out():
     hist = _make_history(80, trending_up=True)
     eng = AccumulationEngine(market="TSE")
@@ -124,6 +160,7 @@ def test_gate_fails_low_liquidity():
     assert any("G4_LOW_LIQUIDITY" in f for f in flags)
 
 
+@pytest.mark.skip(reason="G1 replaced by proximity + slope check in pre-breakout redesign")
 def test_gate_fails_ma20_below_ma60():
     # Build declining price history so MA20 < MA60
     from datetime import date, timedelta

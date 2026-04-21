@@ -116,11 +116,11 @@ _PILLAR2_PAID_MAX = 40
 _PILLAR2_FREE_MAX = 40
 _PILLAR3_MAX = 35
 
-_LONG_THRESHOLD_NEUTRAL = 55
-_LONG_THRESHOLD_UPTREND = 50    # TAIEX MA20 rising
-_LONG_THRESHOLD_DOWNTREND = 60  # TAIEX MA20 falling/flat
-_WATCH_MIN = 40
-_CAUTION_THRESHOLD = 39
+_LONG_THRESHOLD_NEUTRAL = 65    # was 55
+_LONG_THRESHOLD_UPTREND = 60    # was 50
+_LONG_THRESHOLD_DOWNTREND = 70  # was 60
+_WATCH_MIN = 45                  # was 40
+_CAUTION_THRESHOLD = 44         # derived from _WATCH_MIN - 1
 
 # MA20 slope computation parameters
 _MA20_SLOPE_MIN_SESSIONS = 25   # 20 (MA window) + 5 (diff lookback) so iloc[-6] is valid
@@ -211,8 +211,10 @@ class _ScoreBreakdown:
     vwap_advantage_pts: int = 0       # 0/6
     trend_continuity_pts: int = 0     # 0/3/5
     volume_escalation_pts: int = 0    # 0/3/5
-    rsi_momentum_pts: int = 0         # 0/4 — RSI(14) 55–70
-    dmi_initiation_pts: int = 0      # 0/2/4/6 — DMI: fresh cross/rising ADX → 6
+    rsi_momentum_pts: int = 0         # 0/4 — RSI(14) 40–65
+    dmi_initiation_pts: int = 0       # 0/2/4/6 — DMI: fresh cross/rising ADX → 6
+    volume_dryup_pts: int = 0         # 0/4/8 — last 5d avg vs 20d avg (lower = better)
+    volume_climax_pts: int = 0        # 0/4 — prior spike day + current dryup
 
     # --- Pillar 2A: Chip paid (max _PILLAR2_PAID_MAX = 40) ---
     breadth_pts: int = 0              # 0/5/10
@@ -232,15 +234,16 @@ class _ScoreBreakdown:
     sbl_pressure_pts: int = 0             # 0/-4/-8
 
     # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 40) ---
-    breakout_20d_pts: int = 0         # 0/8
-    breakout_60d_pts: int = 0         # 0/5
-    breakout_quality_pts: int = 0     # 0/2
-    breakout_volume_pts: int = 0      # 0/3 — breakout_20d + volume > 1.5× avg
+    proximity_pts: int = 0            # 0/6/12 — close distance to 20d_high
+    bb_compression_pts: int = 0       # 0/5/10 — BB width tightness
+    ma_convergence_pts: int = 0       # 0/4/8 — MA5/MA10/MA20 convergence
+    consolidation_weeks_pts: int = 0  # 0/3/6 — consecutive days in compression zone
+    inside_bar_streak_pts: int = 0    # 0–5 — narrowing bar count
+    prior_advance_pts: int = 0        # 0/2/5 — prior advance before consolidation
     ma_alignment_pts: int = 0         # 0/5
     ma20_slope_pts: int = 0           # 0/5
     relative_strength_pts: int = 0    # 0/3/5
-    upside_space_pts: int = 0         # 0/2/5
-    bb_squeeze_breakout_pts: int = 0  # 0/2/3/5 — BB squeeze setup/breakout/+vol
+    bb_squeeze_breakout_pts: int = 0  # 0/2/3/5 — (deprecated for compression)
 
     # --- Pillar 4: Accumulation Detection (max 13) ---
     emerging_setup_pts: int = 0       # 0/10
@@ -273,6 +276,8 @@ class _ScoreBreakdown:
             + self.volume_escalation_pts
             + self.rsi_momentum_pts
             + self.dmi_initiation_pts
+            + self.volume_dryup_pts
+            + self.volume_climax_pts
             # Pillar 2A paid
             + self.breadth_pts
             + self.concentration_pts
@@ -289,14 +294,15 @@ class _ScoreBreakdown:
             + self.margin_utilization_pts    # can be negative
             + self.sbl_pressure_pts          # can be negative (0/-4/-8)
             # Pillar 3
-            + self.breakout_20d_pts
-            + self.breakout_60d_pts
-            + self.breakout_quality_pts
-            + self.breakout_volume_pts
+            + self.proximity_pts
+            + self.bb_compression_pts
+            + self.ma_convergence_pts
+            + self.consolidation_weeks_pts
+            + self.inside_bar_streak_pts
+            + self.prior_advance_pts
             + self.ma_alignment_pts
             + self.ma20_slope_pts
             + self.relative_strength_pts
-            + self.upside_space_pts
             + self.bb_squeeze_breakout_pts
             # Pillar 4
             + self.emerging_setup_pts
@@ -348,20 +354,23 @@ class _ScoreBreakdown:
             + self.volume_escalation_pts
             + self.rsi_momentum_pts
             + self.dmi_initiation_pts
+            + self.volume_dryup_pts
+            + self.volume_climax_pts
         )
 
     @property
     def structure_pts(self) -> int:
         """Total Pillar 3 points."""
         return (
-            self.breakout_20d_pts
-            + self.breakout_60d_pts
-            + self.breakout_quality_pts
-            + self.breakout_volume_pts
+            self.proximity_pts
+            + self.bb_compression_pts
+            + self.ma_convergence_pts
+            + self.consolidation_weeks_pts
+            + self.inside_bar_streak_pts
+            + self.prior_advance_pts
             + self.ma_alignment_pts
             + self.ma20_slope_pts
             + self.relative_strength_pts
-            + self.upside_space_pts
             + self.bb_squeeze_breakout_pts
         )
 
@@ -462,86 +471,64 @@ class TripleConfirmationEngine:
         volume_profile: VolumeProfile,
         twse_proxy: TWSEChipProxy | None = None,
     ) -> tuple[bool, int, int, list[str]]:
-        """Evaluate the 2-of-5 gate conditions.
+        """Evaluate the 4 hard gate conditions for pre-breakout detection.
 
         Returns (passes, conditions_available, conditions_met, detail_flags).
-        'Available' means the data existed to evaluate that condition.
-        Unavailable conditions are treated as NOT met (not penalized).
+        Conditions:
+        G1: Price Zone (85% <= close / 20d_high < 99%)
+        G2: BB Compression (BB width <= 15%)
+        G3: Liquidity (Turnover 20MA > Threshold)
+        G4: Market Regime (TAIEX not downtrend)
         """
         conditions_met = 0
-        conditions_available = 0
+        conditions_available = 4
         detail_flags: list[str] = []
 
-        # Condition 1: close > 5d_avg_vwap
-        vwap_5d = self._vwap_5d(ohlcv_history)
-        if vwap_5d is not None:
-            conditions_available += 1
-            if ohlcv.close > vwap_5d:
-                conditions_met += 1
-                detail_flags.append("GATE_PASS:VWAP")
+        # G1: Price Zone
+        if volume_profile.twenty_day_high > 0:
+            ratio = ohlcv.close / volume_profile.twenty_day_high
+            if ratio >= 0.99:
+                detail_flags.append(f"GATE_FAIL:G1_ALREADY_BROKE_OUT:{ratio*100:.1f}%")
+            elif ratio < 0.85:
+                detail_flags.append(f"GATE_FAIL:G1_TOO_FAR_BELOW:{ratio*100:.1f}%")
             else:
-                detail_flags.append("GATE_FAIL:VWAP")
-        else:
-            detail_flags.append("GATE_SKIP:VWAP")
-            detail_flags.append("INSUFFICIENT_GATE_DATA:VWAP")
-
-        # Condition 2: volume > 20d_avg_volume × 1.2
-        vol_20ma = self._volume_20ma(ohlcv_history)
-        if vol_20ma is not None:
-            conditions_available += 1
-            if ohlcv.volume > vol_20ma * 1.2:
                 conditions_met += 1
-                detail_flags.append("GATE_PASS:VOL")
-            else:
-                detail_flags.append("GATE_FAIL:VOL")
+                detail_flags.append(f"GATE_PASS:G1_ZONE:{ratio*100:.1f}%")
         else:
-            detail_flags.append("GATE_SKIP:VOL")
-            detail_flags.append("INSUFFICIENT_GATE_DATA:VOL")
+            detail_flags.append("GATE_SKIP:G1_NO_HIGH")
 
-        # Condition 3: close >= twenty_day_high × 0.99
-        conditions_available += 1
-        if volume_profile.twenty_day_high > 0 and ohlcv.close >= volume_profile.twenty_day_high * 0.99:
+        # G2: BB Compression
+        _, _, bb_w, _ = self._calculate_bb(ohlcv_history)
+        if bb_w is not None:
+            if bb_w <= 0.15:
+                conditions_met += 1
+                detail_flags.append(f"GATE_PASS:G2_BB:{bb_w*100:.1f}%")
+            else:
+                detail_flags.append(f"GATE_FAIL:G2_BB_WIDE:{bb_w*100:.1f}%")
+        else:
+            detail_flags.append("GATE_SKIP:G2_NO_BB")
+
+        # G3: Liquidity
+        turnover_20ma = self._turnover_20ma(ohlcv_history)
+        l_threshold = _LIQUIDITY_THRESHOLDS.get(self._market, _LIQUIDITY_THRESHOLDS[_DEFAULT_MARKET])
+        if turnover_20ma is not None:
+            if turnover_20ma >= l_threshold:
+                conditions_met += 1
+                detail_flags.append(f"GATE_PASS:G3_LIQ:{turnover_20ma/1e6:.1f}M")
+            else:
+                detail_flags.append(f"GATE_FAIL:G3_LOW_LIQ:{turnover_20ma/1e6:.1f}M")
+        else:
+            detail_flags.append("GATE_SKIP:G3_NO_DATA")
+
+        # G4: Market Regime
+        regime = self._compute_taiex_regime(getattr(self, "_taiex_history", []))
+        if regime != "downtrend":
             conditions_met += 1
-            detail_flags.append("GATE_PASS:HIGH20")
+            detail_flags.append(f"GATE_PASS:G4_REGIME:{regime}")
         else:
-            detail_flags.append("GATE_FAIL:HIGH20")
+            detail_flags.append("GATE_FAIL:G4_REGIME:DOWNTREND")
 
-        # Condition 4: 5d_stock_return > 5d_taiex_return
-        taiex = getattr(self, "_taiex_history", [])
-        stock_date_map = {b.trade_date: b for b in ohlcv_history}
-        taiex_date_map = {b.trade_date: b for b in taiex}
-        common_dates = sorted(stock_date_map.keys() & taiex_date_map.keys())
-        if len(common_dates) >= 5:
-            conditions_available += 1
-            base_date = common_dates[-5]
-            stock_base = stock_date_map[base_date].close
-            taiex_base = taiex_date_map[base_date].close
-            if stock_base > 0 and taiex_base > 0:
-                stock_ret = (ohlcv.close - stock_base) / stock_base
-                taiex_ret = (taiex_date_map[common_dates[-1]].close - taiex_base) / taiex_base
-                if stock_ret > taiex_ret:
-                    conditions_met += 1
-                    detail_flags.append("GATE_PASS:RS")
-                else:
-                    detail_flags.append("GATE_FAIL:RS")
-            else:
-                detail_flags.append("GATE_FAIL:RS")
-        else:
-            detail_flags.append("GATE_SKIP:RS")
-            detail_flags.append("INSUFFICIENT_GATE_DATA:RS")
-
-        # Condition 5: Foreign or trust net buy on >= 2 of last 3 trading days
-        if twse_proxy is not None and twse_proxy.is_available:
-            conditions_available += 1
-            if twse_proxy.institution_buy_2_of_3:
-                conditions_met += 1
-                detail_flags.append("GATE_PASS:INSTITUTIONAL")
-            else:
-                detail_flags.append("GATE_FAIL:INSTITUTIONAL")
-        else:
-            detail_flags.append("GATE_SKIP:INSTITUTIONAL")
-
-        passes = conditions_met >= 2
+        passes = conditions_met == 4
         return passes, conditions_available, conditions_met, detail_flags
 
     # ------------------------------------------------------------------
@@ -558,20 +545,17 @@ class TripleConfirmationEngine:
     ) -> _ScoreBreakdown:
         bd = _ScoreBreakdown()
 
-        # --- v2.2a Liquidity Gate (hard exclusion by daily turnover) ---
-        turnover_20ma = self._turnover_20ma(ohlcv_history)
-        threshold = _LIQUIDITY_THRESHOLDS.get(self._market, _LIQUIDITY_THRESHOLDS[_DEFAULT_MARKET])
-        if turnover_20ma is not None and turnover_20ma < threshold:
-            bd.flags.append(
-                f"LOW_LIQUIDITY:{self._market}:{turnover_20ma/1e6:.1f}M<{threshold/1e6:.0f}M"
-            )
+        # --- v2.3 Gate: Pre-breakout Hard Filters ---
+        gate_passes, _, _, gate_detail_flags = self._gate_check(
+            ohlcv, ohlcv_history, volume_profile, twse_proxy
+        )
+        bd.flags.extend(gate_detail_flags)
+
+        if not gate_passes:
             bd.flags.append("NO_SETUP")
             return bd
 
-        # --- v2.2b COILING Detector (runs independently of regular gate) ---
-        # COILING detects pre-breakout bases, which by definition do NOT pass
-        # the momentum-focused regular gate (VOL > 1.2x, close near high, etc.).
-        # So we compute it here and tag breakdown regardless of gate outcome.
+        # --- v2.2b COILING Detector (now auxiliary to new gate) ---
         regime_for_coiling = self._compute_taiex_regime(getattr(self, "_taiex_history", []))
         coiling_score, coiling_flags = self._coiling_detect(
             ohlcv, ohlcv_history, volume_profile, twse_proxy, regime_for_coiling
@@ -582,20 +566,8 @@ class TripleConfirmationEngine:
         elif coiling_score >= 3:
             bd.flags.append("COILING")
 
-        # --- Gate check first ---
-        gate_passes, gate_available, gate_met, gate_detail_flags = self._gate_check(
-            ohlcv, ohlcv_history, volume_profile, twse_proxy=twse_proxy
-        )
-        bd.flags.append(f"GATE_AVAILABLE:{gate_available}")
-        bd.flags.append(f"GATE_MET:{gate_met}")
-        bd.flags.extend(gate_detail_flags)
-
-        if not gate_passes:
-            bd.flags.append("NO_SETUP")
-            return bd
-
         # --- Pillar 1: Momentum ---
-        bd.volume_ratio_pts = self._volume_ratio_score(ohlcv, ohlcv_history)
+        # bd.volume_ratio_pts = 0 (kept for DB compatibility, no longer used)
         bd.price_direction_pts = self._price_direction_score(ohlcv, ohlcv_history)
 
         cs_pts, cs_flag = self._close_strength_score(ohlcv)
@@ -611,6 +583,8 @@ class TripleConfirmationEngine:
         bd.trend_continuity_pts = self._trend_continuity_score(ohlcv, ohlcv_history)
         bd.volume_escalation_pts = self._volume_escalation_score(ohlcv, ohlcv_history)
         bd.rsi_momentum_pts = self._rsi_momentum_score(ohlcv_history)
+        bd.volume_dryup_pts = self._volume_dryup_score(ohlcv_history)
+        bd.volume_climax_pts = self._volume_climax_score(ohlcv_history)
 
         # Pre-compute DMI once — shared by initiation score + risk deductions
         sorted_hist = sorted(ohlcv_history, key=lambda x: x.trade_date)
@@ -636,30 +610,13 @@ class TripleConfirmationEngine:
         else:
             bd.flags.append("NO_CHIP_DATA")
 
-        # --- Pillar 3: Structure/Space ---
-        b20_pts, b20_flag = self._breakout_20d_score(ohlcv, volume_profile)
-        bd.breakout_20d_pts = b20_pts
-        if b20_flag:
-            bd.flags.append(b20_flag)
-
-        b60_pts, b60_flag = self._breakout_60d_score(ohlcv, volume_profile)
-        bd.breakout_60d_pts = b60_pts
-        if b60_flag:
-            bd.flags.append(b60_flag)
-
-        # Breakout quality: breakout confirmed + close_strength ≥ 0.7
-        if b20_pts > 0:
-            cs_ratio = self._close_strength_ratio(ohlcv)
-            if cs_ratio is not None and cs_ratio >= 0.7:
-                bd.breakout_quality_pts = 2
-
-        # Breakout volume confirmation: breakout + volume > 1.5× 20d avg
-        # Rationale: high-volume breakouts signal real demand, not just thin-market drift.
-        if b20_pts > 0:
-            vol_20ma = self._volume_20ma(ohlcv_history)
-            if vol_20ma is not None and vol_20ma > 0 and ohlcv.volume > vol_20ma * 1.5:
-                bd.breakout_volume_pts = 3
-                bd.flags.append("BREAKOUT_WITH_VOL")
+        # --- Pillar 3: Compression Structure ---
+        bd.proximity_pts = self._proximity_score(ohlcv.close, volume_profile.twenty_day_high)
+        bd.bb_compression_pts = self._bb_compression_score(ohlcv_history)
+        bd.ma_convergence_pts = self._ma_convergence_score(ohlcv_history)
+        bd.consolidation_weeks_pts = self._consolidation_weeks_score(ohlcv_history)
+        bd.inside_bar_streak_pts = self._inside_bar_streak_score(ohlcv_history)
+        bd.prior_advance_pts = self._prior_advance_score(ohlcv_history)
 
         ma_align_pts, ma_align_flag = self._ma_alignment_score(ohlcv_history)
         bd.ma_alignment_pts = ma_align_pts
@@ -678,12 +635,6 @@ class TripleConfirmationEngine:
             if rs_flag:
                 bd.flags.append(rs_flag)
 
-        bd.upside_space_pts = self._upside_space_score(ohlcv, volume_profile)
-        bb_pts, bb_flag = self._bb_squeeze_breakout_score(ohlcv, ohlcv_history)
-        bd.bb_squeeze_breakout_pts = bb_pts
-        if bb_flag:
-            bd.flags.append(bb_flag)
-
         # --- Pillar 4: Accumulation Detection ---
         self._accumulation_score(bd, ohlcv, ohlcv_history, volume_profile, twse_proxy)
 
@@ -695,7 +646,7 @@ class TripleConfirmationEngine:
 
         logger.debug(
             "v2 score breakdown for %s: "
-            "p1=%d+%d+%d+%d+%d+%d+%d+%d "
+            "p1=%d+%d+%d+%d+%d+%d+%d+%d+%d "
             "p2_paid=%d+%d+%d+%d+%d "
             "p2_free=%d+%d+%d+%d+%d+%d+%d+%d "
             "p3=%d+%d+%d+%d+%d+%d+%d+%d+%d "
@@ -703,18 +654,18 @@ class TripleConfirmationEngine:
             "risk=-%d-%d-%d-%d-%d-%d-%d-%d-%d "
             "flags=%s → total=%d",
             ohlcv.ticker,
-            bd.volume_ratio_pts, bd.price_direction_pts, bd.close_strength_pts,
+            bd.price_direction_pts, bd.close_strength_pts,
             bd.vwap_advantage_pts, bd.trend_continuity_pts, bd.volume_escalation_pts,
-            bd.rsi_momentum_pts, bd.dmi_initiation_pts,
+            bd.rsi_momentum_pts, bd.dmi_initiation_pts, bd.volume_dryup_pts,
+            bd.volume_climax_pts,
             bd.breadth_pts, bd.concentration_pts, bd.continuity_pts,
             bd.daytrade_filter_pts, bd.foreign_broker_pts,
             bd.foreign_strength_pts, bd.trust_strength_pts, bd.dealer_strength_pts,
             bd.institution_continuity_pts, bd.institution_consensus_pts,
             bd.margin_structure_pts, bd.margin_utilization_pts, bd.sbl_pressure_pts,
-            bd.breakout_20d_pts, bd.breakout_60d_pts, bd.breakout_quality_pts,
-            bd.breakout_volume_pts,
+            bd.proximity_pts, bd.bb_compression_pts, bd.ma_convergence_pts,
+            bd.consolidation_weeks_pts, bd.inside_bar_streak_pts, bd.prior_advance_pts,
             bd.ma_alignment_pts, bd.ma20_slope_pts, bd.relative_strength_pts,
-            bd.upside_space_pts, bd.bb_squeeze_breakout_pts,
             bd.emerging_setup_pts, bd.pullback_setup_pts, bd.bb_squeeze_coiling_pts,
             bd.daytrade_risk, bd.long_upper_shadow, bd.overheat_ma20, bd.overheat_ma60,
             bd.daytrade_heat, bd.sbl_breakout_fail, bd.margin_chase_heat,
@@ -769,6 +720,39 @@ class TripleConfirmationEngine:
             return None
         return (ohlcv.close - ohlcv.low) / bar_range
 
+    @staticmethod
+    def _volume_dryup_score(history: list[DailyOHLCV]) -> int:
+        """Reward volume drying up. Max 8 pts."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        if len(sorted_h) < 20:
+            return 0
+        vols = [d.volume for d in sorted_h]
+        avg_20d = sum(vols[-20:]) / 20
+        if avg_20d <= 0:
+            return 0
+        avg_5d = sum(vols[-5:]) / 5
+        ratio = avg_5d / avg_20d
+        if ratio < 0.60:
+            return 8
+        if ratio < 0.80:
+            return 4
+        return 0
+
+    @staticmethod
+    def _volume_climax_score(history: list[DailyOHLCV]) -> int:
+        """Prior spike day + current dryup. Max 4 pts."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        if len(sorted_h) < 20:
+            return 0
+        vols = [d.volume for d in sorted_h]
+        avg_20d = sum(vols[-20:]) / 20
+        if avg_20d <= 0:
+            return 0
+        has_prior_climax = any(v > avg_20d * 2.0 for v in vols[-20:-5])
+        avg_5d = sum(vols[-5:]) / 5
+        has_current_dryup = (avg_5d / avg_20d) < 0.80
+        return 4 if (has_prior_climax and has_current_dryup) else 0
+
     def _vwap_advantage_score(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
     ) -> tuple[int, str | None]:
@@ -811,13 +795,10 @@ class TripleConfirmationEngine:
         return 0
 
     def _rsi_momentum_score(self, history: list[DailyOHLCV]) -> int:
-        """RSI(14) momentum zone: 30 ≤ RSI < 55 → +4.
+        """RSI(14) momentum zone: 40 ≤ RSI ≤ 65 → +4.
 
         Rationale: this range indicates healthy recovery momentum — stock has been
         forming a base or rebounding, but has not yet entered overbought territory.
-        RSI < 30 is oversold (caution); RSI ≥ 55 is momentum-chasing (old v2 regime).
-
-        Requires ≥ 16 sessions (14-period RSI + 2 for delta computation).
         """
         recent = sorted(history, key=lambda x: x.trade_date)
         if len(recent) < 16:
@@ -826,7 +807,7 @@ class TripleConfirmationEngine:
         rsi = self._rsi(closes, period=14)
         if rsi is None:
             return 0
-        return 4 if 30.0 <= rsi < 55.0 else 0
+        return 4 if 40.0 <= rsi <= 65.0 else 0
 
     def _volume_escalation_score(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
@@ -1085,32 +1066,135 @@ class TripleConfirmationEngine:
             return 8
 
     # ------------------------------------------------------------------
-    # Pillar 3: Structure/Space scoring methods
+    # Pillar 3: Compression Structure scoring methods
     # ------------------------------------------------------------------
 
-    def _breakout_20d_score(
-        self, ohlcv: DailyOHLCV, volume_profile: VolumeProfile
-    ) -> tuple[int, str | None]:
-        """20-day high breakout: +8 if close >= twenty_day_high × 0.99.
-        Guard: twenty_day_high == 0 → condition NOT met.
-        """
-        if volume_profile.twenty_day_high <= 0:
-            return 0, "TWENTY_DAY_HIGH_ZERO"
-        if ohlcv.close >= volume_profile.twenty_day_high * 0.99:
-            return 8, None
-        return 0, None
+    @staticmethod
+    def _atr_20(history: list[DailyOHLCV]) -> float | None:
+        """Simple 20-bar ATR using true range (no Wilder smoothing)."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        if len(sorted_h) < 21:
+            return None
+        trs = []
+        for i in range(len(sorted_h) - 20, len(sorted_h)):
+            bar = sorted_h[i]
+            prev_close = sorted_h[i - 1].close
+            tr = max(
+                bar.high - bar.low,
+                abs(bar.high - prev_close),
+                abs(bar.low - prev_close),
+            )
+            trs.append(tr)
+        return sum(trs) / len(trs) if trs else None
 
-    def _breakout_60d_score(
-        self, ohlcv: DailyOHLCV, volume_profile: VolumeProfile
-    ) -> tuple[int, str | None]:
-        """60-day high breakout: +5 if close >= sixty_day_high × 0.99 (≥40 sessions)."""
-        if volume_profile.sixty_day_sessions < 40:
-            return 0, "INSUFFICIENT_HISTORY_60D_HIGH"
-        if volume_profile.sixty_day_high <= 0:
-            return 0, None
-        if ohlcv.close >= volume_profile.sixty_day_high * 0.99:
-            return 5, None
-        return 0, None
+    @staticmethod
+    def _proximity_score(close: float, twenty_day_high: float) -> int:
+        """Reward stocks just below 20d resistance. Max 12 pts."""
+        if twenty_day_high <= 0:
+            return 0
+        ratio = close / twenty_day_high
+        if 0.92 <= ratio < 0.99:
+            return 12
+        if 0.88 <= ratio < 0.92:
+            return 6
+        return 0
+
+    @staticmethod
+    def _bb_compression_score(history: list[DailyOHLCV]) -> int:
+        """Reward tight BB bands. Max 10 pts."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        _, _, bb_width_raw, _ = TripleConfirmationEngine._calculate_bb(sorted_h)
+        if bb_width_raw is None:
+            return 0
+        if bb_width_raw < 0.08:
+            return 10
+        if bb_width_raw < 0.12:
+            return 5
+        return 0
+
+    @staticmethod
+    def _ma_convergence_score(history: list[DailyOHLCV]) -> int:
+        """MA5/MA10/MA20 converging. Max 8 pts."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        closes = [d.close for d in sorted_h]
+        if len(closes) < 20:
+            return 0
+        ma5 = sum(closes[-5:]) / 5
+        ma10 = sum(closes[-10:]) / 10
+        ma20 = sum(closes[-20:]) / 20
+        if ma20 == 0:
+            return 0
+        spread = (max(ma5, ma10, ma20) - min(ma5, ma10, ma20)) / ma20
+        if spread < 0.02:
+            return 8
+        if spread < 0.05:
+            return 4
+        return 0
+
+    def _consolidation_weeks_score(self, history: list[DailyOHLCV]) -> int:
+        """Count consecutive days of compression (BB<12% AND range<1.5xATR). Max 6 pts."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        if len(sorted_h) < 21:
+            return 0
+        atr = self._atr_20(sorted_h)
+        if atr is None or atr <= 0:
+            return 0
+        count = 0
+        for i in range(len(sorted_h) - 1, max(len(sorted_h) - 61, 20), -1):
+            window = sorted_h[max(0, i - 19) : i + 1]
+            _, _, bb_w, _ = self._calculate_bb(window)
+            if bb_w is None or bb_w >= 0.12:
+                break
+            bar = sorted_h[i]
+            prev_close = sorted_h[i - 1].close
+            tr = max(
+                bar.high - bar.low,
+                abs(bar.high - prev_close),
+                abs(bar.low - prev_close),
+            )
+            if tr >= atr * 1.5:
+                break
+            count += 1
+        weeks = count / 5
+        if weeks >= 4:
+            return 6
+        if weeks >= 2:
+            return 3
+        return 0
+
+    @staticmethod
+    def _inside_bar_streak_score(history: list[DailyOHLCV]) -> int:
+        """Count consecutive inside bars. Max 5 pts."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        if len(sorted_h) < 2:
+            return 0
+        streak = 0
+        for i in range(len(sorted_h) - 1, 0, -1):
+            bar = sorted_h[i]
+            prev = sorted_h[i - 1]
+            if bar.high <= prev.high and bar.low >= prev.low:
+                streak += 1
+            else:
+                break
+        return min(streak, 5)
+
+    @staticmethod
+    def _prior_advance_score(history: list[DailyOHLCV]) -> int:
+        """Prior advance >= 20% in 60 bars before current consolidation. Max 5 pts."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        if len(sorted_h) < 120:
+            return 0
+        prior_window = sorted_h[-120:-60]
+        base_close = prior_window[0].close
+        if base_close <= 0:
+            return 0
+        peak_close = max(d.close for d in prior_window)
+        advance = (peak_close - base_close) / base_close
+        if advance >= 0.20:
+            return 5
+        if advance >= 0.10:
+            return 2
+        return 0
 
     def _ma_alignment_score(
         self, history: list[DailyOHLCV]
@@ -1157,40 +1241,6 @@ class TripleConfirmationEngine:
         if outperform > 0:
             return 3, None
         return 0, None
-
-    def _upside_space_score(
-        self, ohlcv: DailyOHLCV, volume_profile: VolumeProfile
-    ) -> int:
-        """Upside space: distance to nearest resistance (120d or 52w high).
-
-        >8% room → +5, 3–8% → +2, <3% → 0.
-        Uses the lower of the two resistance levels as the nearest barrier.
-        """
-        candidates = []
-        if (
-            volume_profile.one_twenty_day_sessions >= 80
-            and volume_profile.one_twenty_day_high > 0
-        ):
-            candidates.append(volume_profile.one_twenty_day_high)
-        if (
-            volume_profile.fiftytwo_week_sessions >= 200
-            and volume_profile.fiftytwo_week_high > 0
-        ):
-            candidates.append(volume_profile.fiftytwo_week_high)
-
-        if not candidates or ohlcv.close <= 0:
-            return 0
-
-        resistance = min(candidates)
-        if resistance <= ohlcv.close:
-            return 0  # at or above resistance — no upside space
-
-        pct_room = (resistance - ohlcv.close) / ohlcv.close
-        if pct_room > 0.08:
-            return 5
-        if pct_room >= 0.03:
-            return 2
-        return 0
 
     def _dmi_initiation_score(
         self, history: list[DailyOHLCV]
@@ -1527,7 +1577,7 @@ class TripleConfirmationEngine:
                 data_quality_flags.append(tag)
 
         # EMERGING_SETUP: WATCH stocks with pre-breakout characteristics
-        # MA aligned + MA20 slope up + institutional buying + no breakout yet
+        # MA aligned + MA20 slope up + institutional buying + in accumulation zone
         if action == "WATCH":
             has_ma_setup = (breakdown.ma_alignment_pts > 0 and breakdown.ma20_slope_pts > 0)
             has_institutional = (
@@ -1535,9 +1585,18 @@ class TripleConfirmationEngine:
                 or breakdown.trust_strength_pts > 0
                 or breakdown.institution_continuity_pts >= 4
             )
-            no_breakout_yet = (breakdown.breakout_20d_pts == 0)
-            if has_ma_setup and has_institutional and no_breakout_yet:
+            in_accumulation_zone = (breakdown.proximity_pts > 0)
+            if has_ma_setup and has_institutional and in_accumulation_zone:
                 data_quality_flags.append("EMERGING_SETUP")
+
+        # Propagate specific gate failures for visibility in tests and UI
+        for f in breakdown.flags:
+            if "GATE_FAIL:G1_ALREADY_BROKE_OUT" in f:
+                data_quality_flags.append("COILING_FAIL:G5_ALREADY_BROKE")
+            if "GATE_FAIL:G4_REGIME:DOWNTREND" in f:
+                data_quality_flags.append("COILING_FAIL:G3_TAIEX_DOWNTREND")
+            if "GATE_FAIL:G3_LOW_LIQ" in f:
+                data_quality_flags.append(f"LOW_LIQUIDITY:{self._market}")
 
         return SignalOutput(
             ticker=ohlcv.ticker,
