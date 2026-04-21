@@ -112,6 +112,39 @@ def _load_results(path: Path) -> list[dict]:
     return rows
 
 
+def _load_live_results(db_path: Path) -> list[dict]:
+    """Load resolved CoilSignalRecord rows from SQLite as coil_factor_report dicts.
+
+    Converts live outcome data to the same schema that _compute_factor_stats expects:
+    score_breakdown (parsed JSON), _success (bool), grade.
+    Only includes settled signals (outcome != PENDING).
+    """
+    import sqlite3
+    if not db_path.exists():
+        _console.print(f"[red]Live DB not found: {db_path}[/red]")
+        return []
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    rows_raw = conn.execute(
+        "SELECT * FROM coil_signals WHERE outcome != 'PENDING'"
+    ).fetchall()
+    conn.close()
+
+    rows = []
+    for r in rows_raw:
+        # score_breakdown is not stored in coil_track.db; use empty dict
+        rows.append({
+            "grade": r["grade"],
+            "score_breakdown": {},
+            "_success": r["outcome"] == "BREAKOUT",
+            "outcome": r["outcome"],
+            "ticker": r["ticker"],
+            "signal_date": r["signal_date"],
+        })
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Analysis
 # ---------------------------------------------------------------------------
@@ -299,8 +332,33 @@ def _print_summary(rows: list[dict], stats: list[dict], min_samples: int) -> Non
 # Entry point
 # ---------------------------------------------------------------------------
 
-def run_factor_report(results_file: Path | None, min_samples: int) -> None:
-    # Resolve results file
+def run_factor_report(
+    results_file: Path | None,
+    min_samples: int,
+    live_db: Path | None = None,
+) -> None:
+    # Live DB mode: read real outcomes from coil_track.db
+    if live_db is not None:
+        _console.print(Panel(
+            f"[bold white]Coil Factor Lift Report (Live DB)[/bold white]\n"
+            f"[dim]{live_db}[/dim]",
+            border_style="green",
+            padding=(0, 2),
+        ))
+        rows = _load_live_results(live_db)
+        if not rows:
+            _console.print("[yellow]Live DB has no settled signals yet.[/yellow]")
+            return
+        if len(rows) < 10:
+            _console.print(
+                f"[yellow]Warning: only {len(rows)} settled signals — results may not be meaningful.[/yellow]"
+            )
+        stats = _compute_factor_stats(rows, min_samples=min_samples)
+        _print_factor_table(stats, min_samples=min_samples)
+        _print_summary(rows, stats, min_samples=min_samples)
+        return
+
+    # Backtest CSV mode (original behavior)
     if results_file is None:
         results_file = _find_latest_csv()
         if results_file is None:
@@ -350,13 +408,24 @@ def main() -> None:
         help="Path to coil_backtest_YYYYMMDD.csv (auto-detects latest if omitted)",
     )
     parser.add_argument(
+        "--live-db",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Read live outcomes from coil_track.db instead of backtest CSV",
+    )
+    parser.add_argument(
         "--min-samples",
         type=int,
         default=10,
         help="Skip factor rows with fewer than this many samples in either present/absent group (default: 10)",
     )
     args = parser.parse_args()
-    run_factor_report(results_file=args.results_file, min_samples=args.min_samples)
+    run_factor_report(
+        results_file=args.results_file,
+        min_samples=args.min_samples,
+        live_db=args.live_db,
+    )
 
 
 if __name__ == "__main__":

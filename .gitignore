@@ -13,3 +13,4 @@ venv/
 .claude/
 .gstack/
 .worktrees/
+db/coil_track.db

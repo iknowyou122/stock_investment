@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan trade trade-t2 report settle backtest factor-report optimize test setup migrate api install flow show bot-setup bot coil coil-backtest coil-factor-report optimize-coil
+.PHONY: plan trade trade-t2 report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot coil coil-backtest coil-factor-report optimize-coil monitor
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -84,6 +84,21 @@ backtest:
 		$(if $(SECTORS),--sectors $(SECTORS)) \
 		$(if $(ENTRY_DELAY),--entry-delay $(ENTRY_DELAY))
 
+# ── v2.2 vs v2.3 引擎比對回測 ────────────────────────────────────────────────
+# 用法: make backtest-compare
+#       make backtest-compare DATE_FROM=2026-01-01 DATE_TO=2026-03-31
+#       make backtest-compare MIN_CONF=50 SECTORS="1 4" SAVE_CSV=1
+MIN_CONF    ?= 40
+SAVE_CSV    ?=
+
+backtest-compare:
+	$(PYTHON) scripts/backtest_v23_vs_v22.py \
+		$(if $(DATE_FROM),--date-from $(DATE_FROM)) \
+		$(if $(DATE_TO),--date-to $(DATE_TO)) \
+		$(if $(SECTORS),--sectors $(SECTORS)) \
+		--min-confidence $(MIN_CONF) \
+		$(if $(filter 1,$(SAVE_CSV)),--save-csv)
+
 # ── 因子分析 ─────────────────────────────────────────────────────────────────
 FACTOR_DAYS ?=
 
@@ -130,10 +145,15 @@ else
 endif
 
 # ── 完整每日流程 (Flow) ────────────────────────────────────────────────────────
-# 擬定計畫 + 產出報告（一鍵執行）
+# 掃描 + 蓄積追蹤更新 + 產出報告（一鍵執行）
 # 用法: make flow
+# 執行順序：
+#   1. plan         — 批次掃描 + Pass 2 蓄積雷達（自動 ingest 進 DB）
+#   2. coil-monitor — 更新昨日以前所有 PENDING 信號的突破結果
+#   3. report       — T+1 結算 + 勝率報告
 flow:
 	$(MAKE) plan
+	$(MAKE) coil-monitor
 	$(MAKE) report
 
 # ── 資料庫備份與還原 ─────────────────────────────────────────────────────────
@@ -177,7 +197,7 @@ bot:
 
 # ── 蓄積雷達掃描 ──────────────────────────────────────────────────────────────
 coil:
-	$(PYTHON) scripts/coil_scan.py --save-csv --notify $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(DATE),--date $(DATE))
+	$(PYTHON) scripts/coil_scan.py --save-csv --track --notify $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(DATE),--date $(DATE))
 
 # ── 蓄積信號回測 ──────────────────────────────────────────────────────────────
 coil-backtest:
@@ -192,3 +212,48 @@ coil-factor-report:
 # ── 蓄積引擎參數優化 ──────────────────────────────────────────────────────────
 optimize-coil:
 	$(PYTHON) scripts/optimize_coil.py
+
+# ── 蓄積追蹤看板 ───────────────────────────────────────────────────────────────
+# 每日更新蓄積信號突破結果，顯示滾動勝率
+# 用法: make coil-monitor
+#       make coil-monitor GRADE=COIL_PRIME
+#       make coil-monitor EXPORT=coil_report.csv
+#       make coil-monitor DAYS=60
+GRADE      ?=
+COIL_DAYS  ?= 30
+
+coil-monitor:
+	$(PYTHON) scripts/coil_monitor.py \
+		$(if $(DATE),--date $(DATE)) \
+		$(if $(GRADE),--grade $(GRADE)) \
+		$(if $(EXPORT),--export $(EXPORT)) \
+		--days $(COIL_DAYS)
+
+# ── 蓄積追蹤全流程（掃描 + 更新結果 + 因子分析 + 優化）─────────────────────────
+# 用法: make coil-loop
+coil-loop:
+	$(PYTHON) scripts/coil_scan.py --save-csv --track --notify $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS))
+	$(PYTHON) scripts/coil_monitor.py --refresh
+	$(PYTHON) scripts/coil_factor_report.py --live-db db/coil_track.db
+	$(PYTHON) scripts/optimize_coil.py --live-db db/coil_track.db --dry-run
+
+.PHONY: coil-monitor coil-loop
+
+# ── 信號準確度監控 ──────────────────────────────────────────────────────────────
+# 載入歷史 scan CSV，驗證突破結果，顯示滾動勝率 Dashboard
+# 用法: make monitor
+#       make monitor MIN_CONF=50
+#       make monitor DATE_FROM=2026-04-01 DATE_TO=2026-04-20
+#       make monitor EXPORT=report.csv
+#       make monitor NO_FETCH=1      # 只讀快取，不查 API
+EXPORT    ?=
+NO_FETCH  ?=
+
+monitor:
+	$(PYTHON) scripts/accuracy_monitor.py \
+		$(if $(DATE),--date $(DATE)) \
+		$(if $(MIN_CONF),--min-confidence $(MIN_CONF)) \
+		$(if $(DATE_FROM),--date-from $(DATE_FROM)) \
+		$(if $(DATE_TO),--date-to $(DATE_TO)) \
+		$(if $(EXPORT),--export $(EXPORT)) \
+		$(if $(filter 1,$(NO_FETCH)),--no-fetch)

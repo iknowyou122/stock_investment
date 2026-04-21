@@ -104,6 +104,7 @@ _MARKET_CACHE: dict = {
     "global": {},      # key → {"price": float, "change_pct": float}  (yfinance)
     "sectors": [],     # list[{"code", "abbr", "price", "change_pct"}]  (TWSE MIS)
     "watchlist": {},   # ticker → {"price", "change_pct", "prev_close", "is_live"}
+    "sentiment": None, # MarketSentiment | None
     "updated_at": None,
 }
 
@@ -291,16 +292,45 @@ def _fetch_tw_sectors_sync() -> list[dict]:
         return [{"code": c, "abbr": a, "price": None, "change_pct": 0.0} for c, a in _TW_SECTOR_CODES]
 
 
+def _fetch_sentiment_sync() -> "MarketSentiment | None":
+    """Fetch TWSE breadth + Yahoo RSS headlines, return MarketSentiment."""
+    try:
+        from taiwan_stock_agent.domain.market_sentiment import compute_sentiment
+        from taiwan_stock_agent.infrastructure.sentiment_client import (
+            fetch_breadth,
+            fetch_news_headlines,
+        )
+
+        # Compute TAIEX RSI from cached global data
+        taiex_data = _MARKET_CACHE.get("global", {}).get("taiex")
+        taiex_rsi = 50.0  # default neutral
+        # Simple approximation: use cached TAIEX price change direction
+        if taiex_data:
+            chg = taiex_data.get("change_pct", 0.0) or 0.0
+            # Crude RSI proxy from recent change; real RSI needs history
+            taiex_rsi = 55.0 if chg > 0.5 else (45.0 if chg < -0.5 else 50.0)
+
+        breadth = fetch_breadth()
+        headlines = fetch_news_headlines()
+        if breadth is None:
+            return None
+        return compute_sentiment(breadth, headlines, taiex_rsi)
+    except Exception as e:
+        logger.debug("sentiment fetch error: %s", e)
+        return None
+
+
 async def _refresh_market_loop() -> None:
     """Background task: refresh global (yfinance) + TW sectors (MIS) + watchlist prices every 60 s."""
     loop = asyncio.get_event_loop()
     while True:
         try:
             tickers = [s["ticker"] for s in _state.get("shortlist", [])]
-            global_data, sector_data, wl_data = await asyncio.gather(
+            global_data, sector_data, wl_data, sentiment = await asyncio.gather(
                 loop.run_in_executor(None, _fetch_global_markets_sync),
                 loop.run_in_executor(None, _fetch_tw_sectors_sync),
                 loop.run_in_executor(None, _fetch_watchlist_prices_sync, tickers),
+                loop.run_in_executor(None, _fetch_sentiment_sync),
             )
             if global_data:
                 _MARKET_CACHE["global"] = global_data
@@ -308,6 +338,9 @@ async def _refresh_market_loop() -> None:
                 _MARKET_CACHE["sectors"] = sector_data
             if wl_data:
                 _MARKET_CACHE["watchlist"] = wl_data
+            if sentiment:
+                _MARKET_CACHE["sentiment"] = sentiment
+                logger.info("市場情緒數據更新成功")
             _MARKET_CACHE["updated_at"] = datetime.now()
         except Exception as e:
             logger.debug("market refresh error: %s", e)
@@ -1129,111 +1162,32 @@ def _render_status_panel() -> Panel:
     else:
         t.add_row("Pending", "[dim]none[/dim]")
 
+    # Market Sentiment widget
+    sentiment = _MARKET_CACHE.get("sentiment")
+    t.add_row("", "")
+    if sentiment:
+        st_clr = {"🟢": "green", "🟡": "yellow", "🔴": "red"}.get(sentiment.emoji, "white")
+        t.add_row(
+            "[dim]市場輿情[/dim]",
+            f"[{st_clr}]{sentiment.emoji} {sentiment.label}[/{st_clr}]",
+        )
+        t.add_row(
+            "",
+            f"[dim]漲跌比 {sentiment.ad_ratio:.1f} · RSI {sentiment.taiex_rsi:.0f} · 量 {sentiment.volume_ratio:.1f}×[/dim]",
+        )
+        if sentiment.alerts:
+            t.add_row("", f"[yellow]⚠ {sentiment.alerts[0]}[/yellow]")
+        if sentiment.hot_keywords:
+            kws = " ".join(sentiment.hot_keywords[:3])
+            t.add_row("", f"[cyan]🔥 {kws}[/cyan]")
+    else:
+        t.add_row("[dim]市場輿情[/dim]", "[dim]⌛ 數據讀取中...[/dim]")
+
     t.add_row("", "")
     t.add_row("[dim]Schedule[/dim]", "[dim]09:05 scan · 10-13 rescan · 09:05-13:25 trade/10min · 17:00 report · Tue/Fri optimize[/dim]")
     t.add_row("[dim]Commands[/dim]", "[dim]/plan  /trade  /report  /optimize  /approve  /rollback  /top  /test[/dim]")
 
-    # ── Watchlist live prices ────────────────────────────────────────────────
-    shortlist = _state["shortlist"]
-    wl_data = _MARKET_CACHE.get("watchlist", {})
-
-    if shortlist:
-        wl_tbl = Table(box=None, show_header=True, padding=(0, 1), expand=True)
-        wl_tbl.add_column("代號",  style="dim",   width=5,  no_wrap=True)
-        wl_tbl.add_column("名稱",               max_width=6, no_wrap=True)
-        wl_tbl.add_column("現價",  justify="right", min_width=7, no_wrap=True)
-        wl_tbl.add_column("漲跌%", justify="right", min_width=8, no_wrap=True)
-        wl_tbl.add_column("信心",  justify="right", width=4,  no_wrap=True)
-        wl_tbl.add_column("vs進場", justify="right", min_width=7, no_wrap=True)
-
-        for s in shortlist[:12]:
-            ticker  = s["ticker"]
-            name    = (s.get("name") or "")[:5]
-            conf    = s.get("confidence", 0)
-            entry   = s.get("entry_bid") or 0.0
-            action  = s.get("action", "")
-            d       = wl_data.get(ticker)
-
-            # action badge: LONG = cyan dot, WATCH = yellow dot
-            badge_clr = "cyan" if action == "LONG" else "yellow"
-
-            if d and d.get("price") is not None:
-                price = d["price"]
-                chg   = d["change_pct"]
-                live  = d.get("is_live", False)
-                clr   = _chg_color(chg)
-                sign  = "+" if chg >= 0 else ""
-                # dim price when market is closed (prev_close fallback)
-                price_str = f"[{clr}]{price:.2f}[/{clr}]" if live else f"[dim]{price:.2f}[/dim]"
-                chg_str   = f"[{clr}]{_arrow(chg)} {sign}{chg:.2f}%[/{clr}]" if live else "[dim] --  --[/dim]"
-
-                if entry > 0:
-                    diff = (price - entry) / entry * 100
-                    vs_clr = "red" if diff >= 0 else "green"
-                    vs_str = f"[{vs_clr}]{diff:+.1f}%[/{vs_clr}]"
-                else:
-                    vs_str = "[dim]--[/dim]"
-            else:
-                price_str = "[dim]--[/dim]"
-                chg_str   = "[dim]--[/dim]"
-                vs_str    = "[dim]--[/dim]"
-
-            wl_tbl.add_row(
-                f"[{badge_clr}]{ticker}[/{badge_clr}]",
-                name,
-                price_str,
-                chg_str,
-                f"[dim]{conf}[/dim]",
-                vs_str,
-            )
-
-        content = Group(t, Rule(title="[dim bold]Watchlist Prices[/dim bold]", style="dim"), wl_tbl)
-    else:
-        content = t
-
-    # ── 蓄積雷達 block ────────────────────────────────────────────────────────
-    coil_rows = _load_latest_coil_csv()
-    if coil_rows:
-        _COIL_GRADE_COLOR = {
-            "COIL_PRIME":  "bold magenta",
-            "COIL_MATURE": "bold cyan",
-            "COIL_EARLY":  "yellow",
-        }
-        _COIL_GRADE_LABEL = {
-            "COIL_PRIME":  "★★ 極強蓄積",
-            "COIL_MATURE": "★ 成熟蓄積",
-            "COIL_EARLY":  "蓄積初形",
-        }
-        coil_tbl = Table(box=None, show_header=True, padding=(0, 1), expand=True)
-        coil_tbl.add_column("代號",   style="dim",     width=6,  no_wrap=True)
-        coil_tbl.add_column("名稱",                    max_width=6, no_wrap=True)
-        coil_tbl.add_column("等級",                    min_width=10, no_wrap=True)
-        coil_tbl.add_column("分數",  justify="right",  width=4,  no_wrap=True)
-        coil_tbl.add_column("vs前高", justify="right", min_width=7, no_wrap=True)
-        name_map = _get_latest_name_map()
-        for row in coil_rows:
-            grade  = row.get("grade", "")
-            ticker = row.get("ticker", "")
-            name   = (name_map.get(ticker) or row.get("name") or "")[:5]
-            score  = row.get("score", "--")
-            vs_raw = row.get("vs_60d_high_pct", "")
-            try:
-                vs_val = float(vs_raw)
-                vs_str = f"{vs_val:+.1f}%"
-            except (ValueError, TypeError):
-                vs_str = "[dim]--[/dim]"
-            style = _COIL_GRADE_COLOR.get(grade, "white")
-            label = _COIL_GRADE_LABEL.get(grade, grade)
-            coil_tbl.add_row(
-                f"[{style}]{ticker}[/{style}]",
-                name,
-                f"[{style}]{label}[/{style}]",
-                str(score),
-                vs_str,
-            )
-        content = Group(content, Rule(title="[dim bold magenta]蓄積雷達[/dim bold magenta]", style="dim"), coil_tbl)
-
-    return Panel(content, title="[bold blue]Bot Status[/bold blue]", border_style="blue", box=box.ROUNDED)
+    return Panel(t, title="[bold blue]Bot Status[/bold blue]", border_style="blue", box=box.ROUNDED)
 
 
 def _render_log_panel() -> Panel:
@@ -1390,6 +1344,172 @@ def _select_llm(arg: str | None) -> str:
     return {"2": "gemini", "3": "openai", "4": "glm"}.get(choice, "claude")
 
 
+def _render_watchlist_detail_panel() -> Panel:
+    """Right-column top: live watchlist prices with real market data."""
+    shortlist = _state["shortlist"]
+    if not shortlist:
+        return Panel(Text("\n  (尚無名單數據)", style="dim"), title="[bold cyan]Watchlist Prices[/bold cyan]", border_style="cyan")
+
+    wl_data = _MARKET_CACHE.get("watchlist", {})
+
+    t = Table(box=None, show_header=True, header_style="bold cyan", padding=(0, 1), expand=True)
+    t.add_column("代號",   style="dim",     width=6,   no_wrap=True)
+    t.add_column("名稱",                    max_width=6, no_wrap=True)
+    t.add_column("現價",   justify="right", min_width=7, no_wrap=True)
+    t.add_column("漲跌%",  justify="right", min_width=8, no_wrap=True)
+    t.add_column("信心",   justify="right", width=4,   no_wrap=True)
+    t.add_column("vs進場", justify="right", min_width=7, no_wrap=True)
+
+    for s in shortlist[:20]:
+        ticker = s["ticker"]
+        name   = (s.get("name") or "")[:5]
+        conf   = s.get("confidence", 0)
+        entry  = s.get("entry_bid") or 0.0
+        action = s.get("action", "")
+        d      = wl_data.get(ticker)
+
+        badge_clr = "cyan" if action == "LONG" else "yellow"
+
+        if d and d.get("price") is not None:
+            price = d["price"]
+            chg   = d["change_pct"]
+            live  = d.get("is_live", False)
+            clr   = _chg_color(chg)
+            sign  = "+" if chg >= 0 else ""
+            price_str = f"[{clr}]{price:.2f}[/{clr}]" if live else f"[dim]{price:.2f}[/dim]"
+            chg_str   = f"[{clr}]{_arrow(chg)} {sign}{chg:.2f}%[/{clr}]" if live else "[dim] --  --[/dim]"
+            if entry > 0:
+                diff = (price - entry) / entry * 100
+                vs_clr = "red" if diff >= 0 else "green"
+                vs_str = f"[{vs_clr}]{diff:+.1f}%[/{vs_clr}]"
+            else:
+                vs_str = "[dim]--[/dim]"
+        else:
+            price_str = "[dim]--[/dim]"
+            chg_str   = "[dim]--[/dim]"
+            vs_str    = "[dim]--[/dim]"
+
+        t.add_row(
+            f"[{badge_clr}]{ticker}[/{badge_clr}]",
+            name, price_str, chg_str,
+            f"[dim]{conf}[/dim]",
+            vs_str,
+        )
+
+    return Panel(t, title=f"[bold cyan]Watchlist Prices ({len(shortlist)})[/bold cyan]", border_style="cyan", box=box.ROUNDED)
+
+
+_COIL_GRADE_COLOR = {
+    "COIL_PRIME":  "bold magenta",
+    "COIL_MATURE": "bold cyan",
+    "COIL_EARLY":  "yellow",
+}
+_COIL_GRADE_LABEL = {
+    "COIL_PRIME":  "★★ 極強蓄積",
+    "COIL_MATURE": "★ 成熟蓄積",
+    "COIL_EARLY":  "蓄積初形",
+}
+
+
+def _latest_coil_csv() -> Path | None:
+    """Return the most recent coil_YYYY-MM-DD.csv under data/scans/, up to 7 days back."""
+    scans_dir = _ROOT / "data" / "scans"
+    for offset in range(7):
+        p = scans_dir / f"coil_{(date.today() - timedelta(days=offset)).isoformat()}.csv"
+        if p.exists():
+            return p
+    return None
+
+
+def _render_coil_panel() -> Panel:
+    """Right-column bottom: accumulation radar from latest coil CSV."""
+    csv_path = _latest_coil_csv()
+
+    t = Table(box=None, show_header=True, header_style="bold magenta", padding=(0, 1), expand=True)
+    t.add_column("代號",   style="dim",     width=6,   no_wrap=True)
+    t.add_column("名稱",                    max_width=6, no_wrap=True)
+    t.add_column("分數",  justify="right",  width=4,   no_wrap=True)
+    t.add_column("等級",                    min_width=10, no_wrap=True)
+    t.add_column("vs前高", justify="right", min_width=7, no_wrap=True)
+
+    if csv_path:
+        try:
+            name_map = _get_latest_name_map()
+            with open(csv_path, newline="", encoding="utf-8") as f:
+                for r in list(csv.DictReader(f))[:10]:
+                    ticker = r["ticker"]
+                    name   = (name_map.get(ticker) or r.get("name") or "")[:5]
+                    score  = r.get("score", "--")
+                    grade  = r.get("grade", "")
+                    vs_raw = r.get("vs_60d_high_pct", "")
+                    try:
+                        vs_str = f"{float(vs_raw):+.1f}%"
+                    except (ValueError, TypeError):
+                        vs_str = "[dim]--[/dim]"
+                    style = _COIL_GRADE_COLOR.get(grade, "white")
+                    label = _COIL_GRADE_LABEL.get(grade, grade)
+                    t.add_row(
+                        f"[{style}]{ticker}[/{style}]",
+                        name, score,
+                        f"[{style}]{label}[/{style}]",
+                        vs_str,
+                    )
+        except Exception as e:
+            logger.warning("coil panel error: %s", e)
+
+    if t.row_count == 0:
+        return Panel(
+            Text("\n  (尚無蓄積雷達數據)", style="dim"),
+            title="[bold magenta]Accumulation Radar[/bold magenta]",
+            border_style="magenta",
+        )
+
+    subtitle = f"[dim]{csv_path.stem.replace('coil_', '')}[/dim]" if csv_path else ""
+
+    # Append live tracking summary below the table
+    tracking_summary = _coil_tracking_summary()
+    content = t if not tracking_summary else Table.grid(padding=0)
+
+    if tracking_summary:
+        from rich.console import Group
+        grid = Table.grid(padding=(0, 0))
+        grid.add_column()
+        grid.add_row(t)
+        grid.add_row(Text(tracking_summary, style="dim"))
+        return Panel(grid, title="[bold magenta]Accumulation Radar[/bold magenta]",
+                     subtitle=subtitle, border_style="magenta", box=box.ROUNDED)
+
+    return Panel(t, title="[bold magenta]Accumulation Radar[/bold magenta]", subtitle=subtitle,
+                 border_style="magenta", box=box.ROUNDED)
+
+
+def _coil_tracking_summary() -> str:
+    """One-line tracking summary for the coil panel footer."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from coil_monitor import get_bot_summary, GRADE_ORDER, MIN_SAMPLE_FOR_WINRATE  # type: ignore[import]
+        data = get_bot_summary(days=30)
+        if not data:
+            return ""
+        parts = []
+        for grade in GRADE_ORDER:
+            gs = data["grade_stats"].get(grade, {})
+            n, wins = gs.get("n", 0), gs.get("wins", 0)
+            short = {"COIL_PRIME": "PRIME", "COIL_MATURE": "MATURE", "COIL_EARLY": "EARLY"}[grade]
+            if n < MIN_SAMPLE_FOR_WINRATE:
+                parts.append(f"{short} N={n}不足")
+            else:
+                pct = wins / n * 100
+                parts.append(f"{short} {pct:.0f}%(N={n})")
+        pending = data.get("pending", 0)
+        new_today = data.get("new_today", 0)
+        avg_mae = data.get("avg_mae")
+        mae_str = f" MAE avg:{avg_mae:.1f}%" if avg_mae is not None else ""
+        return "  ".join(parts) + f"  待:{pending}  今日新增:{new_today}" + mae_str
+    except Exception:
+        return ""
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def _try_preload_shortlist() -> None:
@@ -1466,28 +1586,39 @@ async def main_async(llm: str) -> None:
     # Start background market data refresh
     market_task = asyncio.create_task(_refresh_market_loop())
 
-    # Build dashboard: header strip + 4-quadrant body
+    # Build dashboard: header strip + main body + log footer
     layout = Layout()
     layout.split_column(
         Layout(name="header", size=3),
-        Layout(name="top",    ratio=3),
-        Layout(name="bottom", ratio=2),
+        Layout(name="main", ratio=1),
+        Layout(name="footer", size=7),
     )
-    layout["top"].split_row(
-        Layout(name="tl"),
-        Layout(name="tr"),
+    layout["main"].split_row(
+        Layout(name="left", ratio=1),
+        Layout(name="right", ratio=1),
     )
-    layout["bottom"].split_row(
-        Layout(name="bl"),
-        Layout(name="br"),
+    
+    # Left Column: Bot Status, Market Monitor, Global Markets (3 blocks)
+    layout["left"].split_column(
+        Layout(name="bot_l", ratio=1),
+        Layout(name="market", ratio=1),
+        Layout(name="global", ratio=1),
+    )
+    
+    # Right Column: Watchlist Prices, Accumulation Radar (2 blocks)
+    layout["right"].split_column(
+        Layout(name="watchlist", ratio=2),
+        Layout(name="coil", ratio=1),
     )
 
     def _update_layout() -> None:
         layout["header"].update(_render_header())
-        layout["tl"].update(_render_status_panel())
-        layout["bl"].update(_render_log_panel())
-        layout["tr"].update(_render_market_panel())
-        layout["br"].update(_render_global_panel())
+        layout["bot_l"].update(_render_status_panel())
+        layout["market"].update(_render_market_panel())
+        layout["global"].update(_render_global_panel())
+        layout["watchlist"].update(_render_watchlist_detail_panel())
+        layout["coil"].update(_render_coil_panel())
+        layout["footer"].update(_render_log_panel())
 
     _update_layout()
     try:

@@ -297,6 +297,8 @@ def run_optimize(
     tickers: list[str],
     workers: int,
     dry_run: bool,
+    auto_apply: bool = False,
+    live_db: "Path | None" = None,
     market_map: dict[str, str] | None = None,
 ) -> None:
     from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
@@ -442,6 +444,11 @@ def run_optimize(
         _console.print("\n[dim][DRY RUN] Params not written.[/dim]")
         return
 
+    # ---- Auto-apply path (gated) ----
+    if auto_apply:
+        _auto_apply((new_prime, new_mature), live_db, old_params)
+        return
+
     # ---- Interactive confirmation gate ----
     _console.print()
     _console.print(Panel(
@@ -462,6 +469,26 @@ def run_optimize(
         _console.print("[bold green]Params applied.[/bold green]")
     else:
         _console.print("[dim]Params not applied.[/dim]")
+
+
+def _auto_apply(
+    best_combo: tuple[int, int],
+    live_db: Path | None,
+    old_params: dict,
+) -> None:
+    """Apply params only if auto-apply safety gate passes."""
+    from coil_monitor import check_auto_apply_gate  # type: ignore[import]
+
+    db_path = live_db or (Path(__file__).resolve().parents[1] / "db" / "coil_track.db")
+    ok, reason = check_auto_apply_gate(db_path)
+    if not ok:
+        _console.print(
+            f"\n[bold yellow]⚠ --auto-apply 已阻擋：{reason}[/bold yellow]\n"
+            "[dim]需要：90 天資料 + 每個等級 ≥50 筆結算信號[/dim]"
+        )
+        return
+    _write_params(best_combo[0], best_combo[1], old_params)
+    _console.print("[bold green]Params auto-applied (gate passed).[/bold green]")
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +524,18 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help="Run optimization but do not write params to file",
+    )
+    parser.add_argument(
+        "--auto-apply",
+        action="store_true",
+        help="Auto-apply best params without confirmation (blocked if safety gate not met)",
+    )
+    parser.add_argument(
+        "--live-db",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Path to coil_track.db for auto-apply gate check (default: db/coil_track.db)",
     )
     args = parser.parse_args()
 
@@ -541,6 +580,8 @@ def main() -> None:
         tickers=tickers,
         workers=args.workers,
         dry_run=args.dry_run,
+        auto_apply=args.auto_apply,
+        live_db=args.live_db,
         market_map=market_map,
     )
 

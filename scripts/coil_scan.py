@@ -350,6 +350,7 @@ def main() -> None:
     parser.add_argument("--no-save", action="store_true", help="不儲存 CSV")
     parser.add_argument("--notify", action="store_true", help="推播 Telegram")
     parser.add_argument("--only-notify", action="store_true", help="僅執行推播而不掃描")
+    parser.add_argument("--track", action="store_true", help="掃描後自動匯入蓄積追蹤 DB")
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
 
@@ -408,6 +409,14 @@ def main() -> None:
         csv_path=csv_path,
         notify=args.notify,
     )
+
+    if args.track and csv_path and csv_path.exists():
+        try:
+            from coil_monitor import ingest_coil_csv  # type: ignore[import]
+            n = ingest_coil_csv(csv_path)
+            _console.print(f"  [dim]蓄積追蹤 DB：匯入 {n} 個新信號[/dim]")
+        except Exception as exc:
+            _console.print(f"  [dim red]蓄積追蹤匯入失敗：{exc}[/dim red]")
 
 
 if __name__ == "__main__":

@@ -90,8 +90,8 @@ _TREND_FIELDS = [
     "ma_alignment_pts",
     "ma20_slope_pts",
     "relative_strength_pts",
-    "breakout_20d_pts",
-    "breakout_volume_pts",
+    "proximity_pts",
+    "bb_compression_pts",
     "trend_continuity_pts",
     "dmi_initiation_pts",
 ]
@@ -764,6 +764,110 @@ def _print_table(
     ))
 
 
+def _print_by_industry(
+    results: list[dict],
+    top: int,
+    min_confidence: int,
+    scan_date: str = "",
+    name_map: dict[str, str] | None = None,
+    industry_map: dict[str, str] | None = None,
+) -> None:
+    """Print scan results grouped by industry strength, sorted high→low.
+
+    Each industry section shows: industry name, strength %, qualifying stocks.
+    Industries with no qualifying stocks show header only.
+    Weak industries (strength < -1%) are shown last with ▼ marker.
+    """
+    from collections import defaultdict
+
+    valid = [
+        r
+        for r in results
+        if not r["halt"] and r["error"] is None and r["confidence"] >= min_confidence
+    ]
+
+    if not valid:
+        _console.print("[dim]  (無符合條件標的)[/dim]")
+        return
+
+    ind_map = industry_map or {}
+    name_m = name_map or {}
+
+    # Compute industry strength: median change_pct of all results per industry
+    industry_change: dict[str, list[float]] = defaultdict(list)
+    for r in results:
+        ind = ind_map.get(r["ticker"], "其他")
+        chg = r.get("change_pct", 0.0) or 0.0
+        industry_change[ind].append(chg)
+
+    def _median(vals: list[float]) -> float:
+        if not vals:
+            return 0.0
+        s = sorted(vals)
+        n = len(s)
+        return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+    industry_strength: dict[str, float] = {
+        ind: _median(chgs) for ind, chgs in industry_change.items()
+    }
+
+    # Group valid stocks by industry
+    by_industry: dict[str, list[dict]] = defaultdict(list)
+    for r in valid:
+        ind = ind_map.get(r["ticker"], "其他")
+        by_industry[ind].append(r)
+
+    # Sort stocks within each industry by confidence desc
+    for ind in by_industry:
+        by_industry[ind].sort(key=lambda r: r["confidence"], reverse=True)
+
+    # Sort industries: strong first, weak last
+    all_industries = sorted(
+        industry_strength.keys(),
+        key=lambda ind: industry_strength[ind],
+        reverse=True,
+    )
+
+    title = f"掃描結果  {scan_date}  【產業強度排序】" if scan_date else "掃描結果  【產業強度排序】"
+    _console.print(f"\n[bold white]{title}[/bold white]")
+
+    for ind in all_industries:
+        strength = industry_strength.get(ind, 0.0)
+        stocks = by_industry.get(ind, [])
+        if not stocks:
+            continue  # skip industries with no valid signals
+
+        ready_n = sum(1 for s in stocks if s["action"] == "LONG")
+
+        strength_icon = "▲" if strength >= 0 else "▼"
+        strength_color = "green" if strength >= 0 else "red"
+        ind_header = (
+            f"\n[dim]──[/dim] [bold]{ind}[/bold]  "
+            f"[{strength_color}]{strength_icon}{abs(strength):.1f}%[/{strength_color}]"
+        )
+        ind_header += f"  [dim]({ready_n} 準備突破 / {len(stocks)} 整理中)[/dim]"
+
+        _console.print(ind_header)
+
+        for s in stocks:
+            ticker = s["ticker"]
+            name = (name_m.get(ticker) or "")[:5]
+            action = s["action"]
+            conf = s["confidence"]
+
+            action_label = "🚀 準備突破" if action == "LONG" else "🔍 整理中"
+            action_clr = "cyan" if action == "LONG" else "yellow"
+
+            conf_bar = _conf_bar(conf)
+            _console.print(
+                f"  [dim]{ticker}[/dim]  [{action_clr}]{action_label}[/{action_clr}]"
+                f"  {conf_bar}  [dim]{name}[/dim]"
+            )
+
+    if top and len(valid) > top:
+        _console.print(f"\n[dim]  (顯示前 {top} 檔，共 {len(valid)} 檔符合條件)[/dim]")
+
+
 def _run_phase(
     tickers: list[str],
     analysis_date: date,
@@ -950,7 +1054,24 @@ def run_batch(
         else:
             _console.print("  [dim yellow]⚠ DB 未設定或無法連線，略過寫入[/dim yellow]")
 
-    _print_table(results, top, min_confidence, scan_date=str(analysis_date), name_map=name_map, sort_by=sort_by)
+    if industry_map:
+        _print_by_industry(
+            results,
+            top,
+            min_confidence,
+            scan_date=str(analysis_date),
+            name_map=name_map,
+            industry_map=industry_map,
+        )
+    else:
+        _print_table(
+            results,
+            top,
+            min_confidence,
+            scan_date=str(analysis_date),
+            name_map=name_map,
+            sort_by=sort_by,
+        )
 
     if csv_path:
         _save_csv(results, analysis_date, csv_path, sort_by=sort_by)
@@ -971,6 +1092,14 @@ def run_batch(
             csv_path=coil_csv,
             notify=True,
         )
+        if coil_csv and coil_csv.exists():
+            try:
+                from coil_monitor import ingest_coil_csv as _ingest_coil  # type: ignore[import]
+                n = _ingest_coil(coil_csv)
+                if n:
+                    _console.print(f"  [dim]蓄積追蹤 DB：匯入 {n} 個新信號[/dim]")
+            except Exception as _e:
+                _console.print(f"  [dim yellow]coil tracking ingest skipped: {_e}[/dim yellow]")
     except ImportError:
         _console.print("  [dim yellow]coil_scan not available, skipping Pass 2[/dim yellow]")
 
@@ -1002,7 +1131,7 @@ def main() -> None:
         help="分析日期 YYYY-MM-DD（預設: 最近交易日）",
     )
     parser.add_argument("--top", type=int, default=10, help="顯示前 N 名（預設: 10）")
-    parser.add_argument("--min-confidence", type=int, default=0, help="最低信心分數門檻（預設: 0）")
+    parser.add_argument("--min-confidence", type=int, default=50, help="最低信心分數門檻（預設: 50）")
     parser.add_argument("--workers", type=int, default=5, help="並行 worker 數（預設: 5；建議 3-8，受 FinMind rate limit 限制）")
     parser.add_argument("--save-csv", action="store_true", help="儲存結果到 CSV 檔案")
     parser.add_argument(
@@ -1125,7 +1254,11 @@ def main() -> None:
             }
             for r in seen.values()
         ]
-        _print_table(results, args.top, args.min_confidence, scan_date=show_date, name_map=_build_name_map(), sort_by="confidence")
+        ind_map = _build_industry_map()
+        if ind_map:
+            _print_by_industry(results, args.top, args.min_confidence, scan_date=show_date, name_map=_build_name_map(), industry_map=ind_map)
+        else:
+            _print_table(results, args.top, args.min_confidence, scan_date=show_date, name_map=_build_name_map(), sort_by="confidence")
         return
 
     csv_path: Path | None = None
