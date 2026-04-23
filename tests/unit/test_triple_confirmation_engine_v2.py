@@ -479,29 +479,48 @@ class TestCloseStrength:
         assert flag == "DOJI_OR_HALT"
 
     def test_close_top_of_range(self):
-        """close == high → ratio 1.0 ≥ 0.7 → +2."""
+        """close == high → ratio 1.0 ≥ 0.8 → +4 (強勢爆量)."""
         engine = TripleConfirmationEngine()
         ohlcv = _make_ohlcv(close=101.0, high=101.0, low=99.0)
+        pts, flag = engine._close_strength_score(ohlcv)
+        assert pts == 4
+        assert flag is None
+
+    def test_close_at_0_8_gives_4(self):
+        """ratio ≥ 0.8 → +4 (boundary)."""
+        engine = TripleConfirmationEngine()
+        # ratio = (100.8 - 99) / (101 - 99) = 1.8/2.0 = 0.9
+        ohlcv = _make_ohlcv(close=100.8, high=101.0, low=99.0)
+        pts, flag = engine._close_strength_score(ohlcv)
+        assert pts == 4
+        assert flag is None
+
+    def test_close_in_0_6_to_0_8_gives_2(self):
+        """ratio in 0.6–0.8 → +2 (健康收盤)."""
+        engine = TripleConfirmationEngine()
+        # ratio = (100.2 - 99) / (101 - 99) = 1.2/2.0 = 0.6
+        ohlcv = _make_ohlcv(close=100.2, high=101.0, low=99.0)
         pts, flag = engine._close_strength_score(ohlcv)
         assert pts == 2
         assert flag is None
 
-    def test_close_mid_range_upper(self):
-        """close in 0.5–0.7 zone → +4."""
+    def test_close_in_0_4_to_0_6_gives_zero(self):
+        """ratio in 0.4–0.6 → 0 pts (觀察)."""
         engine = TripleConfirmationEngine()
-        # ratio = (100.0 - 99) / (101 - 99) = 1.0/2.0 = 0.5 → 4 pts
+        # ratio = (100.0 - 99) / (101 - 99) = 1.0/2.0 = 0.5
         ohlcv = _make_ohlcv(close=100.0, high=101.0, low=99.0)
-        pts, flag = engine._close_strength_score(ohlcv)
-        assert pts == 4  # ratio = 0.5 exactly → 4 pts
-
-    def test_close_below_midpoint(self):
-        """close near low → ratio < 0.5 → 0 pts."""
-        engine = TripleConfirmationEngine()
-        # ratio = (99.1 - 99) / (101 - 99) = 0.1/2.0 = 0.05 → 0 pts
-        ohlcv = _make_ohlcv(close=99.1, high=101.0, low=99.0)
         pts, flag = engine._close_strength_score(ohlcv)
         assert pts == 0
         assert flag is None
+
+    def test_close_below_0_4_gives_minus_2_and_flag(self):
+        """ratio < 0.4 → -2 pts + CLOSE_WEAK_OUT_PATTERN (出貨型)."""
+        engine = TripleConfirmationEngine()
+        # ratio = (99.1 - 99) / (101 - 99) = 0.1/2.0 = 0.05
+        ohlcv = _make_ohlcv(close=99.1, high=101.0, low=99.0)
+        pts, flag = engine._close_strength_score(ohlcv)
+        assert pts == -2
+        assert flag == "CLOSE_WEAK_OUT_PATTERN"
 
 
 # ---------------------------------------------------------------------------
@@ -525,43 +544,61 @@ class TestVolumeRatio:
         engine = TripleConfirmationEngine()
         history = self._history(10_000)
         ohlcv = _make_ohlcv(volume=11_999)  # 1.1999x → 0
-        assert engine._volume_ratio_score(ohlcv, history) == 0
+        pts, flag = engine._volume_ratio_score(ohlcv, history)
+        assert pts == 0 and flag is None
 
     def test_at_1_2x_gives_4(self):
         engine = TripleConfirmationEngine()
         history = self._history(10_000)
         ohlcv = _make_ohlcv(volume=12_000)  # exactly 1.2x → 4
-        assert engine._volume_ratio_score(ohlcv, history) == 4
+        pts, flag = engine._volume_ratio_score(ohlcv, history)
+        assert pts == 4 and flag is None
 
-    def test_between_1_2x_and_1_8x_gives_4(self):
+    def test_between_1_2x_and_2_0x_gives_4(self):
         engine = TripleConfirmationEngine()
         history = self._history(10_000)
         ohlcv = _make_ohlcv(volume=15_000)  # 1.5x → 4
-        assert engine._volume_ratio_score(ohlcv, history) == 4
+        pts, flag = engine._volume_ratio_score(ohlcv, history)
+        assert pts == 4 and flag is None
 
-    def test_just_below_1_8x_gives_4(self):
+    def test_at_2_0x_gives_8(self):
         engine = TripleConfirmationEngine()
         history = self._history(10_000)
-        ohlcv = _make_ohlcv(volume=17_999)  # 1.7999x → 4
-        assert engine._volume_ratio_score(ohlcv, history) == 4
+        ohlcv = _make_ohlcv(volume=20_000)  # exactly 2.0x → 8
+        pts, flag = engine._volume_ratio_score(ohlcv, history)
+        assert pts == 8 and flag is None
 
-    def test_at_1_8x_gives_8(self):
-        engine = TripleConfirmationEngine()
-        history = self._history(10_000)
-        ohlcv = _make_ohlcv(volume=18_000)  # exactly 1.8x → 8
-        assert engine._volume_ratio_score(ohlcv, history) == 8
-
-    def test_above_1_8x_gives_8(self):
+    def test_between_2_0x_and_3_0x_gives_8(self):
         engine = TripleConfirmationEngine()
         history = self._history(10_000)
         ohlcv = _make_ohlcv(volume=25_000)  # 2.5x → 8
-        assert engine._volume_ratio_score(ohlcv, history) == 8
+        pts, flag = engine._volume_ratio_score(ohlcv, history)
+        assert pts == 8 and flag is None
+
+    def test_at_3_0x_gives_5_and_exhaustion_flag(self):
+        """≥3× is 噴出型 warning: 5 pts (not 8) + VOL_EXHAUSTION_RISK flag."""
+        engine = TripleConfirmationEngine()
+        history = self._history(10_000)
+        ohlcv = _make_ohlcv(volume=30_000)  # exactly 3.0x
+        pts, flag = engine._volume_ratio_score(ohlcv, history)
+        assert pts == 5
+        assert flag == "VOL_EXHAUSTION_RISK"
+
+    def test_above_3_0x_gives_5_and_exhaustion_flag(self):
+        """5× surge still gives 5 pts with warning, not max."""
+        engine = TripleConfirmationEngine()
+        history = self._history(10_000)
+        ohlcv = _make_ohlcv(volume=50_000)  # 5x
+        pts, flag = engine._volume_ratio_score(ohlcv, history)
+        assert pts == 5
+        assert flag == "VOL_EXHAUSTION_RISK"
 
     def test_insufficient_history_gives_zero(self):
         engine = TripleConfirmationEngine()
         history = _make_history(5)  # only 5 bars, need 20
         ohlcv = _make_ohlcv(volume=50_000)
-        assert engine._volume_ratio_score(ohlcv, history) == 0
+        pts, flag = engine._volume_ratio_score(ohlcv, history)
+        assert pts == 0 and flag is None
 
 
 # ---------------------------------------------------------------------------
@@ -1313,22 +1350,21 @@ def _history_with_turnover(avg_turnover: float, n: int = 70) -> list[DailyOHLCV]
 class TestLiquidityGate:
     def test_tse_below_threshold_triggers_low_liquidity(self):
         engine = TripleConfirmationEngine()
-        history = _history_with_turnover(avg_turnover=15_000_000)  # 1500萬 < 2000萬
-        today = _make_ohlcv(close=50.0, volume=300_000, trade_date=date(2025, 3, 13))
+        history = _history_with_turnover(avg_turnover=30_000_000)  # 3000萬 < 4000萬
+        today = _make_ohlcv(close=50.0, volume=600_000, trade_date=date(2025, 3, 13))
         signal = engine.score(
             ohlcv=today, ohlcv_history=history,
             chip_report=_make_chip_report(), volume_profile=_make_volume_profile(),
             market="TSE",
         )
         assert signal.action == "CAUTION"
-        
         assert "NO_SETUP" in signal.data_quality_flags
         assert any("LOW_LIQUIDITY" in f for f in signal.data_quality_flags)
 
     def test_tse_above_threshold_passes_liquidity_gate(self):
         engine = TripleConfirmationEngine()
-        history = _history_with_turnover(avg_turnover=25_000_000)  # 2500萬 > 2000萬
-        today = _make_ohlcv(close=50.0, volume=500_000, trade_date=date(2025, 3, 13))
+        history = _history_with_turnover(avg_turnover=60_000_000)  # 6000萬 > 4000萬
+        today = _make_ohlcv(close=50.0, volume=1_200_000, trade_date=date(2025, 3, 13))
         _, breakdown = engine.score_with_breakdown(
             ohlcv=today, ohlcv_history=history,
             chip_report=_make_chip_report(), volume_profile=_make_volume_profile(),
@@ -1337,11 +1373,11 @@ class TestLiquidityGate:
         assert not any("LOW_LIQUIDITY" in f for f in breakdown.flags)
 
     def test_tpex_lower_threshold_applied(self):
-        """TPEx 800萬 threshold — 1000萬 passes, 500萬 fails."""
+        """TPEx 1500萬 threshold — 1000萬 fails, 2000萬 passes."""
         engine = TripleConfirmationEngine()
-        # Below TPEx threshold (500萬 < 800萬) but above nothing
-        history_fail = _history_with_turnover(avg_turnover=5_000_000)
-        today = _make_ohlcv(close=50.0, volume=100_000, trade_date=date(2025, 3, 13))
+        # Below TPEx threshold (1000萬 < 1500萬)
+        history_fail = _history_with_turnover(avg_turnover=10_000_000)
+        today = _make_ohlcv(close=50.0, volume=200_000, trade_date=date(2025, 3, 13))
         signal = engine.score(
             ohlcv=today, ohlcv_history=history_fail,
             chip_report=_make_chip_report(), volume_profile=_make_volume_profile(),
@@ -1350,8 +1386,8 @@ class TestLiquidityGate:
         assert "NO_SETUP" in signal.data_quality_flags
         assert any("LOW_LIQUIDITY" in f for f in signal.data_quality_flags)
 
-        # Above TPEx threshold (1000萬 > 800萬) — but would still fail TSE (< 2000萬)
-        history_pass = _history_with_turnover(avg_turnover=10_000_000)
+        # Above TPEx threshold (2000萬 > 1500萬) — would still fail TSE (< 4000萬)
+        history_pass = _history_with_turnover(avg_turnover=20_000_000)
         _, bd = engine.score_with_breakdown(
             ohlcv=today, ohlcv_history=history_pass,
             chip_report=_make_chip_report(), volume_profile=_make_volume_profile(),
@@ -1370,6 +1406,48 @@ class TestLiquidityGate:
         engine = TripleConfirmationEngine()
         history = _history_with_turnover(avg_turnover=30_000_000, n=10)  # only 10 days
         assert engine._turnover_20ma(history) is None
+
+    # --- G5: No significant overhead ---
+
+    def test_g5_passes_when_20d_high_near_60d_high(self):
+        """G5 passes when 20d_high / 60d_high >= 0.85 (consolidation near 60d ceiling)."""
+        engine = TripleConfirmationEngine()
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=110.0, sixty_day_sessions=45)
+        history = _history_with_turnover(avg_turnover=60_000_000)
+        today = _make_ohlcv(close=95.0, volume=1_200_000, trade_date=date(2025, 3, 13))
+        _, _, _, flags = engine._gate_check(today, history, vp)
+        assert any("GATE_PASS:G5_NO_OVERHEAD" in f for f in flags)
+
+    def test_g5_fails_when_20d_high_far_below_60d_high(self):
+        """G5 fails when 20d_high / 60d_high < 0.85 (big overhead wall)."""
+        engine = TripleConfirmationEngine()
+        # 20d_high=80, 60d_high=120 → ratio=0.667 < 0.85
+        vp = _make_volume_profile(twenty_day_high=80.0, sixty_day_high=120.0, sixty_day_sessions=45)
+        history = _history_with_turnover(avg_turnover=60_000_000)
+        today = _make_ohlcv(close=75.0, volume=1_200_000, trade_date=date(2025, 3, 13))
+        _, _, _, flags = engine._gate_check(today, history, vp)
+        assert any("GATE_FAIL:G5_OVERHEAD" in f for f in flags)
+
+    def test_g5_skipped_when_60d_sessions_insufficient(self):
+        """G5 is skipped (GATE_SKIP) when sixty_day_sessions < 40."""
+        engine = TripleConfirmationEngine()
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=120.0, sixty_day_sessions=20)
+        history = _history_with_turnover(avg_turnover=60_000_000)
+        today = _make_ohlcv(close=95.0, volume=1_200_000, trade_date=date(2025, 3, 13))
+        _, _, _, flags = engine._gate_check(today, history, vp)
+        assert any("GATE_SKIP:G5_NO_60D_DATA" in f for f in flags)
+
+    def test_g5_skip_does_not_block_gate_pass(self):
+        """When G5 is skipped (no 60d data), gate can still pass on G1-G4 alone."""
+        engine = TripleConfirmationEngine()
+        # vp with no 60d data → G5 skipped; G1-G4 all set to pass
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_sessions=0)
+        history = _history_with_turnover(avg_turnover=60_000_000)
+        # close=95: G1 passes (95% of 100d high, within 85-99%)
+        today = _make_ohlcv(close=95.0, volume=1_200_000, trade_date=date(2025, 3, 13))
+        passes, required, met, flags = engine._gate_check(today, history, vp)
+        assert any("GATE_SKIP:G5_NO_60D_DATA" in f for f in flags)
+        assert required == 4  # G5 not added to required when skipped
 
 
 # ---------------------------------------------------------------------------

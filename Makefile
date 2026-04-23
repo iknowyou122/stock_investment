@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan trade trade-t2 report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot coil coil-backtest coil-factor-report optimize-coil monitor
+.PHONY: plan trade trade-t2 report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -145,15 +145,15 @@ else
 endif
 
 # ── 完整每日流程 (Flow) ────────────────────────────────────────────────────────
-# 掃描 + 蓄積追蹤更新 + 產出報告（一鍵執行）
+# 掃描 + 產出報告（一鍵執行）
 # 用法: make flow
 # 執行順序：
-#   1. plan         — 批次掃描 + Pass 2 蓄積雷達（自動 ingest 進 DB）
-#   2. coil-monitor — 更新昨日以前所有 PENDING 信號的突破結果
-#   3. report       — T+1 結算 + 勝率報告
+#   1. plan   — 預突破批次掃描
+#   2. surge  — 噴發雷達掃描（短線爆量）
+#   3. report — T+1 結算 + 勝率報告
 flow:
 	$(MAKE) plan
-	$(MAKE) coil-monitor
+	$(MAKE) surge
 	$(MAKE) report
 
 # ── 資料庫備份與還原 ─────────────────────────────────────────────────────────
@@ -195,49 +195,9 @@ bot-setup:
 bot:
 	$(PYTHON) scripts/bot.py $(if $(LLM),--llm $(LLM))
 
-# ── 蓄積雷達掃描 ──────────────────────────────────────────────────────────────
-coil:
-	$(PYTHON) scripts/coil_scan.py --save-csv --track --notify $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(DATE),--date $(DATE))
-
-# ── 蓄積信號回測 ──────────────────────────────────────────────────────────────
-coil-backtest:
-	$(PYTHON) scripts/coil_backtest.py \
-		$(if $(DATE_FROM),--date-from $(DATE_FROM)) \
-		$(if $(DATE_TO),--date-to $(DATE_TO))
-
-# ── 蓄積因子分析 ──────────────────────────────────────────────────────────────
-coil-factor-report:
-	$(PYTHON) scripts/coil_factor_report.py
-
-# ── 蓄積引擎參數優化 ──────────────────────────────────────────────────────────
-optimize-coil:
-	$(PYTHON) scripts/optimize_coil.py
-
-# ── 蓄積追蹤看板 ───────────────────────────────────────────────────────────────
-# 每日更新蓄積信號突破結果，顯示滾動勝率
-# 用法: make coil-monitor
-#       make coil-monitor GRADE=COIL_PRIME
-#       make coil-monitor EXPORT=coil_report.csv
-#       make coil-monitor DAYS=60
-GRADE      ?=
-COIL_DAYS  ?= 30
-
-coil-monitor:
-	$(PYTHON) scripts/coil_monitor.py \
-		$(if $(DATE),--date $(DATE)) \
-		$(if $(GRADE),--grade $(GRADE)) \
-		$(if $(EXPORT),--export $(EXPORT)) \
-		--days $(COIL_DAYS)
-
-# ── 蓄積追蹤全流程（掃描 + 更新結果 + 因子分析 + 優化）─────────────────────────
-# 用法: make coil-loop
-coil-loop:
-	$(PYTHON) scripts/coil_scan.py --save-csv --track --notify $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS))
-	$(PYTHON) scripts/coil_monitor.py --refresh
-	$(PYTHON) scripts/coil_factor_report.py --live-db db/coil_track.db
-	$(PYTHON) scripts/optimize_coil.py --live-db db/coil_track.db --dry-run
-
-.PHONY: coil-monitor coil-loop
+# ── 噴發雷達掃描（短線爆量捕捉）─────────────────────────────────────────────
+surge:
+	$(PYTHON) scripts/surge_scan.py --save-csv $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(DATE),--date $(DATE))
 
 # ── 信號準確度監控 ──────────────────────────────────────────────────────────────
 # 載入歷史 scan CSV，驗證突破結果，顯示滾動勝率 Dashboard

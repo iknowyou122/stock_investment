@@ -13,7 +13,7 @@ def _make_history(n=20, base_close=100.0, base_vol=10000, flat=True):
 def _make_volume_profile(twenty_day_high=110.0):
     return VolumeProfile(ticker="TEST", period_end=date(2025, 2, 1), poc_proxy=100.0,
                         twenty_day_high=twenty_day_high, sixty_day_high=120.0,
-                        twenty_day_sessions=20, sixty_day_sessions=60,
+                        twenty_day_sessions=20, sixty_day_sessions=0,
                         one_twenty_day_sessions=120, fiftytwo_week_sessions=250)
 
 def _make_chip_report():
@@ -96,38 +96,3 @@ class TestV23Core:
 
         signal, bd = eng.score_with_breakdown(ohlcv, hist, chip, vp)
         assert bd.ma_convergence_pts == 8
-
-    def test_accumulation_engine_g1_close_within_ma20(self):
-        """AccumulationEngine G1: close within MA20 ± 8% passes."""
-        from taiwan_stock_agent.domain.accumulation_engine import AccumulationEngine
-
-        acc_eng = AccumulationEngine(market="TSE")
-        # Create flat 60-bar history at close=100
-        hist = _make_history(60, base_close=100.0, base_vol=1_000_000, flat=True)
-        # MA20 will be ~100, close at 100 → within ±8%
-
-        gate_pass, flags = acc_eng._gate_check(hist, "neutral", 25_000_000)
-        assert gate_pass is True
-        assert any("ACCUM_GATE_PASS" in f for f in flags)
-
-    def test_accumulation_engine_g1_close_far_from_ma20(self):
-        """AccumulationEngine G1 fails when close > MA20 + 8%."""
-        from taiwan_stock_agent.domain.accumulation_engine import AccumulationEngine
-
-        acc_eng = AccumulationEngine(market="TSE")
-        # Create 60-bar history: steady at 100 for i=0-39, then jump to 115 for i=40-59
-        # So the last 20 (i=40-59) are all at 115, MA20 = 115
-        # But we want close to be far from MA20, so make first 40 bars at 100, last 20 at 109
-        # Then today = 120 (far from 109)
-        hist = []
-        for i in range(59):
-            close = 109.0 if i >= 39 else 100.0
-            hist.append(_make_ohlcv(close, 1_000_000, date(2025, 1, 1) + timedelta(days=i)))
-        # Today's close: 120
-        hist.append(_make_ohlcv(120.0, 1_000_000, date(2025, 2, 28)))
-
-        gate_pass, flags = acc_eng._gate_check(hist, "neutral", 25_000_000)
-        # Last 20 bars avg: (20 * 109) / 20 = 109
-        # close = 120, proximity = (120-109)/109 = 10% > 8% → should fail
-        assert gate_pass is False
-        assert any("G1_CLOSE_FAR_FROM_MA20" in f for f in flags)

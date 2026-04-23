@@ -345,6 +345,40 @@ def _apply_sector_ranks(results: list[dict], industry_map: dict[str, str]) -> in
     return boosted
 
 
+def _apply_catalyst_filter(
+    results: list[dict],
+    industry_map: dict[str, str],
+    industry_strength: dict[str, float],
+) -> int:
+    """Mark WATCH stocks with NO_CATALYST when they lack both institutional continuity
+    and sector momentum.
+
+    LONG stocks are exempt (high confidence implies catalysts already present).
+    Returns count of stocks marked NO_CATALYST.
+    """
+    if not industry_strength:
+        return 0
+    strength_vals = sorted(industry_strength.values())
+    median_strength = strength_vals[len(strength_vals) // 2] if strength_vals else 0.0
+
+    n = 0
+    for r in results:
+        if r.get("halt") or r.get("error"):
+            continue
+        if r["action"] in ("LONG", "CAUTION"):
+            continue
+        # WATCH stock: require at least one catalyst
+        has_inst = r.get("institution_continuity_pts", 0) >= 3
+        ind = industry_map.get(r["ticker"], "")
+        has_hot_sector = industry_strength.get(ind, 0.0) >= median_strength
+        if not has_inst and not has_hot_sector:
+            flags = list(r.get("flags") or [])
+            flags.append("NO_CATALYST")
+            r["flags"] = flags
+            n += 1
+    return n
+
+
 def _load_recent_csvs(
     analysis_date: date,
     data_dir: Path,
@@ -555,6 +589,7 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "error": None,
             "_signal": signal,
             "trend_score": trend_score,
+            "institution_continuity_pts": breakdown_pts.get("institution_continuity_pts", 0),
         }
     except Exception as e:
         return {
@@ -666,7 +701,11 @@ def _print_table(
     name_map: dict[str, str] | None = None,
     sort_by: str = "trend",
 ) -> None:
-    valid = [r for r in results if not r["halt"] and r["error"] is None]
+    valid = [
+        r for r in results
+        if not r["halt"] and r["error"] is None
+        and "NO_CATALYST" not in (r.get("flags") or [])
+    ]
     halted = [r for r in results if r["halt"] or r["error"] is not None]
 
     if sort_by == "trend":
@@ -703,16 +742,8 @@ def _print_table(
 
     for i, r in enumerate(valid, 1):
         action_str = r["action"] + ("*" if r["free_tier"] else "")
-        flags = r.get("flags") or []
 
-        # COILING visual treatment
-        coiling_label = ""
-        if "COILING_PRIME" in flags:
-            coiling_label = " [bold magenta]蓄積★[/bold magenta]"
-        elif "COILING" in flags:
-            coiling_label = " [magenta]蓄積[/bold magenta]"
-
-        action_text = Text.from_markup(f"[{_action_style(r['action'])}]{action_str}[/{_action_style(r['action'])}]{coiling_label}")
+        action_text = Text.from_markup(f"[{_action_style(r['action'])}]{action_str}[/{_action_style(r['action'])}]")
         upside_pct = (r["target"] / r["entry_bid"] - 1) * 100 if r["entry_bid"] > 0 else 0
         ticker = r["ticker"]
         if name_map:
@@ -784,6 +815,7 @@ def _print_by_industry(
         r
         for r in results
         if not r["halt"] and r["error"] is None and r["confidence"] >= min_confidence
+        and "NO_CATALYST" not in (r.get("flags") or [])
     ]
 
     if not valid:
@@ -1037,10 +1069,33 @@ def run_batch(
     # --- Post-processing: sector ranking + persistence ---
     scan_data_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
 
+    # Compute industry strength (median change_pct per industry) for catalyst filter
+    from collections import defaultdict as _defaultdict
+    _industry_change: dict[str, list[float]] = _defaultdict(list)
+    for r in results:
+        _ind = (industry_map or {}).get(r["ticker"], "其他")
+        _chg = r.get("change_pct", 0.0) or 0.0
+        _industry_change[_ind].append(_chg)
+
+    def _median_local(vals: list[float]) -> float:
+        if not vals:
+            return 0.0
+        s = sorted(vals)
+        n = len(s)
+        return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+    industry_strength: dict[str, float] = {
+        ind: _median_local(chgs) for ind, chgs in _industry_change.items()
+    }
+
     if industry_map:
         n_sector = _apply_sector_ranks(results, industry_map)
         if n_sector:
             _console.print(f"  [dim]↑ 產業相對排名加分: {n_sector} 檔 (+5 pts each)[/dim]")
+
+    n_no_catalyst = _apply_catalyst_filter(results, industry_map, industry_strength)
+    if n_no_catalyst:
+        _console.print(f"  [dim]↓ 無題材標記（WATCH）: {n_no_catalyst} 檔[/dim]")
 
     n_persist = _apply_persistence_bonus(results, analysis_date, scan_data_dir)
     if n_persist:
@@ -1075,33 +1130,6 @@ def run_batch(
 
     if csv_path:
         _save_csv(results, analysis_date, csv_path, sort_by=sort_by)
-
-    # --- Pass 2: Accumulation scan (local import avoids circular dependency) ---
-    try:
-        from coil_scan import run_coil_scan as _run_coil_scan
-        _console.rule("[bold magenta]蓄積雷達 Pass 2[/bold magenta]")
-        coil_csv = None
-        if csv_path:
-            coil_csv = csv_path.parent / f"coil_{analysis_date.isoformat()}.csv"
-        _run_coil_scan(
-            tickers=tickers,
-            analysis_date=analysis_date,
-            workers=workers,
-            market_map=market_map,
-            name_map=name_map,
-            csv_path=coil_csv,
-            notify=True,
-        )
-        if coil_csv and coil_csv.exists():
-            try:
-                from coil_monitor import ingest_coil_csv as _ingest_coil  # type: ignore[import]
-                n = _ingest_coil(coil_csv)
-                if n:
-                    _console.print(f"  [dim]蓄積追蹤 DB：匯入 {n} 個新信號[/dim]")
-            except Exception as _e:
-                _console.print(f"  [dim yellow]coil tracking ingest skipped: {_e}[/dim yellow]")
-    except ImportError:
-        _console.print("  [dim yellow]coil_scan not available, skipping Pass 2[/dim yellow]")
 
 
 def main() -> None:
@@ -1373,6 +1401,8 @@ def _do_notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int
             conf = int(row.get("confidence", 0) or 0)
             if conf < min_confidence:
                 continue
+            if "NO_CATALYST" in (row.get("flags") or ""):
+                continue
             signals.append({
                 "ticker": row["ticker"],
                 "name": name_map.get(row["ticker"], ""),
@@ -1414,7 +1444,7 @@ def _do_notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int
         )
         key_flags = [
             fl for fl in (s.get("flags") or "").split("|")
-            if any(k in fl for k in ("COILING", "BREAKOUT", "EMERGING", "RISING", "SECTOR_RANK"))
+            if any(k in fl for k in ("BREAKOUT", "EMERGING", "RISING", "SECTOR_RANK"))
         ]
         flag_str = f"  [{' | '.join(key_flags)}]" if key_flags else ""
         lines.append(

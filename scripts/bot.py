@@ -562,7 +562,6 @@ async def _job_opening_scan(force: bool = False, notify_fn=None) -> None:
             _state["last_scan_time"] = datetime.now()
             logger.info("opening_scan shortlist loaded n=%d from %s", len(_state["shortlist"]), csv_path.name)
         await notify(format_opening_list(_state["shortlist"], str(date.today())))
-        await _send_coil_results(str(date.today()))
         logger.info("opening_scan DONE n=%d", len(_state["shortlist"]))
 
 
@@ -711,7 +710,6 @@ async def _job_postmarket_report(force: bool = False, notify_fn=None) -> None:
         tomorrow_signals=tomorrow_signals,
         report_date=str(date.today()),
     ))
-    await _send_coil_results(str(date.today()))
     logger.info("postmarket_report DONE")
 
 
@@ -1029,62 +1027,6 @@ def _heat_tile_compact(abbr: str, chg: float, price: float | None) -> Text:
     return t
 
 
-# ── Coil CSV loader + Telegram push ─────────────────────────────────────────
-
-_COIL_GRADE_LABEL_TG = {
-    "COIL_PRIME":  "⭐⭐ 極強蓄積",
-    "COIL_MATURE": "⭐ 成熟蓄積",
-    "COIL_EARLY":  "蓄積初形",
-}
-
-def _load_latest_coil_csv() -> list[dict]:
-    """Load top 5 rows from latest coil_*.csv. Returns [] if not found."""
-    coil_files = sorted(_SCAN_DIR.glob("coil_*.csv"), reverse=True)
-    if not coil_files:
-        return []
-    try:
-        with coil_files[0].open(newline="", encoding="utf-8") as f:
-            return list(csv.DictReader(f))[:5]
-    except Exception:
-        return []
-
-
-async def _send_coil_results(scan_date: str) -> None:
-    """Push COIL_MATURE+ results from latest coil CSV to Telegram."""
-    coil_files = sorted(_SCAN_DIR.glob("coil_*.csv"), reverse=True)
-    if not coil_files:
-        return
-    try:
-        with coil_files[0].open(newline="", encoding="utf-8") as f:
-            rows = [r for r in csv.DictReader(f) if r.get("grade") in _COIL_GRADE_LABEL_TG]
-    except Exception:
-        return
-    if not rows:
-        return
-
-    name_map = _get_latest_name_map()
-    lines = [f"🔭 *蓄積雷達觀察清單* `{scan_date}`\n"]
-    for row in rows[:10]:
-        grade  = row.get("grade", "")
-        ticker = row.get("ticker", "")
-        name   = name_map.get(ticker) or row.get("name") or ""
-        score  = row.get("score", "--")
-        vs_high = row.get("vs_60d_high_pct", "--")
-        consec  = row.get("inst_consec_days", "--")
-        weeks   = row.get("weeks_consolidating", "--")
-        label   = _COIL_GRADE_LABEL_TG.get(grade, grade)
-        try:
-            vs_f = f"{float(vs_high):+.1f}%"
-        except (ValueError, TypeError):
-            vs_f = "--"
-        lines.append(
-            f"{label} *{ticker}* {name}\n"
-            f"  分數 {score}　vs前高 {vs_f}　法人連買 {consec}d　橫盤 {weeks}w"
-        )
-
-    await _send("\n".join(lines))
-
-
 # ── Rich CLI display — header + 4-quadrant layout ─────────────────────────────
 
 def _render_header() -> Panel:
@@ -1399,117 +1341,6 @@ def _render_watchlist_detail_panel() -> Panel:
     return Panel(t, title=f"[bold cyan]Watchlist Prices ({len(shortlist)})[/bold cyan]", border_style="cyan", box=box.ROUNDED)
 
 
-_COIL_GRADE_COLOR = {
-    "COIL_PRIME":  "bold magenta",
-    "COIL_MATURE": "bold cyan",
-    "COIL_EARLY":  "yellow",
-}
-_COIL_GRADE_LABEL = {
-    "COIL_PRIME":  "★★ 極強蓄積",
-    "COIL_MATURE": "★ 成熟蓄積",
-    "COIL_EARLY":  "蓄積初形",
-}
-
-
-def _latest_coil_csv() -> Path | None:
-    """Return the most recent coil_YYYY-MM-DD.csv under data/scans/, up to 7 days back."""
-    scans_dir = _ROOT / "data" / "scans"
-    for offset in range(7):
-        p = scans_dir / f"coil_{(date.today() - timedelta(days=offset)).isoformat()}.csv"
-        if p.exists():
-            return p
-    return None
-
-
-def _render_coil_panel() -> Panel:
-    """Right-column bottom: accumulation radar from latest coil CSV."""
-    csv_path = _latest_coil_csv()
-
-    t = Table(box=None, show_header=True, header_style="bold magenta", padding=(0, 1), expand=True)
-    t.add_column("代號",   style="dim",     width=6,   no_wrap=True)
-    t.add_column("名稱",                    max_width=6, no_wrap=True)
-    t.add_column("分數",  justify="right",  width=4,   no_wrap=True)
-    t.add_column("等級",                    min_width=10, no_wrap=True)
-    t.add_column("vs前高", justify="right", min_width=7, no_wrap=True)
-
-    if csv_path:
-        try:
-            name_map = _get_latest_name_map()
-            with open(csv_path, newline="", encoding="utf-8") as f:
-                for r in list(csv.DictReader(f))[:10]:
-                    ticker = r["ticker"]
-                    name   = (name_map.get(ticker) or r.get("name") or "")[:5]
-                    score  = r.get("score", "--")
-                    grade  = r.get("grade", "")
-                    vs_raw = r.get("vs_60d_high_pct", "")
-                    try:
-                        vs_str = f"{float(vs_raw):+.1f}%"
-                    except (ValueError, TypeError):
-                        vs_str = "[dim]--[/dim]"
-                    style = _COIL_GRADE_COLOR.get(grade, "white")
-                    label = _COIL_GRADE_LABEL.get(grade, grade)
-                    t.add_row(
-                        f"[{style}]{ticker}[/{style}]",
-                        name, score,
-                        f"[{style}]{label}[/{style}]",
-                        vs_str,
-                    )
-        except Exception as e:
-            logger.warning("coil panel error: %s", e)
-
-    if t.row_count == 0:
-        return Panel(
-            Text("\n  (尚無蓄積雷達數據)", style="dim"),
-            title="[bold magenta]Accumulation Radar[/bold magenta]",
-            border_style="magenta",
-        )
-
-    subtitle = f"[dim]{csv_path.stem.replace('coil_', '')}[/dim]" if csv_path else ""
-
-    # Append live tracking summary below the table
-    tracking_summary = _coil_tracking_summary()
-    content = t if not tracking_summary else Table.grid(padding=0)
-
-    if tracking_summary:
-        from rich.console import Group
-        grid = Table.grid(padding=(0, 0))
-        grid.add_column()
-        grid.add_row(t)
-        grid.add_row(Text(tracking_summary, style="dim"))
-        return Panel(grid, title="[bold magenta]Accumulation Radar[/bold magenta]",
-                     subtitle=subtitle, border_style="magenta", box=box.ROUNDED)
-
-    return Panel(t, title="[bold magenta]Accumulation Radar[/bold magenta]", subtitle=subtitle,
-                 border_style="magenta", box=box.ROUNDED)
-
-
-def _coil_tracking_summary() -> str:
-    """One-line tracking summary for the coil panel footer."""
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from coil_monitor import get_bot_summary, GRADE_ORDER, MIN_SAMPLE_FOR_WINRATE  # type: ignore[import]
-        data = get_bot_summary(days=30)
-        if not data:
-            return ""
-        parts = []
-        for grade in GRADE_ORDER:
-            gs = data["grade_stats"].get(grade, {})
-            n, wins = gs.get("n", 0), gs.get("wins", 0)
-            short = {"COIL_PRIME": "PRIME", "COIL_MATURE": "MATURE", "COIL_EARLY": "EARLY"}[grade]
-            if n < MIN_SAMPLE_FOR_WINRATE:
-                parts.append(f"{short} N={n}不足")
-            else:
-                pct = wins / n * 100
-                parts.append(f"{short} {pct:.0f}%(N={n})")
-        pending = data.get("pending", 0)
-        new_today = data.get("new_today", 0)
-        avg_mae = data.get("avg_mae")
-        mae_str = f" MAE avg:{avg_mae:.1f}%" if avg_mae is not None else ""
-        return "  ".join(parts) + f"  待:{pending}  今日新增:{new_today}" + mae_str
-    except Exception:
-        return ""
-
-
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def _try_preload_shortlist() -> None:
@@ -1605,19 +1436,15 @@ async def main_async(llm: str) -> None:
         Layout(name="global", ratio=1),
     )
     
-    # Right Column: Watchlist Prices, Accumulation Radar (2 blocks)
-    layout["right"].split_column(
-        Layout(name="watchlist", ratio=2),
-        Layout(name="coil", ratio=1),
-    )
+    # Right Column: Watchlist Prices
+    layout["right"].update(_render_watchlist_detail_panel())
 
     def _update_layout() -> None:
         layout["header"].update(_render_header())
         layout["bot_l"].update(_render_status_panel())
         layout["market"].update(_render_market_panel())
         layout["global"].update(_render_global_panel())
-        layout["watchlist"].update(_render_watchlist_detail_panel())
-        layout["coil"].update(_render_coil_panel())
+        layout["right"].update(_render_watchlist_detail_panel())
         layout["footer"].update(_render_log_panel())
 
     _update_layout()

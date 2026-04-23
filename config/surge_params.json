@@ -1,0 +1,37 @@
+{
+  "grade_thresholds": {
+    "SURGE_ALPHA": 55,
+    "SURGE_BETA": 40,
+    "SURGE_GAMMA": 28
+  },
+  "raw_max_pts": 85,
+  "gates": {
+    "min_turnover_tse": 20000000,
+    "min_turnover_tpex": 8000000,
+    "min_avg_daily_lots": 500,
+    "vol_ratio_min": 1.5,
+    "vol_ratio_5ma_min": 2.0,
+    "close_strength_min": 0.5,
+    "fresh_ignition_max_days": 2
+  },
+  "factors": {
+    "vol_ratio_ideal": 10,
+    "vol_ratio_extreme_warn": 5,
+    "vol_ratio_mild": 6,
+    "close_strong": 8,
+    "close_healthy": 5,
+    "close_soft": 2,
+    "inst_buy_fresh_1d": 4,
+    "inst_buy_fresh_2d": 7,
+    "inst_buy_fresh_3d": 10,
+    "industry_top_20pct": 10,
+    "industry_top_40pct": 5,
+    "pocket_pivot": 12,
+    "breakaway_gap_full": 8,
+    "breakaway_gap_partial": 4,
+    "relative_strength": 8,
+    "breakout_20d": 10,
+    "rsi_healthy": 5,
+    "margin_not_hot": 4
+  }
+}

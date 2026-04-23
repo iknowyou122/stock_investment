@@ -170,10 +170,7 @@ make show SHOW_DATE=2026-04-08      # 直接指定
 - `make backtest`: 歷史數據回測。
 - `make factor-report`: 因子力道分析。
 - `make optimize`: 超參數自動優化。
-- `make coil`: 蓄積雷達掃描（AccumulationEngine，獨立於動能引擎）。
-- `make coil-backtest`: 蓄積信號歷史回測。
-- `make coil-factor-report`: 蓄積因子 Lift 分析。
-- `make optimize-coil`: 蓄積引擎參數優化。
+- `make surge`: 噴發雷達掃描（SurgeRadar，短線爆量捕捉）。
 
 ---
 

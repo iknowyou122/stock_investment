@@ -10,9 +10,9 @@ Score breakdown (max 100 pts before risk deductions):
     Fail: action=CAUTION, confidence=0, data_quality_flags=["NO_SETUP"]
 
   Pillar 1: Momentum (max 39 pts)
-    volume_ratio_pts:     0/4/8   — vol/20d_avg < 1.2 → 0, 1.2–1.8 → 4, >1.8 → 8
+    volume_ratio_pts:     0/4/5/8 — vol/20d_avg: <1.2→0, 1.2-2.0→4, 2.0-3.0→8, ≥3.0→5+VOL_EXHAUSTION_RISK
     price_direction_pts:  0/3     — close >= prev_close → +3
-    close_strength_pts:   0/2/4   — (close-low)/(high-low); ≥0.7 → 4, 0.5–0.7 → 2, <0.5 → 0
+    close_strength_pts:  -2/0/2/4 — (close-low)/(high-low): ≥0.8→4, 0.6-0.8→2, 0.4-0.6→0, <0.4→-2+CLOSE_WEAK_OUT_PATTERN
                                     guard: high==low → 0, flag DOJI_OR_HALT
     vwap_advantage_pts:   0/6     — close > 5d_avg_vwap → +6 (intraday VWAP unavailable on T+1)
     trend_continuity_pts: 0/3/5   — 3 consec up → 3; 4-of-5 up → 5
@@ -51,7 +51,8 @@ Score breakdown (max 100 pts before risk deductions):
 
   Risk deductions:
     daytrade_risk:        0/-25  — 隔日沖 in top3
-    long_upper_shadow:    0/-8   — vol > 1.5×avg AND close_strength < 0.4
+    long_upper_shadow:    0/-8   — vol > 1.5×avg AND close_strength < 0.4 (組合懲罰，疊加 close_strength -2)
+    vol_consecutive_surge:0/-5   — vol > 1.5×avg 連續 ≥3 日（框架第3根爆量不追）flag VOL_DAY{N}_NO_CHASE
     overheat_ma20:        0/-5   — close > MA20 × 1.10
     overheat_ma60:        0/-5   — close > MA60 × 1.20
     daytrade_heat:        0/-5   — daytrade_ratio > 35% AND close not above 20d high
@@ -130,8 +131,8 @@ _MA20_SLOPE_DIFF_DAYS = 5       # compare MA20 today vs 5 sessions ago
 # Amount-based instead of share-count so high-priced stocks aren't over-filtered
 # and low-priced stocks aren't under-filtered.
 _LIQUIDITY_THRESHOLDS: dict[str, float] = {
-    "TSE":  20_000_000.0,   # NT$ 20M/day (≈ 400 張 @ 50元, ≈ 100 張 @ 200元)
-    "TPEx":  8_000_000.0,   # NT$ 8M/day — TPEx boards are typically thinner
+    "TSE":  40_000_000.0,   # NT$ 40M/day — filters thin stocks, still reachable by mid-cap
+    "TPEx": 15_000_000.0,   # NT$ 15M/day — TPEx boards are thinner, but still need tradable depth
 }
 _DEFAULT_MARKET = "TSE"
 
@@ -260,6 +261,7 @@ class _ScoreBreakdown:
     margin_chase_heat: int = 0        # 0 or 5
     adx_exhaustion_deduction: int = 0   # 0 or 6 — ADX > 55
     dmi_divergence_deduction: int = 0   # 0 or 4 — +DI falling while -DI rising
+    vol_consecutive_surge: int = 0      # 0 or 5 — 3+ consecutive vol surge days (框架第3根不追)
 
     flags: list[str] = field(default_factory=list)
 
@@ -318,6 +320,7 @@ class _ScoreBreakdown:
             - self.margin_chase_heat
             - self.adx_exhaustion_deduction
             - self.dmi_divergence_deduction
+            - self.vol_consecutive_surge
         )
         return max(0, min(100, raw))
 
@@ -480,8 +483,8 @@ class TripleConfirmationEngine:
         G3: Liquidity (Turnover 20MA > Threshold)
         G4: Market Regime (TAIEX not downtrend)
         """
+        required = 4  # G1–G4 all mandatory; G5 added when 60d data is present
         conditions_met = 0
-        conditions_available = 4
         detail_flags: list[str] = []
 
         # G1: Price Zone
@@ -528,8 +531,22 @@ class TripleConfirmationEngine:
         else:
             detail_flags.append("GATE_FAIL:G4_REGIME:DOWNTREND")
 
-        passes = conditions_met == 4
-        return passes, conditions_available, conditions_met, detail_flags
+        # G5: No significant overhead (requires 60d data).
+        # Compares the consolidation ceiling (20d high) to the 60d high.
+        # If 20d_high is far below 60d_high, sellers from 2 months ago sit overhead.
+        if volume_profile.sixty_day_sessions >= 40 and volume_profile.sixty_day_high > 0:
+            required += 1
+            ratio_60d = volume_profile.twenty_day_high / volume_profile.sixty_day_high
+            if ratio_60d >= 0.85:
+                conditions_met += 1
+                detail_flags.append(f"GATE_PASS:G5_NO_OVERHEAD:{ratio_60d*100:.1f}%")
+            else:
+                detail_flags.append(f"GATE_FAIL:G5_OVERHEAD:{ratio_60d*100:.1f}%")
+        else:
+            detail_flags.append("GATE_SKIP:G5_NO_60D_DATA")
+
+        passes = conditions_met == required
+        return passes, required, conditions_met, detail_flags
 
     # ------------------------------------------------------------------
     # Core computation
@@ -567,7 +584,10 @@ class TripleConfirmationEngine:
             bd.flags.append("COILING")
 
         # --- Pillar 1: Momentum ---
-        # bd.volume_ratio_pts = 0 (kept for DB compatibility, no longer used)
+        vol_pts, vol_flag = self._volume_ratio_score(ohlcv, ohlcv_history)
+        bd.volume_ratio_pts = vol_pts
+        if vol_flag:
+            bd.flags.append(vol_flag)
         bd.price_direction_pts = self._price_direction_score(ohlcv, ohlcv_history)
 
         cs_pts, cs_flag = self._close_strength_score(ohlcv)
@@ -678,17 +698,22 @@ class TripleConfirmationEngine:
     # Pillar 1: Momentum scoring methods
     # ------------------------------------------------------------------
 
-    def _volume_ratio_score(self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]) -> int:
-        """Volume ratio: vol/20d_avg < 1.2 → 0, 1.2–1.8 → 4, >1.8 → 8."""
+    def _volume_ratio_score(self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]) -> tuple[int, str | None]:
+        """Volume ratio vs 20d avg.
+        <1.2 → 0, 1.2-2.0 → 4, 2.0-3.0 → 8 (最佳爆量區間),
+        ≥3.0 → 5 + VOL_EXHAUSTION_RISK (極端量：警戒噴出型).
+        """
         vol_20ma = self._volume_20ma(history)
         if vol_20ma is None or vol_20ma == 0:
-            return 0
+            return 0, None
         ratio = ohlcv.volume / vol_20ma
-        if ratio >= 1.8:
-            return 8
+        if ratio >= 3.0:
+            return 5, "VOL_EXHAUSTION_RISK"
+        if ratio >= 2.0:
+            return 8, None
         if ratio >= 1.2:
-            return 4
-        return 0
+            return 4, None
+        return 0, None
 
     def _price_direction_score(self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]) -> int:
         """Price direction: close >= prev_close → +3."""
@@ -700,18 +725,21 @@ class TripleConfirmationEngine:
 
     def _close_strength_score(self, ohlcv: DailyOHLCV) -> tuple[int, str | None]:
         """K線收盤強弱比: (close-low)/(high-low).
-        0.5–0.7 → 4 (ideal recovery), ≥0.7 → 2 (potential extension), <0.5 → 0.
+        ≥0.8 → +4 (買盤全日主導), 0.6-0.8 → +2 (健康收盤), 0.4-0.6 → 0 (觀察),
+        <0.4 → -2 (出貨型：開高走低).
         Guard: high==low → 0, flag DOJI_OR_HALT.
         """
         bar_range = ohlcv.high - ohlcv.low
         if bar_range <= 0:
             return 0, "DOJI_OR_HALT"
         ratio = (ohlcv.close - ohlcv.low) / bar_range
-        if 0.5 <= ratio < 0.7:
+        if ratio >= 0.8:
             return 4, None
-        if ratio >= 0.7:
+        if ratio >= 0.6:
             return 2, None
-        return 0, None
+        if ratio >= 0.4:
+            return 0, None
+        return -2, "CLOSE_WEAK_OUT_PATTERN"
 
     def _close_strength_ratio(self, ohlcv: DailyOHLCV) -> float | None:
         """Return (close-low)/(high-low) or None when high==low."""
@@ -1380,6 +1408,22 @@ class TripleConfirmationEngine:
     # Risk deductions
     # ------------------------------------------------------------------
 
+    def _vol_consecutive_surge_count(self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]) -> int:
+        """Count consecutive bars (including today) with vol > 1.5× 20d avg."""
+        vol_20ma = self._volume_20ma(history)
+        if not vol_20ma:
+            return 0
+        threshold = vol_20ma * 1.5
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        all_bars = sorted_h + [ohlcv]
+        count = 0
+        for bar in reversed(all_bars):
+            if bar.volume >= threshold:
+                count += 1
+            else:
+                break
+        return count
+
     def _apply_risk_deductions(
         self,
         bd: _ScoreBreakdown,
@@ -1481,6 +1525,12 @@ class TripleConfirmationEngine:
                 bd.dmi_divergence_deduction = 4
                 bd.flags.append("DMI_DIVERGENCE")
 
+        # 8. 連續爆量 ≥3 日：框架第3根不追（量 > 1.5× 20d avg 連續天數含今日）
+        consec = self._vol_consecutive_surge_count(ohlcv, history)
+        if consec >= 3:
+            bd.vol_consecutive_surge = 5
+            bd.flags.append(f"VOL_DAY{consec}_NO_CHASE")
+
     # ------------------------------------------------------------------
     # Signal building
     # ------------------------------------------------------------------
@@ -1541,6 +1591,8 @@ class TripleConfirmationEngine:
                     "LOW_LIQUIDITY:",
                 )):
                     data_quality_flags.append(f)
+                if "GATE_FAIL:G3_LOW_LIQ" in f:
+                    data_quality_flags.append(f"LOW_LIQUIDITY:{self._market}")
             # v2.2b: COILING flag on gate-failed stocks is still meaningful for watchlist surfacing
             for tag in ("COILING_PRIME", "COILING"):
                 if tag in breakdown.flags and tag not in data_quality_flags:

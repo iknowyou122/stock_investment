@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field as dc_field
 from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
-# Sector heat map models (Phase 2 — ScoutAgent.scan_sectors)
+# Sector heat map models
 # ---------------------------------------------------------------------------
 
 
@@ -176,25 +175,3 @@ class SectorHeatMap(BaseModel):
                 f"淨買超差 {net_sign}{s.avg_net_buyer_count_diff:.0f}"
             )
         return "\n".join(lines)
-
-
-@dataclass
-class AnomalySignal:
-    """Phase 2 market anomaly signal produced by ScoutAgent.
-
-    Feeds StrategistAgent with pre-filtered candidates, reducing daily scan
-    from O(market) to O(anomalies).
-
-    trigger_type values:
-      - "VOLUME_SURGE"       — daily volume exceeded 20-day avg × 2.0
-      - "PRICE_BREAKOUT"     — close is within 1% of or above 20-day high
-      - "SECTOR_CORRELATION" — >= 3 tickers in the same watchlist all had
-                               VOLUME_SURGE + PRICE_BREAKOUT on the same day
-    """
-
-    ticker: str
-    trade_date: date
-    trigger_type: str  # "VOLUME_SURGE" | "PRICE_BREAKOUT" | "SECTOR_CORRELATION"
-    magnitude: float   # volume_ratio or price_pct_above_high
-    description: str
-    data_quality_flags: list[str] = dc_field(default_factory=list)
