@@ -34,6 +34,14 @@ from rich.table import Table
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+# Raise fd limit before heavy parallel I/O (default 256 on macOS is too low)
+try:
+    import resource
+    _soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (min(_hard, 4096), _hard))
+except Exception:
+    pass
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -185,7 +193,7 @@ def _precompute_today_snapshot(
     tickers: list[str],
     analysis_date: date,
     finmind: FinMindClient,
-    workers: int = 8,
+    workers: int = 4,
 ) -> dict[str, dict]:
     """Pass 1: fetch today's bar + 20d avg vol for every ticker (for industry ranking).
 
@@ -476,7 +484,7 @@ def main() -> None:
     parser.add_argument("--no-save", action="store_true", help="不儲存 CSV")
     parser.add_argument("--notify", action="store_true", help="推播 Telegram")
     parser.add_argument("--only-notify", action="store_true", help="僅推播現有 CSV")
-    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
 
     analysis_date = date.fromisoformat(args.date) if args.date else _default_date()
