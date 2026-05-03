@@ -244,7 +244,7 @@ class _ScoreBreakdown:
     ma_alignment_pts: int = 0         # 0/5
     ma20_slope_pts: int = 0           # 0/5
     relative_strength_pts: int = 0    # 0/3/5
-    bb_squeeze_breakout_pts: int = 0  # 0/2/3/5 — (deprecated for compression)
+    bb_squeeze_breakout_pts: int = 0  # 0/2/3/5 — BB_SQUEEZE_SETUP/BREAKOUT
 
     # --- Pillar 4: Accumulation Detection (max 13) ---
     emerging_setup_pts: int = 0       # 0/10
@@ -637,6 +637,11 @@ class TripleConfirmationEngine:
         bd.consolidation_weeks_pts = self._consolidation_weeks_score(ohlcv_history)
         bd.inside_bar_streak_pts = self._inside_bar_streak_score(ohlcv_history)
         bd.prior_advance_pts = self._prior_advance_score(ohlcv_history)
+
+        bb_sq_pts, bb_sq_flag = self._bb_squeeze_breakout_score(ohlcv, ohlcv_history)
+        bd.bb_squeeze_breakout_pts = bb_sq_pts
+        if bb_sq_flag:
+            bd.flags.append(bb_sq_flag)
 
         ma_align_pts, ma_align_flag = self._ma_alignment_score(ohlcv_history)
         bd.ma_alignment_pts = ma_align_pts

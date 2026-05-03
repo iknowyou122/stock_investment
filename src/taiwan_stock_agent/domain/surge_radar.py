@@ -329,6 +329,75 @@ class SurgeRadar:
             return 0, [f"RSI_HOT:{rsi}"]
         return 0, [f"RSI_WEAK:{rsi}"]
 
+    @staticmethod
+    def _calculate_bb(
+        history: list[DailyOHLCV],
+        period: int = 20,
+        num_std: float = 2.0,
+    ) -> tuple[float | None, float | None, float | None]:
+        """Returns (bb_upper, bb_lower, bb_width_raw). bb_width_raw = (upper-lower)/ma."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        closes = pd.Series([d.close for d in sorted_h])
+        if len(closes) < period:
+            return None, None, None
+        ma = closes.rolling(period).mean()
+        std = closes.rolling(period).std(ddof=0)
+        upper = (ma + num_std * std).iloc[-1]
+        lower = (ma - num_std * std).iloc[-1]
+        mid = ma.iloc[-1]
+        if pd.isna(upper) or pd.isna(lower) or not mid:
+            return None, None, None
+        return float(upper), float(lower), float((upper - lower) / mid)
+
+    def _score_bb_squeeze_breakout(
+        self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
+    ) -> tuple[int, list[str]]:
+        """BB squeeze → breakout confirmation for SurgeRadar context.
+
+        Checks that BB was tight in prior sessions (squeeze built up) AND
+        today's close broke above the upper band. Complements G2 volume gate.
+
+        Scoring:
+          +6  prior squeeze (avg width last 5d < 10%) + today > bb_upper + volume > 1.5x
+          +4  prior squeeze + today > bb_upper (no extra volume check)
+          +2  prior squeeze confirmed but still inside bands (pre-breakout bonus)
+           0  no squeeze in prior sessions
+        """
+        if len(history) < 25:
+            return 0, []
+
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+
+        # Check prior squeeze: average BB width over last 5 sessions before today
+        prior_widths: list[float] = []
+        for i in range(max(0, len(sorted_h) - 5), len(sorted_h)):
+            window = sorted_h[max(0, i - 19): i + 1]
+            _, _, w = self._calculate_bb(window)
+            if w is not None:
+                prior_widths.append(w)
+
+        if not prior_widths:
+            return 0, []
+
+        avg_prior_width = sum(prior_widths) / len(prior_widths)
+        if avg_prior_width >= 0.10:
+            return 0, [f"BB_NO_PRIOR_SQUEEZE:{avg_prior_width:.3f}"]
+
+        # Prior squeeze confirmed — now check today
+        bb_upper, _, _ = self._calculate_bb(sorted_h)
+        if bb_upper is None:
+            return 0, []
+
+        f = self._params.get("factors", {})
+        if ohlcv.close <= bb_upper:
+            return f.get("bb_sq_setup", 2), [f"BB_SQ_SETUP:{avg_prior_width:.3f}"]
+
+        # Close broke above upper band
+        vol_20ma = self._vol_20ma(history)
+        if vol_20ma > 0 and ohlcv.volume > vol_20ma * 1.5:
+            return f.get("bb_sq_breakout_vol", 6), [f"BB_SQ_BREAKOUT_VOL:{avg_prior_width:.3f}"]
+        return f.get("bb_sq_breakout", 4), [f"BB_SQ_BREAKOUT:{avg_prior_width:.3f}"]
+
     def _score_margin_not_hot(
         self, proxy: TWSEChipProxy | None
     ) -> tuple[int, list[str]]:
@@ -387,6 +456,7 @@ class SurgeRadar:
             ("breakout_20d", self._score_breakout_20d(ohlcv, history)),
             ("rsi_healthy", self._score_rsi_healthy(history)),
             ("margin_not_hot", self._score_margin_not_hot(proxy)),
+            ("bb_squeeze_breakout", self._score_bb_squeeze_breakout(ohlcv, history)),
         ]
 
         for name, (pts, flags) in factors:

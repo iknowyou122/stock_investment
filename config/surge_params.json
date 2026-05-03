@@ -4,7 +4,7 @@
     "SURGE_BETA": 40,
     "SURGE_GAMMA": 28
   },
-  "raw_max_pts": 85,
+  "raw_max_pts": 91,
   "gates": {
     "min_turnover_tse": 20000000,
     "min_turnover_tpex": 8000000,
@@ -32,6 +32,9 @@
     "relative_strength": 8,
     "breakout_20d": 10,
     "rsi_healthy": 5,
-    "margin_not_hot": 4
+    "margin_not_hot": 4,
+    "bb_sq_setup": 2,
+    "bb_sq_breakout": 4,
+    "bb_sq_breakout_vol": 6
   }
 }
