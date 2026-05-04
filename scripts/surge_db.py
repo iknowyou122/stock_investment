@@ -106,8 +106,6 @@ def settle_pending(db_path: str | None = None) -> int:
     path = db_path or str(_DEFAULT_DB)
     init_db(path)
     today = date.today()
-    updated = 0
-
     with sqlite3.connect(path) as con:
         con.row_factory = sqlite3.Row
         pending = con.execute("""
@@ -117,6 +115,7 @@ def settle_pending(db_path: str | None = None) -> int:
               AND (t1_return_pct IS NULL OR t3_return_pct IS NULL OR t5_return_pct IS NULL)
         """).fetchall()
 
+    all_updates: list[tuple] = []
     for row in pending:
         sig_date = date.fromisoformat(row["signal_date"])
         market = row["market"] or "TSE"
@@ -130,20 +129,26 @@ def settle_pending(db_path: str | None = None) -> int:
             if today < target:
                 continue
             price = _fetch_close(row["ticker"], target, market)
-            if price and close:
+            if price is not None and close:
                 updates[col] = round((price / close - 1) * 100, 3)
 
         if updates:
-            set_clause = ", ".join(f"{k}=?" for k in updates)
-            vals = list(updates.values()) + [str(today), row["id"]]
-            with sqlite3.connect(path) as con:
-                con.execute(
-                    f"UPDATE surge_signals SET {set_clause}, settled_at=? WHERE id=?",
-                    vals,
-                )
-            updated += 1
+            t1 = updates.get("t1_return_pct")
+            t3 = updates.get("t3_return_pct")
+            t5 = updates.get("t5_return_pct")
+            all_updates.append((t1, t3, t5, str(today), row["id"]))
 
-    return updated
+    if all_updates:
+        with sqlite3.connect(path) as con:
+            con.executemany(
+                "UPDATE surge_signals SET t1_return_pct=COALESCE(?,t1_return_pct), "
+                "t3_return_pct=COALESCE(?,t3_return_pct), "
+                "t5_return_pct=COALESCE(?,t5_return_pct), "
+                "settled_at=? WHERE id=?",
+                all_updates,
+            )
+
+    return len(all_updates)
 
 
 def query_settled(
