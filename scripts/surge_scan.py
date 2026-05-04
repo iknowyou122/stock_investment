@@ -171,18 +171,31 @@ def _scan_one_surge(
     market: str,
     taiex_history: list[DailyOHLCV],
     industry_rank_pct: float | None,
+    intraday_bar: DailyOHLCV | None = None,
 ) -> dict | None:
     """Full surge scoring for a single ticker."""
     try:
-        history = _load_history(ticker, analysis_date, finmind)
-        if history is None:
-            return None
-        ohlcv = history[-1]
-        prior_history = history[:-1]
-        if len(prior_history) < 20:
-            return None
+        if intraday_bar is not None:
+            # Intraday mode: FinMind supplies prior history (up to yesterday),
+            # MIS bar is today's ohlcv. Chip data uses most recent available day.
+            history_end = analysis_date - timedelta(days=1)
+            history = _load_history(ticker, history_end, finmind)
+            if history is None or len(history) < 20:
+                return None
+            prior_history = history
+            ohlcv = intraday_bar
+            chip_date = history_end
+        else:
+            history = _load_history(ticker, analysis_date, finmind)
+            if history is None:
+                return None
+            ohlcv = history[-1]
+            prior_history = history[:-1]
+            if len(prior_history) < 20:
+                return None
+            chip_date = analysis_date
 
-        proxy = chip_fetcher.fetch(ticker, analysis_date)
+        proxy = chip_fetcher.fetch(ticker, chip_date)
 
         # TAIEX regime
         taiex_closes = [b.close for b in sorted(taiex_history, key=lambda x: x.trade_date)]
