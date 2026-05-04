@@ -147,6 +147,7 @@ def _fetch_realtime_batch(mis_keys: list[str]) -> dict[str, dict]:
             try:
                 h_val = item.get("h", "-")
                 l_val = item.get("l", "-")
+                o_val = item.get("o", "-")
                 results[ticker] = {
                     "price": price,
                     "price_source": price_source,
@@ -156,6 +157,7 @@ def _fetch_realtime_batch(mis_keys: list[str]) -> dict[str, dict]:
                     "name": item.get("n", ""),
                     "high": float(h_val) if h_val not in ("-", "") else None,
                     "low": float(l_val) if l_val not in ("-", "") else None,
+                    "open": float(o_val) if o_val not in ("-", "") else None,
                 }
             except (ValueError, TypeError):
                 continue
