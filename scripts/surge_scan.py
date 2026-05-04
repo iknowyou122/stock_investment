@@ -437,6 +437,7 @@ def run_surge_scan(
     industry_map: dict[str, str] | None = None,
     csv_path: Path | None = None,
     notify: bool = False,
+    intraday: bool = False,
 ) -> list[dict]:
     from taiwan_stock_agent.infrastructure.twse_client import ChipProxyFetcher
 
@@ -468,8 +469,30 @@ def run_surge_scan(
     except Exception:
         taiex_history = []
 
+    # Intraday mode: batch-fetch current MIS quotes for all tickers.
+    intraday_quotes: dict[str, dict] | None = None
+    intraday_bars: dict[str, DailyOHLCV] = {}
+    time_ratio = 1.0
+    if intraday:
+        time_ratio = _get_time_ratio()
+        if time_ratio < 0.35:
+            _console.print(
+                f"  [yellow]⚠ 盤中時間比例 {time_ratio:.0%}（早盤量能外推誤差大，建議 10:30 後執行）[/yellow]"
+            )
+        _console.print(f"  [dim]盤中模式：抓取 {len(tickers)} 支即時報價…[/dim]")
+        intraday_quotes = _fetch_intraday_quotes(tickers)
+        for ticker, quote in intraday_quotes.items():
+            bar = _build_intraday_bar(ticker, quote, analysis_date, time_ratio)
+            if bar is not None:
+                intraday_bars[ticker] = bar
+        _console.print(f"  [dim]MIS 報價成功 {len(intraday_bars)}/{len(tickers)} 支[/dim]")
+
     # Pass 1: precompute today's snapshot for industry ranking
-    snapshot = _precompute_today_snapshot(tickers, analysis_date, finmind, workers)
+    snapshot = _precompute_today_snapshot(
+        tickers, analysis_date, finmind, workers,
+        intraday_quotes=intraday_quotes,
+        time_ratio=time_ratio,
+    )
     industry_ranks = _compute_industry_strength(snapshot, industry_map)
 
     # Pass 2: full surge scoring
@@ -504,6 +527,7 @@ def run_surge_scan(
                         market_map.get(ticker, "TSE"),
                         taiex_history,
                         ind_rank,
+                        intraday_bars.get(ticker),  # None = use FinMind bar (normal mode)
                     )
                 ] = ticker
             for future in as_completed(futures):
@@ -547,12 +571,17 @@ def main() -> None:
     parser.add_argument("--notify", action="store_true", help="推播 Telegram")
     parser.add_argument("--only-notify", action="store_true", help="僅推播現有 CSV")
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--intraday", action="store_true", help="盤中即時模式（MIS 報價取代 FinMind 今日 bar）")
     args = parser.parse_args()
 
-    analysis_date = date.fromisoformat(args.date) if args.date else _default_date()
+    if args.intraday:
+        analysis_date = date.today()
+    else:
+        analysis_date = date.fromisoformat(args.date) if args.date else _default_date()
 
     scan_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
-    csv_path = scan_dir / f"surge_{analysis_date.isoformat()}.csv"
+    suffix = "live" if args.intraday else analysis_date.isoformat()
+    csv_path = scan_dir / f"surge_{suffix}.csv"
 
     if args.only_notify:
         if csv_path.exists():
@@ -599,6 +628,7 @@ def main() -> None:
         industry_map=industry_map,
         csv_path=final_csv_path,
         notify=args.notify,
+        intraday=args.intraday,
     )
 
 
