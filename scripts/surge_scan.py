@@ -33,10 +33,16 @@ from rich.progress import (
 from rich.table import Table
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).parent))
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+from trade import (  # noqa: E402
+    _fetch_realtime_with_otc_fallback as _mis_fetch,
+    _time_ratio as _get_time_ratio,
+)
 
 from taiwan_stock_agent.domain.models import DailyOHLCV
 from taiwan_stock_agent.domain.surge_radar import SurgeRadar
@@ -89,6 +95,38 @@ def _load_history(
         return None
 
 
+def _build_intraday_bar(
+    ticker: str, quote: dict, today: date, time_ratio: float
+) -> DailyOHLCV | None:
+    """Build a synthetic DailyOHLCV from an MIS real-time quote.
+
+    MIS volume is in 張 (lots). Multiply by 1000 → shares, then divide by
+    time_ratio to project to full-day volume.
+    """
+    price = quote.get("price")
+    if not price or time_ratio <= 0:
+        return None
+    vol_lots = quote.get("volume") or 0
+    projected_vol = int(vol_lots * 1000 / time_ratio)
+    open_price = quote.get("open") or price
+    high = quote.get("high") or price
+    low = quote.get("low") or price
+    return DailyOHLCV(
+        ticker=ticker,
+        trade_date=today,
+        open=float(open_price),
+        high=float(high),
+        low=float(low),
+        close=float(price),
+        volume=projected_vol,
+    )
+
+
+def _fetch_intraday_quotes(tickers: list[str]) -> dict[str, dict]:
+    """Batch-fetch current MIS quotes for all tickers (TSE → TPEx fallback)."""
+    return _mis_fetch(tickers)
+
+
 def _compute_industry_strength(
     per_ticker_today: dict[str, dict],
     industry_map: dict[str, str],
@@ -133,18 +171,31 @@ def _scan_one_surge(
     market: str,
     taiex_history: list[DailyOHLCV],
     industry_rank_pct: float | None,
+    intraday_bar: DailyOHLCV | None = None,
 ) -> dict | None:
     """Full surge scoring for a single ticker."""
     try:
-        history = _load_history(ticker, analysis_date, finmind)
-        if history is None:
-            return None
-        ohlcv = history[-1]
-        prior_history = history[:-1]
-        if len(prior_history) < 20:
-            return None
+        if intraday_bar is not None:
+            # Intraday mode: FinMind supplies prior history (up to yesterday),
+            # MIS bar is today's ohlcv. Chip data uses most recent available day.
+            history_end = analysis_date - timedelta(days=1)
+            history = _load_history(ticker, history_end, finmind)
+            if history is None or len(history) < 20:
+                return None
+            prior_history = history
+            ohlcv = intraday_bar
+            chip_date = history_end
+        else:
+            history = _load_history(ticker, analysis_date, finmind)
+            if history is None:
+                return None
+            ohlcv = history[-1]
+            prior_history = history[:-1]
+            if len(prior_history) < 20:
+                return None
+            chip_date = analysis_date
 
-        proxy = chip_fetcher.fetch(ticker, analysis_date)
+        proxy = chip_fetcher.fetch(ticker, chip_date)
 
         # TAIEX regime
         taiex_closes = [b.close for b in sorted(taiex_history, key=lambda x: x.trade_date)]
@@ -186,6 +237,8 @@ def _precompute_today_snapshot(
     analysis_date: date,
     finmind: FinMindClient,
     workers: int = 8,
+    intraday_quotes: dict[str, dict] | None = None,
+    time_ratio: float = 1.0,
 ) -> dict[str, dict]:
     """Pass 1: fetch today's bar + 20d avg vol for every ticker (for industry ranking).
 
@@ -194,17 +247,34 @@ def _precompute_today_snapshot(
     snapshot: dict[str, dict] = {}
 
     def _one(ticker: str) -> tuple[str, dict] | None:
-        history = _load_history(ticker, analysis_date, finmind)
-        if history is None or len(history) < 21:
-            return None
-        today = history[-1]
-        prior = history[:-1]
-        vols = [b.volume for b in prior[-20:]]
-        vol_20ma = sum(vols) / len(vols) if vols else 0
-        vol_ratio = today.volume / vol_20ma if vol_20ma > 0 else 0
-        prev_close = prior[-1].close if prior else 0
-        day_chg_pct = (today.close / prev_close - 1) * 100 if prev_close > 0 else 0
-        return ticker, {"vol_ratio": vol_ratio, "day_chg_pct": day_chg_pct}
+        if intraday_quotes and ticker in intraday_quotes:
+            # Intraday: get 20-day avg from FinMind history (up to yesterday),
+            # use MIS quote for today's vol/price.
+            history_end = analysis_date - timedelta(days=1)
+            history = _load_history(ticker, history_end, finmind)
+            if history is None or len(history) < 20:
+                return None
+            vols = [b.volume for b in history[-20:]]
+            vol_20ma = sum(vols) / len(vols) if vols else 0
+            q = intraday_quotes[ticker]
+            proj_vol = (q.get("volume", 0) * 1000 / time_ratio) if time_ratio > 0 else 0
+            vol_ratio = proj_vol / vol_20ma if vol_20ma > 0 else 0
+            prev_close = q.get("yesterday_close") or 0
+            price = q.get("price") or 0
+            day_chg_pct = (price / prev_close - 1) * 100 if prev_close > 0 else 0
+            return ticker, {"vol_ratio": vol_ratio, "day_chg_pct": day_chg_pct}
+        else:
+            history = _load_history(ticker, analysis_date, finmind)
+            if history is None or len(history) < 21:
+                return None
+            today_bar = history[-1]
+            prior = history[:-1]
+            vols = [b.volume for b in prior[-20:]]
+            vol_20ma = sum(vols) / len(vols) if vols else 0
+            vol_ratio = today_bar.volume / vol_20ma if vol_20ma > 0 else 0
+            prev_close = prior[-1].close if prior else 0
+            day_chg_pct = (today_bar.close / prev_close - 1) * 100 if prev_close > 0 else 0
+            return ticker, {"vol_ratio": vol_ratio, "day_chg_pct": day_chg_pct}
 
     with Progress(
         SpinnerColumn(),
@@ -367,6 +437,7 @@ def run_surge_scan(
     industry_map: dict[str, str] | None = None,
     csv_path: Path | None = None,
     notify: bool = False,
+    intraday: bool = False,
 ) -> list[dict]:
     from taiwan_stock_agent.infrastructure.twse_client import ChipProxyFetcher
 
@@ -398,8 +469,30 @@ def run_surge_scan(
     except Exception:
         taiex_history = []
 
+    # Intraday mode: batch-fetch current MIS quotes for all tickers.
+    intraday_quotes: dict[str, dict] | None = None
+    intraday_bars: dict[str, DailyOHLCV] = {}
+    time_ratio = 1.0
+    if intraday:
+        time_ratio = _get_time_ratio()
+        if time_ratio < 0.35:
+            _console.print(
+                f"  [yellow]⚠ 盤中時間比例 {time_ratio:.0%}（早盤量能外推誤差大，建議 10:30 後執行）[/yellow]"
+            )
+        _console.print(f"  [dim]盤中模式：抓取 {len(tickers)} 支即時報價…[/dim]")
+        intraday_quotes = _fetch_intraday_quotes(tickers)
+        for ticker, quote in intraday_quotes.items():
+            bar = _build_intraday_bar(ticker, quote, analysis_date, time_ratio)
+            if bar is not None:
+                intraday_bars[ticker] = bar
+        _console.print(f"  [dim]MIS 報價成功 {len(intraday_bars)}/{len(tickers)} 支[/dim]")
+
     # Pass 1: precompute today's snapshot for industry ranking
-    snapshot = _precompute_today_snapshot(tickers, analysis_date, finmind, workers)
+    snapshot = _precompute_today_snapshot(
+        tickers, analysis_date, finmind, workers,
+        intraday_quotes=intraday_quotes,
+        time_ratio=time_ratio,
+    )
     industry_ranks = _compute_industry_strength(snapshot, industry_map)
 
     # Pass 2: full surge scoring
@@ -434,6 +527,7 @@ def run_surge_scan(
                         market_map.get(ticker, "TSE"),
                         taiex_history,
                         ind_rank,
+                        intraday_bars.get(ticker),  # None = use FinMind bar (normal mode)
                     )
                 ] = ticker
             for future in as_completed(futures):
@@ -477,12 +571,17 @@ def main() -> None:
     parser.add_argument("--notify", action="store_true", help="推播 Telegram")
     parser.add_argument("--only-notify", action="store_true", help="僅推播現有 CSV")
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--intraday", action="store_true", help="盤中即時模式（MIS 報價取代 FinMind 今日 bar）")
     args = parser.parse_args()
 
-    analysis_date = date.fromisoformat(args.date) if args.date else _default_date()
+    if args.intraday:
+        analysis_date = date.today()
+    else:
+        analysis_date = date.fromisoformat(args.date) if args.date else _default_date()
 
     scan_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
-    csv_path = scan_dir / f"surge_{analysis_date.isoformat()}.csv"
+    suffix = "live" if args.intraday else analysis_date.isoformat()
+    csv_path = scan_dir / f"surge_{suffix}.csv"
 
     if args.only_notify:
         if csv_path.exists():
@@ -529,6 +628,7 @@ def main() -> None:
         industry_map=industry_map,
         csv_path=final_csv_path,
         notify=args.notify,
+        intraday=args.intraday,
     )
 
 

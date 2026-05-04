@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan trade trade-t2 report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge
+.PHONY: plan trade trade-t2 report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -198,6 +198,9 @@ bot:
 # ── 噴發雷達掃描（短線爆量捕捉）─────────────────────────────────────────────
 surge:
 	$(PYTHON) scripts/surge_scan.py --save-csv $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(DATE),--date $(DATE))
+
+surge-live:
+	$(PYTHON) scripts/surge_scan.py --intraday $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS))
 
 # ── 信號準確度監控 ──────────────────────────────────────────────────────────────
 # 載入歷史 scan CSV，驗證突破結果，顯示滾動勝率 Dashboard
