@@ -237,6 +237,8 @@ def _precompute_today_snapshot(
     analysis_date: date,
     finmind: FinMindClient,
     workers: int = 8,
+    intraday_quotes: dict[str, dict] | None = None,
+    time_ratio: float = 1.0,
 ) -> dict[str, dict]:
     """Pass 1: fetch today's bar + 20d avg vol for every ticker (for industry ranking).
 
@@ -245,17 +247,34 @@ def _precompute_today_snapshot(
     snapshot: dict[str, dict] = {}
 
     def _one(ticker: str) -> tuple[str, dict] | None:
-        history = _load_history(ticker, analysis_date, finmind)
-        if history is None or len(history) < 21:
-            return None
-        today = history[-1]
-        prior = history[:-1]
-        vols = [b.volume for b in prior[-20:]]
-        vol_20ma = sum(vols) / len(vols) if vols else 0
-        vol_ratio = today.volume / vol_20ma if vol_20ma > 0 else 0
-        prev_close = prior[-1].close if prior else 0
-        day_chg_pct = (today.close / prev_close - 1) * 100 if prev_close > 0 else 0
-        return ticker, {"vol_ratio": vol_ratio, "day_chg_pct": day_chg_pct}
+        if intraday_quotes and ticker in intraday_quotes:
+            # Intraday: get 20-day avg from FinMind history (up to yesterday),
+            # use MIS quote for today's vol/price.
+            history_end = analysis_date - timedelta(days=1)
+            history = _load_history(ticker, history_end, finmind)
+            if history is None or len(history) < 20:
+                return None
+            vols = [b.volume for b in history[-20:]]
+            vol_20ma = sum(vols) / len(vols) if vols else 0
+            q = intraday_quotes[ticker]
+            proj_vol = (q.get("volume", 0) * 1000 / time_ratio) if time_ratio > 0 else 0
+            vol_ratio = proj_vol / vol_20ma if vol_20ma > 0 else 0
+            prev_close = q.get("yesterday_close") or 0
+            price = q.get("price") or 0
+            day_chg_pct = (price / prev_close - 1) * 100 if prev_close > 0 else 0
+            return ticker, {"vol_ratio": vol_ratio, "day_chg_pct": day_chg_pct}
+        else:
+            history = _load_history(ticker, analysis_date, finmind)
+            if history is None or len(history) < 21:
+                return None
+            today_bar = history[-1]
+            prior = history[:-1]
+            vols = [b.volume for b in prior[-20:]]
+            vol_20ma = sum(vols) / len(vols) if vols else 0
+            vol_ratio = today_bar.volume / vol_20ma if vol_20ma > 0 else 0
+            prev_close = prior[-1].close if prior else 0
+            day_chg_pct = (today_bar.close / prev_close - 1) * 100 if prev_close > 0 else 0
+            return ticker, {"vol_ratio": vol_ratio, "day_chg_pct": day_chg_pct}
 
     with Progress(
         SpinnerColumn(),
