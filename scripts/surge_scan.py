@@ -14,6 +14,7 @@ import argparse
 import csv
 import json
 import os
+import resource
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
@@ -62,6 +63,12 @@ GRADE_COLOR = {
     "SURGE_ALPHA": "bold red",
     "SURGE_BETA": "bold yellow",
     "SURGE_GAMMA": "cyan",
+}
+
+GRADE_ZH = {
+    "SURGE_ALPHA": "強噴★",
+    "SURGE_BETA": "噴發",
+    "SURGE_GAMMA": "量增",
 }
 
 
@@ -306,21 +313,21 @@ def _print_surge_table(results: list[dict], scan_date: str, name_map: dict[str, 
         _console.print("  [dim]無符合條件的噴發標的[/dim]")
         return
     tbl = Table(
-        box=box.ROUNDED, show_header=True, header_style="bold red", border_style="dim"
+        box=box.ROUNDED, show_header=True, header_style="bold red", border_style="dim",
     )
-    tbl.add_column("Rank", justify="right", width=4)
-    tbl.add_column("代號", width=8)
-    tbl.add_column("名稱", width=12)
-    tbl.add_column("等級", width=12)
-    tbl.add_column("分數", justify="right", width=6)
-    tbl.add_column("量比", justify="right", width=6)
-    tbl.add_column("漲幅%", justify="right", width=7)
-    tbl.add_column("收位", justify="right", width=6)
-    tbl.add_column("跳空%", justify="right", width=6)
-    tbl.add_column("爆量日", justify="right", width=6)
-    tbl.add_column("產業排名", justify="right", width=8)
-    tbl.add_column("法人連買", justify="right", width=8)
-    tbl.add_column("RSI", justify="right", width=5)
+    tbl.add_column("排名",   justify="right")
+    tbl.add_column("代號")
+    tbl.add_column("名稱",   max_width=12)
+    tbl.add_column("等級",   no_wrap=True)
+    tbl.add_column("分數",   justify="right")
+    tbl.add_column("量比",   justify="right")
+    tbl.add_column("漲幅%",  justify="right")
+    tbl.add_column("收位",   justify="right")
+    tbl.add_column("跳空%",  justify="right")
+    tbl.add_column("爆量日", justify="right")
+    tbl.add_column("產業排名", justify="right")
+    tbl.add_column("法人連買", justify="right")
+    tbl.add_column("RSI",    justify="right")
 
     sorted_r = sorted(results, key=lambda x: x.get("score", 0), reverse=True)
     for i, r in enumerate(sorted_r, 1):
@@ -332,11 +339,12 @@ def _print_surge_table(results: list[dict], scan_date: str, name_map: dict[str, 
         ind_str = f"{ind_pct:.0f}%" if ind_pct is not None else "--"
         rsi = r.get("rsi")
         rsi_str = f"{rsi:.0f}" if rsi is not None else "--"
+        grade_zh = GRADE_ZH.get(grade, grade)
         tbl.add_row(
             str(i),
             f"[{style}]{ticker}[/{style}]",
             name,
-            f"[{style}]{grade}[/{style}]",
+            f"[{style}]{grade_zh}[/{style}]",
             str(r.get("score", 0)),
             f"{r.get('vol_ratio', 0):.2f}",
             f"{r.get('day_chg_pct', 0):+.2f}",
@@ -550,7 +558,18 @@ def run_surge_scan(
     return results
 
 
+def _raise_fd_limit() -> None:
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = min(hard, 4096) if hard != resource.RLIM_INFINITY else 4096
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except Exception:
+        pass
+
+
 def main() -> None:
+    _raise_fd_limit()
     from batch_plan import (
         _DEFAULT_SECTOR_NAMES,
         _build_industry_map,
