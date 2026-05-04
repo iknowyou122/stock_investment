@@ -33,10 +33,16 @@ from rich.progress import (
 from rich.table import Table
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).parent))
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+from trade import (  # noqa: E402
+    _fetch_realtime_with_otc_fallback as _mis_fetch,
+    _time_ratio as _get_time_ratio,
+)
 
 from taiwan_stock_agent.domain.models import DailyOHLCV
 from taiwan_stock_agent.domain.surge_radar import SurgeRadar
@@ -87,6 +93,38 @@ def _load_history(
         return history
     except Exception:
         return None
+
+
+def _build_intraday_bar(
+    ticker: str, quote: dict, today: date, time_ratio: float
+) -> DailyOHLCV | None:
+    """Build a synthetic DailyOHLCV from an MIS real-time quote.
+
+    MIS volume is in 張 (lots). Multiply by 1000 → shares, then divide by
+    time_ratio to project to full-day volume.
+    """
+    price = quote.get("price")
+    if not price or time_ratio <= 0:
+        return None
+    vol_lots = quote.get("volume") or 0
+    projected_vol = int(vol_lots * 1000 / time_ratio)
+    open_price = quote.get("open") or price
+    high = quote.get("high") or price
+    low = quote.get("low") or price
+    return DailyOHLCV(
+        ticker=ticker,
+        trade_date=today,
+        open=float(open_price),
+        high=float(high),
+        low=float(low),
+        close=float(price),
+        volume=projected_vol,
+    )
+
+
+def _fetch_intraday_quotes(tickers: list[str]) -> dict[str, dict]:
+    """Batch-fetch current MIS quotes for all tickers (TSE → TPEx fallback)."""
+    return _mis_fetch(tickers)
 
 
 def _compute_industry_strength(
