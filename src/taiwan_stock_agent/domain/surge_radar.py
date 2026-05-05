@@ -174,6 +174,8 @@ class SurgeRadar:
             return 0, []
         ratio = ohlcv.volume / vol_20ma
         f = self._params.get("factors", {})
+        # >3x scores LESS than 2-3x by design: extreme volume in Taiwan often signals
+        # short squeeze, news-driven retail chase, or distribution — not institutional accumulation.
         if ratio >= 3.0:
             return f.get("vol_ratio_extreme_warn", 5), [f"VOL_EXTREME:{ratio:.2f}x"]
         if ratio >= 2.0:
@@ -236,6 +238,8 @@ class SurgeRadar:
         if len(sorted_h) < 11:
             return 0, []
         last10 = sorted_h[-10:]
+        # Taiwan daily data has no intraday tick split, so total volume proxies up-volume.
+        # On strong up-days selling pressure is low, so total ≈ up-volume (O'Neil proxy).
         down_vols = [
             b.volume for i, b in enumerate(last10)
             if i > 0 and b.close < last10[i - 1].close
@@ -376,6 +380,9 @@ class SurgeRadar:
         breakdown: dict[str, int] = {}
         raw = 0
 
+        # pocket_pivot and breakout_20d frequently co-fire (both require price above recent
+        # highs with strong volume). Combined max = 22/85 pts. Intentional: double confirmation
+        # raises conviction. Adjust individual weights in surge_params.json if over-rewarding.
         factors = [
             ("vol_ratio", self._score_vol_ratio(ohlcv, history)),
             ("close_strength", self._score_close_strength(ohlcv)),
