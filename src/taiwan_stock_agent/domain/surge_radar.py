@@ -424,6 +424,7 @@ class SurgeRadar:
             "surge_day": consec,
             "industry_rank_pct": industry_rank_pct,
             "rsi": self._rsi(history),
+            "close_price": float(ohlcv.close),
             "inst_consec_days": max(
                 proxy.foreign_consecutive_buy_days, proxy.trust_consecutive_buy_days
             ) if proxy and proxy.is_available else 0,

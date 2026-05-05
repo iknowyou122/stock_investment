@@ -49,6 +49,12 @@ from taiwan_stock_agent.domain.models import DailyOHLCV
 from taiwan_stock_agent.domain.surge_radar import SurgeRadar
 from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
 
+try:
+    from surge_db import insert_signals as _surge_db_insert
+    _HAS_SURGE_DB = True
+except ImportError:
+    _HAS_SURGE_DB = False
+
 _console = Console()
 _lock = Lock()
 
@@ -358,6 +364,242 @@ def _print_surge_table(results: list[dict], scan_date: str, name_map: dict[str, 
     _console.print(tbl)
 
 
+def _fetch_chart_candles(ticker: str, market: str) -> dict:
+    """Fetch 3-month daily OHLCV + Bollinger Bands (20,2) via yfinance."""
+    suffix = ".TW" if market == "TSE" else ".TWO"
+    empty = {"candles": [], "bb_upper": [], "bb_mid": [], "bb_lower": []}
+    try:
+        import pandas as pd
+        import yfinance as yf
+        # Fetch extra warmup bars so BB covers every displayed candle
+        period = 20
+        hist = yf.download(
+            f"{ticker}{suffix}", period="5mo", interval="1d",
+            progress=False, auto_adjust=True, multi_level_index=False,
+        )
+        rows = []
+        for idx, row in hist.iterrows():
+            try:
+                o, h, l, c = float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"])
+                if any(pd.isna(v) for v in [o, h, l, c]):
+                    continue
+                rows.append({"time": str(idx.date()), "open": round(o, 2),
+                             "high": round(h, 2), "low": round(l, 2), "close": round(c, 2)})
+            except Exception:
+                continue
+        if len(rows) < period:
+            return empty
+        # Bollinger Bands (period=20, multiplier=2) — computed on full history
+        closes = [r["close"] for r in rows]
+        bb_upper, bb_mid, bb_lower = [], [], []
+        for i in range(period - 1, len(rows)):
+            window = closes[i - period + 1 : i + 1]
+            mean = sum(window) / period
+            std = (sum((x - mean) ** 2 for x in window) / period) ** 0.5
+            t = rows[i]["time"]
+            bb_upper.append({"time": t, "value": round(mean + 2 * std, 2)})
+            bb_mid.append({"time": t, "value": round(mean, 2)})
+            bb_lower.append({"time": t, "value": round(mean - 2 * std, 2)})
+        # Trim candles to only bars that have BB (drop the warmup-only head)
+        display_rows = rows[period - 1:]
+        return {"candles": display_rows, "bb_upper": bb_upper, "bb_mid": bb_mid, "bb_lower": bb_lower}
+    except Exception:
+        return empty
+
+
+def _generate_html_report(
+    results: list[dict],
+    scan_date: str,
+    name_map: dict[str, str],
+    html_path: Path,
+    intraday: bool = False,
+    industry_map: dict[str, str] | None = None,
+) -> None:
+    """Generate a dark-themed HTML report with per-stock links."""
+    from html import escape as _esc
+
+    sorted_r = sorted(results, key=lambda x: x.get("score", 0), reverse=True)
+    alpha = sum(1 for r in sorted_r if r.get("grade") == "SURGE_ALPHA")
+    beta  = sum(1 for r in sorted_r if r.get("grade") == "SURGE_BETA")
+    gamma = sum(1 for r in sorted_r if r.get("grade") == "SURGE_GAMMA")
+    mode  = "盤中即時" if intraday else "收盤掃描"
+
+    _GRADE_CLASS = {"SURGE_ALPHA": "alpha", "SURGE_BETA": "beta", "SURGE_GAMMA": "gamma"}
+
+    # Batch-fetch OHLCV for inline charts (yfinance, 8 workers)
+    _console.print("  [dim]抓取線圖資料（yfinance）…[/dim]")
+    pairs = [(r.get("ticker", ""), r.get("market", "TSE")) for r in sorted_r]
+    chart_data: dict[str, list] = {}
+    for _t, _m in pairs:
+        chart_data[_t] = _fetch_chart_candles(_t, _m)
+    ok = sum(1 for v in chart_data.values() if v)
+    _console.print(f"  [dim]線圖資料：{ok}/{len(pairs)} 支取得[/dim]")
+
+
+    _ind_map = industry_map or {}
+    cards: list[str] = []
+
+    for i, r in enumerate(sorted_r):
+        ticker   = r.get("ticker", "")
+        name     = _esc(r.get("name") or name_map.get(ticker, ticker))
+        industry = _esc(r.get("industry") or _ind_map.get(ticker, ""))
+        grade    = r.get("grade", "")
+        grade_zh = GRADE_ZH.get(grade, grade)
+        gcls     = _GRADE_CLASS.get(grade, "gamma")
+        score    = r.get("score", 0)
+        vol      = r.get("vol_ratio", 0)
+        chg      = r.get("day_chg_pct", 0)
+        rsi      = r.get("rsi")
+        ind_pct  = r.get("industry_rank_pct")
+        inst     = r.get("inst_consec_days", 0)
+        market   = r.get("market", "TSE")
+        exchange = "TWSE" if market == "TSE" else "TPEX"
+        symbol   = f"{exchange}:{ticker}"
+        tv_url   = f"https://www.tradingview.com/chart/?symbol={exchange}%3A{ticker}"
+        gi_url   = f"https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID={ticker}"
+
+        chg_cls  = "pos" if chg > 0 else ("neg" if chg < 0 else "")
+        vol_cls  = "pos" if vol >= 2 else ""
+        rsi_s    = f"{rsi:.0f}" if rsi is not None else "--"
+        ind_s    = f"{ind_pct:.0f}%" if ind_pct is not None else "--"
+        delay    = f"{i * 0.05:.2f}"
+
+        cards.append(f"""
+    <div class="card" style="animation-delay:{delay}s">
+      <div class="card-header">
+        <div class="rank">{i+1}</div>
+        <div class="info">
+          <div class="ticker">{_esc(ticker)} <span class="tname">{name}</span></div>
+          <div class="cname">{industry}</div>
+        </div>
+        <div class="badge g-{gcls}">{_esc(grade_zh)}</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">{score}</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv {vol_cls}">{vol:.1f}x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv {chg_cls}">{chg:+.2f}%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">{rsi_s}</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">{ind_s}</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">{inst}</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" data-ticker="{_esc(ticker)}"></div>
+      <div class="links">
+        <a class="link-btn tv" href="{tv_url}" target="_blank" rel="noopener">TradingView</a>
+        <a class="link-btn gi" href="{gi_url}" target="_blank" rel="noopener">Goodinfo</a>
+      </div>
+    </div>""")
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>噴發雷達 {_esc(scan_date)}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}}
+.header{{background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);padding:32px;border-bottom:1px solid #21262d}}
+.header h1{{font-size:30px;font-weight:800;color:#ff6b6b;letter-spacing:-0.5px}}
+.subtitle{{color:#8b949e;margin-top:6px;font-size:14px}}
+.stats{{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap}}
+.stat{{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:12px 20px}}
+.sv{{font-size:24px;font-weight:700}}.sl{{font-size:11px;color:#8b949e;margin-top:2px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:16px;padding:24px}}
+.card{{background:#161b22;border:1px solid #21262d;border-radius:12px;overflow:hidden;
+  transition:border-color .2s,transform .2s;animation:fadeIn .5s ease forwards;opacity:0}}
+.card:hover{{border-color:#388bfd;transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,0,.4)}}
+@keyframes fadeIn{{to{{opacity:1}}}}
+.card-header{{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid #21262d}}
+.rank{{background:#21262d;border-radius:8px;width:34px;height:34px;display:flex;align-items:center;
+  justify-content:center;font-weight:700;font-size:13px;color:#8b949e;flex-shrink:0}}
+.info{{flex:1;min-width:0}}
+.ticker{{font-size:16px;font-weight:700;letter-spacing:1px;display:flex;align-items:baseline;gap:6px}}
+.tname{{font-size:15px;font-weight:600;color:#e6edf3}}
+.cname{{font-size:11px;color:#8b949e;margin-top:2px}}
+.badge{{padding:5px 12px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;flex-shrink:0}}
+.g-alpha{{background:rgba(248,81,73,.15);color:#ff6b6b;border:1px solid rgba(248,81,73,.3)}}
+.g-beta{{background:rgba(210,153,34,.15);color:#e3b341;border:1px solid rgba(210,153,34,.3)}}
+.g-gamma{{background:rgba(56,189,248,.15);color:#38bdf8;border:1px solid rgba(56,189,248,.3)}}
+.metrics{{display:flex;border-bottom:1px solid #21262d}}
+.m{{flex:1;padding:10px 6px;text-align:center;border-right:1px solid #21262d}}
+.m:last-child{{border-right:none}}
+.mv{{font-size:13px;font-weight:600}}.ml{{font-size:10px;color:#8b949e;margin-top:2px}}
+.pos{{color:#3fb950}}.neg{{color:#f85149}}
+.chart{{height:240px;background:#0d1117;position:relative}}
+.chart-ph{{display:flex;align-items:center;justify-content:center;height:100%;color:#484f58;font-size:12px}}
+.links{{display:flex;gap:8px;padding:10px 16px;background:#0d1117;border-top:1px solid #21262d}}
+.link-btn{{flex:1;display:block;text-align:center;padding:8px;border-radius:6px;font-size:12px;font-weight:600;
+  text-decoration:none;transition:opacity .15s}}
+.link-btn:hover{{opacity:.8}}
+.tv{{background:#1565c0;color:#fff}}
+.gi{{background:#1b4332;color:#3fb950;border:1px solid #236840}}
+.footer{{text-align:center;padding:32px;color:#484f58;font-size:12px}}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>🔥 噴發雷達</h1>
+  <div class="subtitle">{_esc(scan_date)} &nbsp;·&nbsp; {_esc(mode)} &nbsp;·&nbsp; 共 {len(sorted_r)} 支</div>
+  <div class="stats">
+    <div class="stat"><div class="sv" style="color:#ff6b6b">{alpha}</div><div class="sl">強噴★</div></div>
+    <div class="stat"><div class="sv" style="color:#e3b341">{beta}</div><div class="sl">噴發</div></div>
+    <div class="stat"><div class="sv" style="color:#38bdf8">{gamma}</div><div class="sl">量增</div></div>
+  </div>
+</div>
+<div class="grid">
+{"".join(cards)}
+</div>
+<div class="footer">噴發雷達自動生成 · {_esc(scan_date)}</div>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+const CHART_DATA = {json.dumps(chart_data, ensure_ascii=False)};
+
+const _obs = new IntersectionObserver(function(entries) {{
+  entries.forEach(function(e) {{
+    if (!e.isIntersecting || e.target.dataset.init) return;
+    e.target.dataset.init = "1";
+    _obs.unobserve(e.target);
+    const ticker = e.target.dataset.ticker;
+    const data = CHART_DATA[ticker];
+    if (!data || !data.candles || data.candles.length === 0) {{
+      e.target.innerHTML = '<div class="chart-ph">暫無資料</div>';
+      return;
+    }}
+    const chart = LightweightCharts.createChart(e.target, {{
+      autoSize: true,
+      height: 240,
+      layout: {{ background: {{ type: "solid", color: "#0d1117" }}, textColor: "#8b949e" }},
+      grid: {{ vertLines: {{ color: "#21262d" }}, horzLines: {{ color: "#21262d" }} }},
+      rightPriceScale: {{ borderColor: "#30363d" }},
+      timeScale: {{ borderColor: "#30363d", timeVisible: false }},
+      crosshair: {{ mode: 1 }},
+    }});
+    const cs = chart.addCandlestickSeries({{
+      upColor: "#3fb950", downColor: "#f85149",
+      borderUpColor: "#3fb950", borderDownColor: "#f85149",
+      wickUpColor: "#3fb950", wickDownColor: "#f85149",
+    }});
+    cs.setData(data.candles);
+    const lineOpts = {{ lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }};
+    const bbMid = chart.addLineSeries(Object.assign({{}}, lineOpts, {{ color: "#58a6ff" }}));
+    bbMid.setData(data.bb_mid);
+    const bbUp = chart.addLineSeries(Object.assign({{}}, lineOpts, {{ color: "#e3b341", lineStyle: 0 }}));
+    bbUp.setData(data.bb_upper);
+    const bbLo = chart.addLineSeries(Object.assign({{}}, lineOpts, {{ color: "#a371f7", lineStyle: 0 }}));
+    bbLo.setData(data.bb_lower);
+    chart.timeScale().fitContent();
+  }});
+}}, {{ rootMargin: "100px" }});
+
+document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.observe(el); }});
+</script>
+</body>
+</html>"""
+
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+    html_path.write_text(html, encoding="utf-8")
+
+
 def _save_surge_csv(
     results: list[dict],
     scan_date: str,
@@ -550,8 +792,36 @@ def run_surge_scan(
 
     _print_surge_table(results, scan_date, name_map)
 
+    if _HAS_SURGE_DB and results:
+        _db_rows = []
+        for r in results:
+            ticker = r.get("ticker", "")
+            _db_rows.append({
+                "signal_date": str(scan_date),
+                "ticker": ticker,
+                "grade": r.get("grade", ""),
+                "score": r.get("score", 0),
+                "vol_ratio": r.get("vol_ratio"),
+                "day_chg_pct": r.get("day_chg_pct"),
+                "gap_pct": r.get("gap_pct"),
+                "close_strength": r.get("close_strength"),
+                "rsi": r.get("rsi"),
+                "inst_consec_days": r.get("inst_consec_days", 0),
+                "industry_rank_pct": r.get("industry_rank_pct"),
+                "close_price": r.get("close_price"),
+                "market": r.get("market", "TSE"),
+                "industry": industry_map.get(ticker, ""),
+                "score_breakdown": json.dumps(r.get("score_breakdown") or {}),
+            })
+        inserted = _surge_db_insert(_db_rows)
+        _console.print(f"  [dim]📋 surge_signals DB: {inserted} 筆新增[/dim]")
+
     if csv_path and results:
         _save_surge_csv(results, scan_date, analysis_date, csv_path, name_map, industry_map)
+        html_path = csv_path.with_suffix(".html")
+        _generate_html_report(results, scan_date, name_map or {}, html_path, intraday=intraday, industry_map=industry_map)
+        _console.print(f"  [green]📊 HTML 報告:[/green] file://{html_path.resolve()}")
+        os.system(f'open "{html_path.resolve()}"')
         if notify:
             _notify_surge_telegram(csv_path, scan_date)
 
@@ -629,6 +899,10 @@ def main() -> None:
             if not chosen:
                 _console.print("  [yellow]指定代號無效，使用預設產業[/yellow]")
                 chosen = _DEFAULT_SECTOR_NAMES
+        elif not sys.stdin.isatty():
+            # Non-interactive (e.g. make flow): use default sectors silently
+            chosen = _DEFAULT_SECTOR_NAMES
+            _console.print(f"  [dim]非互動模式，使用預設產業（{len(chosen)} 個）[/dim]")
         else:
             rows = _sector_menu(industry_map)
             chosen = _select_sectors(rows, _DEFAULT_SECTOR_NAMES)
