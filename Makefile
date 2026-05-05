@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan trade trade-t2 report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live
+.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -30,27 +30,9 @@ else
 	$(PYTHON) scripts/batch_plan.py --save-csv --save-db --date $(DATE) --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
 endif
 
-# ── 盤中執行交易 (Trade) ──────────────────────────────────────────────────────
-# 讀取昨日 CSV → 即時報價 → 哪些還能進場
-# 用法: make trade
-#       make trade TOP=10 MIN_CONF=50
 TOP     ?= 20
 MIN_CONF ?= 40
 CSV     ?=
-
-trade:
-	$(PYTHON) scripts/trade.py \
-		--top $(TOP) \
-		--min-confidence $(MIN_CONF) \
-		$(if $(CSV),--csv $(CSV))
-
-# T+2 進場確認：自動載入 2 個交易日前的 CSV（D+2 勝率 55.6% > D+0 38.5%）
-# 用法: make trade-t2
-trade-t2:
-	$(PYTHON) scripts/trade.py \
-		--t2 \
-		--top $(TOP) \
-		--min-confidence $(MIN_CONF)
 
 # ── 歷史掃描結果查詢 ──────────────────────────────────────────────────────────
 # 用法: make show              # 互動式選擇日期
@@ -201,6 +183,17 @@ surge:
 
 surge-live:
 	$(PYTHON) scripts/surge_scan.py --intraday $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS))
+
+# ── Surge 因子分析 + LLM 優化 ──────────────────────────────────────────────
+# 用法: make surge-factor              # 顯示因子 Lift 表（不呼叫 LLM）
+#       make surge-tune               # LLM 建議 + 互動式套用
+MIN_SIGNALS ?= 30
+
+surge-factor:
+	$(PYTHON) scripts/surge_factor_report.py --min-signals $(MIN_SIGNALS)
+
+surge-tune:
+	$(PYTHON) scripts/surge_factor_report.py --llm --apply --min-signals $(MIN_SIGNALS)
 
 # ── 信號準確度監控 ──────────────────────────────────────────────────────────────
 # 載入歷史 scan CSV，驗證突破結果，顯示滾動勝率 Dashboard
