@@ -783,6 +783,17 @@ def run_review(review_date: date) -> None:
     settled = run_t1_settle(review_date)
     _console.print(f"  [dim]結算完成: {len(settled)} 筆[/dim]")
 
+    # Step 1b: Surge signal settlement (T+1/T+3/T+5)
+    _console.print("\n[Step 1b] Surge 信號結算（T+1/T+3/T+5）...")
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent))
+        from surge_db import settle_pending as _surge_settle
+        n_settled = _surge_settle()
+        _console.print(f"  結算完成: {n_settled} 筆 surge 信號")
+    except Exception as _e:
+        _console.print(f"  [dim]surge 結算略過: {_e}[/dim]")
+
     # Step 2: Rolling win rate
     _console.print(f"[bold cyan][Step 2][/bold cyan] 計算滾動 {_ROLLING_WINDOW_DAYS} 日勝率...")
     wins, total, win_rate = _compute_rolling_win_rate()
