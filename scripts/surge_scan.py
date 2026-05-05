@@ -426,13 +426,19 @@ def _generate_html_report(
 
     _GRADE_CLASS = {"SURGE_ALPHA": "alpha", "SURGE_BETA": "beta", "SURGE_GAMMA": "gamma"}
 
-    # Batch-fetch OHLCV for inline charts (yfinance, 8 workers)
+    # Batch-fetch OHLCV for inline charts (yfinance, parallel)
     _console.print("  [dim]抓取線圖資料（yfinance）…[/dim]")
     pairs = [(r.get("ticker", ""), r.get("market", "TSE")) for r in sorted_r]
-    chart_data: dict[str, list] = {}
-    for _t, _m in pairs:
-        chart_data[_t] = _fetch_chart_candles(_t, _m)
-    ok = sum(1 for v in chart_data.values() if v)
+    chart_data: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=8) as _pool:
+        _chart_futures = {_pool.submit(_fetch_chart_candles, _t, _m): _t for _t, _m in pairs}
+        for _fut in as_completed(_chart_futures):
+            _ticker = _chart_futures[_fut]
+            try:
+                chart_data[_ticker] = _fut.result()
+            except Exception:
+                chart_data[_ticker] = {"candles": [], "bb_upper": [], "bb_mid": [], "bb_lower": []}
+    ok = sum(1 for v in chart_data.values() if v.get("candles"))
     _console.print(f"  [dim]線圖資料：{ok}/{len(pairs)} 支取得[/dim]")
 
 
