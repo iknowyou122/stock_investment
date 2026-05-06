@@ -13,7 +13,7 @@ install:
 	$(PYTHON) -m pip install -e ".[llm-gemini,llm-openai]"
 
 # ── 盤後擬定計畫 (Plan) ──────────────────────────────────────────────────────
-# 掃描 + 存 CSV（trade 用）+ 寫 DB（factor-report 用）
+# 掃描 + 存 CSV + 寫 DB（factor-report 用）
 # 用法: make plan
 #       make plan LLM=gemini LLM_TOP=5
 #       make plan SECTORS="1 4"

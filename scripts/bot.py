@@ -18,7 +18,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -46,7 +45,6 @@ from rich import box
 from taiwan_stock_agent.utils.trading_calendar import is_trading_day
 from taiwan_stock_agent.utils.bot_formatters import (
     format_opening_list,
-    format_entry_signal,
     format_postmarket_report,
 )
 from taiwan_stock_agent.utils.param_safety import validate_changes, apply_changes, rollback_params
@@ -55,8 +53,9 @@ _console = Console()
 _ROOT = Path(__file__).resolve().parents[1]
 _SCAN_DIR = _ROOT / "data" / "scans"
 _NAME_MAP_DIR = _ROOT / "data" / "watchlist_cache"
-_HITS_DIR = _ROOT / "data" / "intraday_hits"
-_PARAMS_PATH = _ROOT / "config" / "engine_params.json"
+_SURGE_CSV    = _ROOT / "data" / "scans" / "surge_live.csv"
+_SURGE_HTML   = _ROOT / "data" / "scans" / "surge_live.html"
+_PARAMS_PATH  = _ROOT / "config" / "engine_params.json"
 _HISTORY_PATH = _ROOT / "config" / "param_history.json"
 _PENDING_PATH = _ROOT / "config" / "pending_change.json"
 
@@ -87,11 +86,13 @@ logger = logging.getLogger(__name__)
 # ── In-memory state ─────────────────────────────────────────────────────────
 _state: dict = {
     "shortlist": [],           # list[dict] — today's top signals, max 20
+    "surge_signals": [],       # list[dict] — latest surge-live results
+    "surge_updated_at": None,  # datetime
+    "surge_lock": None,        # asyncio.Lock, initialised in main_async()
     "monitoring_active": True,
     "last_scan_time": None,
     "llm": "claude",
     "scan_lock": None,         # asyncio.Lock, initialised in main_async()
-    "precheck_lock": None,     # asyncio.Lock, initialised in main_async()
     "app": None,               # Telegram Application
     "chat_id": None,
     "last_cmd": None,          # (cmd_name, status, time) — shown in status panel
@@ -104,6 +105,7 @@ _MARKET_CACHE: dict = {
     "global": {},      # key → {"price": float, "change_pct": float}  (yfinance)
     "sectors": [],     # list[{"code", "abbr", "price", "change_pct"}]  (TWSE MIS)
     "watchlist": {},   # ticker → {"price", "change_pct", "prev_close", "is_live"}
+    "surge": {},       # ticker → {"price", "change_pct", "prev_close", "is_live"}
     "sentiment": None, # MarketSentiment | None
     "updated_at": None,
 }
@@ -179,29 +181,29 @@ def _get_latest_market_map() -> dict[str, str]:
 
 
 def _fetch_watchlist_prices_sync(tickers: list[str]) -> dict[str, dict | None]:
-    """Fetch real-time prices for watchlist tickers via TWSE/TPEx MIS API.
+    """Fetch real-time prices for watchlist tickers.
 
+    Primary: TWSE/TPEx MIS API (real-time during trading hours).
+    Fallback: yfinance (.TW / .TWO) when MIS is unreachable.
     Returns dict[ticker → {"price", "change_pct", "prev_close", "is_live"}].
-    During non-trading hours `z` is "-" so we fall back to prev_close with
-    is_live=False to signal the panel to render it as a reference price.
     """
     if not tickers:
         return {}
     import requests
+    import yfinance as yf
     market_map = _get_latest_market_map()
 
-    parts = []
-    for ticker in tickers:
-        market = market_map.get(ticker, "TSE")
-        prefix = "otc" if market == "TPEx" else "tse"
-        parts.append(f"{prefix}_{ticker}.tw")
-
-    ex_ch = "|".join(parts)
+    # ── Primary: MIS API ─────────────────────────────────────────────────────
     try:
+        parts = []
+        for ticker in tickers:
+            market = market_map.get(ticker, "TSE")
+            prefix = "otc" if market == "TPEx" else "tse"
+            parts.append(f"{prefix}_{ticker}.tw")
         resp = requests.get(
             "https://mis.twse.com.tw/stock/api/getStockInfo.jsp",
-            params={"ex_ch": ex_ch},
-            timeout=10,
+            params={"ex_ch": "|".join(parts)},
+            timeout=8,
             verify=False,
         )
         items = resp.json().get("msgArray", [])
@@ -237,8 +239,26 @@ def _fetch_watchlist_prices_sync(tickers: list[str]) -> dict[str, dict | None]:
                 result[ticker] = None
         return result
     except Exception as e:
-        logger.debug("watchlist price fetch error: %s", e)
-        return {}
+        logger.debug("MIS unavailable, falling back to yfinance: %s", e)
+
+    # ── Fallback: yfinance (.TW / .TWO) ─────────────────────────────────────
+    result = {}
+    for ticker in tickers:
+        market = market_map.get(ticker, "TSE")
+        suffix = ".TWO" if market == "TPEx" else ".TW"
+        sym = f"{ticker}{suffix}"
+        try:
+            fi = yf.Ticker(sym).fast_info
+            price = fi.last_price
+            prev = fi.previous_close
+            if price and prev:
+                chg = (price - prev) / prev * 100
+                result[ticker] = {"price": price, "change_pct": chg, "prev_close": prev, "is_live": False}
+            else:
+                result[ticker] = None
+        except Exception:
+            result[ticker] = None
+    return result
 
 
 def _fetch_global_markets_sync() -> dict:
@@ -321,15 +341,17 @@ def _fetch_sentiment_sync() -> "MarketSentiment | None":
 
 
 async def _refresh_market_loop() -> None:
-    """Background task: refresh global (yfinance) + TW sectors (MIS) + watchlist prices every 60 s."""
+    """Background task: refresh global + TW sectors + watchlist + surge prices every 30 s."""
     loop = asyncio.get_event_loop()
     while True:
         try:
-            tickers = [s["ticker"] for s in _state.get("shortlist", [])]
-            global_data, sector_data, wl_data, sentiment = await asyncio.gather(
+            wl_tickers    = [s["ticker"] for s in _state.get("shortlist", [])]
+            surge_tickers = [s["ticker"] for s in _state.get("surge_signals", [])]
+            global_data, sector_data, wl_data, surge_data, sentiment = await asyncio.gather(
                 loop.run_in_executor(None, _fetch_global_markets_sync),
                 loop.run_in_executor(None, _fetch_tw_sectors_sync),
-                loop.run_in_executor(None, _fetch_watchlist_prices_sync, tickers),
+                loop.run_in_executor(None, _fetch_watchlist_prices_sync, wl_tickers),
+                loop.run_in_executor(None, _fetch_watchlist_prices_sync, surge_tickers),
                 loop.run_in_executor(None, _fetch_sentiment_sync),
             )
             if global_data:
@@ -338,6 +360,8 @@ async def _refresh_market_loop() -> None:
                 _MARKET_CACHE["sectors"] = sector_data
             if wl_data:
                 _MARKET_CACHE["watchlist"] = wl_data
+            if surge_data:
+                _MARKET_CACHE["surge"] = surge_data
             if sentiment:
                 _MARKET_CACHE["sentiment"] = sentiment
                 logger.info("市場情緒數據更新成功")
@@ -478,58 +502,31 @@ def _parse_scan_csv(path: Path, min_conf: int = 40, max_n: int = 20) -> list[dic
     return signals[:max_n]
 
 
-def _write_temp_shortlist_csv(signals: list[dict]) -> Path:
-    """Write shortlist to a temp CSV compatible with precheck.py --csv."""
-    today = date.today()
-    tmp = Path(tempfile.mktemp(suffix=".csv"))
-    fieldnames = [
-        "scan_date", "analysis_date", "ticker", "action", "confidence",
-        "free_tier", "halt", "entry_bid", "stop_loss", "target",
-        "momentum", "chip_analysis", "risk_factors", "data_quality_flags",
-    ]
-    with open(tmp, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for s in signals:
-            writer.writerow({
-                "scan_date": str(today),
-                "analysis_date": str(today),
-                "ticker": s["ticker"],
-                "action": s["action"],
-                "confidence": s["confidence"],
-                "free_tier": "True",
-                "halt": "False",
-                "entry_bid": s["entry_bid"],
-                "stop_loss": s["stop_loss"],
-                "target": s["target"],
-                "momentum": "",
-                "chip_analysis": "",
-                "risk_factors": "",
-                "data_quality_flags": s.get("flags", ""),
-            })
-    return tmp
-
-
-# ── Intraday hit tracking ────────────────────────────────────────────────────
-
-def _load_intraday_hits(hit_date: date) -> list[dict]:
-    path = _HITS_DIR / f"{hit_date}.json"
+def _parse_surge_csv(path: Path, min_score: int = 50, max_n: int = 30) -> list[dict]:
     if not path.exists():
         return []
-    return json.loads(path.read_text())
-
-
-def _save_intraday_hit(ticker: str, price: float, triggered: bool) -> None:
-    _HITS_DIR.mkdir(parents=True, exist_ok=True)
-    path = _HITS_DIR / f"{date.today()}.json"
-    hits = json.loads(path.read_text()) if path.exists() else []
-    hits.append({
-        "ticker": ticker,
-        "time": datetime.now().isoformat(),
-        "price": price,
-        "triggered": triggered,
-    })
-    path.write_text(json.dumps(hits, indent=2, ensure_ascii=False))
+    rows = []
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            try:
+                score = int(float(row.get("score", 0) or 0))
+                if score < min_score:
+                    continue
+                rows.append({
+                    "ticker":           row.get("ticker", ""),
+                    "name":             row.get("name", ""),
+                    "grade":            row.get("grade", ""),
+                    "score":            score,
+                    "vol_ratio":        float(row.get("vol_ratio", 0) or 0),
+                    "day_chg_pct":      float(row.get("day_chg_pct", 0) or 0),
+                    "rsi":              float(row.get("rsi", 0) or 0) or None,
+                    "industry":         row.get("industry", ""),
+                    "inst_consec_days": int(float(row.get("inst_consec_days", 0) or 0)),
+                })
+            except (ValueError, TypeError):
+                continue
+    rows.sort(key=lambda x: x["score"], reverse=True)
+    return rows[:max_n]
 
 
 # ── Scheduled jobs ───────────────────────────────────────────────────────────
@@ -607,76 +604,44 @@ async def _job_hourly_rescan() -> None:
             await _send(f"🔄 {t0:%H:%M} 重掃完成（{elapsed}s），名單無異動（共 {len(new_list)} 檔）")
 
 
-async def _job_precheck(force: bool = False, notify_fn=None) -> None:
-    """Every 10 min — check entry conditions for shortlist via precheck.py --csv."""
-    if not force and not is_trading_day(date.today()):
-        logger.info("precheck skipped — not a trading day")
-        return
-    if not _state["monitoring_active"]:
-        logger.info("precheck skipped — monitoring paused")
-        return
-    if _state["precheck_lock"].locked():
-        logger.info("precheck skipped — previous round still running")
+async def _job_surge_live(force: bool = False, notify_fn=None) -> None:
+    """Every 1 min during trading hours — run surge_scan.py --intraday and refresh surge panel."""
+    if not force:
+        if not is_trading_day(date.today()):
+            logger.info("surge_live skipped — not a trading day")
+            return
+        now = datetime.now()
+        market_open  = now.replace(hour=9,  minute=0,  second=0, microsecond=0)
+        market_close = now.replace(hour=13, minute=30, second=0, microsecond=0)
+        if not (market_open <= now <= market_close):
+            logger.info("surge_live skipped — outside trading hours")
+            return
+    if _state["surge_lock"].locked():
+        logger.info("surge_live skipped — previous scan still running")
         return
     notify = notify_fn or _send
-    async with _state["precheck_lock"]:
-        if not _state["shortlist"]:
-            logger.info("precheck skipped — shortlist empty")
-            await notify("⚠ 名單為空，請先執行 /plan 掃描")
-            return
-        n = len(_state["shortlist"])
-        logger.info("precheck START n=%d force=%s", n, force)
-        await notify(f"🔔 *Precheck 開始* {datetime.now():%H:%M}\n正在取得 {n} 檔即時報價...")
-        tmp_csv = _write_temp_shortlist_csv(_state["shortlist"])
-        try:
-            t0 = datetime.now()
-            code, out = await _run_subprocess_async([
-                sys.executable, "scripts/trade.py",
-                "--csv", str(tmp_csv), "--min-confidence", "0",
-            ])
-        finally:
-            tmp_csv.unlink(missing_ok=True)
+    async with _state["surge_lock"]:
+        t0 = datetime.now()
+        logger.info("surge_live START force=%s", force)
+        code, out = await _run_subprocess_async([
+            sys.executable, "scripts/surge_scan.py",
+            "--intraday", "--save-csv", "--no-html",
+        ])
         elapsed = int((datetime.now() - t0).total_seconds())
-        await notify(f"📡 報價取得完成（{elapsed}s），正在分析進場條件...")
-
-        # Parse machine-readable result line: PRECHECK_RESULTS:{"ticker": "PASS"|"WARN"|"SKIP"|"NO_DATA"}
-        lines = out.split("\n")
-        results_map: dict[str, str] = {}
-        for line in lines:
-            if line.startswith("PRECHECK_RESULTS:"):
-                try:
-                    results_map = json.loads(line.split(":", 1)[1])
-                except Exception:
-                    pass
-                break
-
-        triggered_count = 0
-        for s in _state["shortlist"]:
-            ticker = s["ticker"]
-            status = results_map.get(ticker, "")
-            triggered = status == "PASS"
-            _save_intraday_hit(ticker, s["entry_bid"], triggered)
-            if triggered:
-                triggered_count += 1
-                logger.info("precheck TRIGGERED ticker=%s entry=%.2f", ticker, s["entry_bid"])
-                await _send(format_entry_signal(
-                    ticker, s.get("name", ""),
-                    price=s["entry_bid"],
-                    entry_low=s["entry_bid"] * 0.97,
-                    entry_high=s["entry_bid"] * 1.03,
-                    stop=s["stop_loss"],
-                ))
-
-        if not results_map:
-            # precheck.py exited before market hours or no CSV found
-            logger.warning("precheck got no PRECHECK_RESULTS line (exit code=%d)", code)
-            await notify("⚠ Precheck 無結果（可能非盤中時段或找不到 CSV）")
-        elif triggered_count == 0:
-            logger.info("precheck DONE triggered=0/%d", n)
-            await notify(f"⏳ Precheck 完成，{n} 檔均未達進場條件")
-        else:
-            logger.info("precheck DONE triggered=%d/%d", triggered_count, n)
-            await notify(f"✅ Precheck 完成，{triggered_count}/{n} 檔達進場條件")
+        if code != 0:
+            logger.error("surge_live FAILED code=%d elapsed=%ds", code, elapsed)
+            await notify(f"❌ Surge 掃描失敗（{elapsed}s）")
+            return
+        signals = _parse_surge_csv(_SURGE_CSV)
+        _state["surge_signals"] = signals
+        _state["surge_updated_at"] = datetime.now()
+        alpha = sum(1 for s in signals if s["grade"] == "SURGE_ALPHA")
+        beta  = sum(1 for s in signals if s["grade"] == "SURGE_BETA")
+        logger.info("surge_live DONE elapsed=%ds signals=%d α=%d β=%d", elapsed, len(signals), alpha, beta)
+        await notify(
+            f"⚡ *Surge 掃描完成*（{elapsed}s）\n"
+            f"共 {len(signals)} 筆：α {alpha} · β {beta} · γ {len(signals)-alpha-beta}"
+        )
 
 
 async def _job_postmarket_report(force: bool = False, notify_fn=None) -> None:
@@ -696,17 +661,16 @@ async def _job_postmarket_report(force: bool = False, notify_fn=None) -> None:
         else:
             logger.info("postmarket_report scan done elapsed=%ds", elapsed)
 
-    await notify(f"📊 掃描完成（{elapsed}s），正在計算今日命中率...")
+    await notify(f"📊 掃描完成（{elapsed}s），正在產生盤後報告...")
     yesterday_csv = _latest_scan_csv(1)
     yesterday_signals = _parse_scan_csv(yesterday_csv) if yesterday_csv else []
-    intraday_hits = _load_intraday_hits(date.today())
     tomorrow_csv = _latest_scan_csv(0)
     tomorrow_signals = _parse_scan_csv(tomorrow_csv) if tomorrow_csv else []
-    logger.info("postmarket_report yesterday=%d hits=%d tomorrow=%d", len(yesterday_signals), len(intraday_hits), len(tomorrow_signals))
+    logger.info("postmarket_report yesterday=%d tomorrow=%d", len(yesterday_signals), len(tomorrow_signals))
 
     await _send(format_postmarket_report(
         yesterday_signals=yesterday_signals,
-        intraday_hits=intraday_hits,
+        intraday_hits=[],
         tomorrow_signals=tomorrow_signals,
         report_date=str(date.today()),
     ))
@@ -782,16 +746,13 @@ async def cmd_plan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _job_opening_scan(force=True, notify_fn=_send)
 
 
-@_track("trade")
-async def cmd_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("CMD /trade from user=%s", update.effective_user.id if update.effective_user else "?")
-    if not _state["shortlist"]:
-        await update.message.reply_text("⚠ 名單為空，請先執行 /plan")
+@_track("surge")
+async def cmd_surge(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("CMD /surge from user=%s", update.effective_user.id if update.effective_user else "?")
+    if _state["surge_lock"].locked():
+        await update.message.reply_text("⚠ Surge 掃描進行中，請稍候")
         return
-    if _state["precheck_lock"].locked():
-        await update.message.reply_text("⚠ trade 進行中，請稍候")
-        return
-    await _job_precheck(force=True, notify_fn=_send)
+    await _job_surge_live(force=True, notify_fn=_send)
 
 
 @_track("report")
@@ -892,7 +853,7 @@ async def cmd_test(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     passed = sum(1 for r in results if r.startswith(ok))
     await reply(
         f"🧪 *指令邏輯測試結果* {passed}/{len(results)} 通過\n\n{summary}\n\n"
-        f"手動觸發指令：/plan /trade /report /optimize",
+        f"手動觸發指令：/plan /surge /report /optimize",
         parse_mode="Markdown",
     )
 
@@ -936,7 +897,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "\n"
         "*手動觸發*\n"
         "/plan         全市場掃描，更新今日名單並推播\n"
-        "/trade        對名單即時取報價，達進場條件發警報\n"
+        "/surge        爆量雷達盤中即時掃描（Surge Live）\n"
         "/report       盤後報告（命中率 \\+ 隔日名單）\n"
         "/optimize     啟動 AI 參數優化 Agent\n"
         "\n"
@@ -946,8 +907,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/params       查看當前引擎參數\n"
         "\n"
         "*控制*\n"
-        "/pause        暫停盤中 precheck 自動推播\n"
-        "/resume       恢復盤中 precheck 自動推播\n"
+        "/pause        暫停盤中自動推播\n"
+        "/resume       恢復盤中自動推播\n"
         "\n"
         "*優化*\n"
         "/approve      套用待確認的 AI 優化建議\n"
@@ -960,7 +921,6 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "⏰ *自動排程*\n"
         "09:05          開盤掃描 \\+ 推播名單\n"
         "10–13:05       每小時重掃，有異動才推\n"
-        "09:05–13:25    每 10 分鐘 precheck\n"
         "17:00          盤後報告\n"
         "週二/五 18:00  AI 優化"
     )
@@ -1126,8 +1086,8 @@ def _render_status_panel() -> Panel:
         t.add_row("[dim]市場輿情[/dim]", "[dim]⌛ 數據讀取中...[/dim]")
 
     t.add_row("", "")
-    t.add_row("[dim]Schedule[/dim]", "[dim]09:05 scan · 10-13 rescan · 09:05-13:25 trade/10min · 17:00 report · Tue/Fri optimize[/dim]")
-    t.add_row("[dim]Commands[/dim]", "[dim]/plan  /trade  /report  /optimize  /approve  /rollback  /top  /test[/dim]")
+    t.add_row("[dim]Schedule[/dim]", "[dim]09:05 scan · 10-13 rescan · 09:05-13:05/30min surge · 17:00 report · Tue/Fri optimize[/dim]")
+    t.add_row("[dim]Commands[/dim]", "[dim]/plan  /surge  /report  /optimize  /approve  /rollback  /top  /test[/dim]")
 
     return Panel(t, title="[bold blue]Bot Status[/bold blue]", border_style="blue", box=box.ROUNDED)
 
@@ -1272,6 +1232,99 @@ def _render_global_panel() -> Panel:
                  border_style="yellow", box=box.ROUNDED)
 
 
+def _render_surge_panel() -> Panel:
+    """Surge Live signals panel — top爆量 results from latest intraday scan."""
+    signals = _state.get("surge_signals", [])
+    updated = _state.get("surge_updated_at")
+    if updated:
+        html_link = f"[link=file://{_SURGE_HTML.resolve()}]📊 HTML[/link]" if _SURGE_HTML.exists() else ""
+        sub = f"[dim]{updated.strftime('%H:%M:%S')}[/dim]  {html_link}"
+    else:
+        sub = "[dim]尚未掃描 · /surge 手動觸發[/dim]"
+
+    _GRADE_COLOR = {
+        "SURGE_ALPHA": "bold bright_red",
+        "SURGE_BETA":  "red",
+        "SURGE_GAMMA": "yellow",
+    }
+    _GRADE_ZH = {
+        "SURGE_ALPHA": "強噴★",
+        "SURGE_BETA":  "噴發",
+        "SURGE_GAMMA": "量增",
+    }
+
+    if not signals:
+        return Panel(
+            Text("\n  (尚無資料)", style="dim"),
+            title="[bold magenta]⚡ Surge Live[/bold magenta]",
+            subtitle=sub,
+            border_style="magenta",
+            box=box.ROUNDED,
+        )
+
+    surge_prices = _MARKET_CACHE.get("surge", {})
+
+    t = Table(box=None, show_header=True, header_style="bold magenta", padding=(0, 1), expand=True)
+    t.add_column("#",      width=3,    no_wrap=True)
+    t.add_column("代號",   width=6,    no_wrap=True)
+    t.add_column("名稱",   max_width=6, no_wrap=True)
+    t.add_column("等級",   width=5,    justify="center", no_wrap=True)
+    t.add_column("現價",   width=7,    justify="right",  no_wrap=True)
+    t.add_column("漲幅",   width=7,    justify="right",  no_wrap=True)
+    t.add_column("量比",   width=5,    justify="right",  no_wrap=True)
+    t.add_column("分數",   width=4,    justify="right",  no_wrap=True)
+
+    for i, s in enumerate(signals, 1):
+        grade   = s.get("grade", "")
+        clr     = _GRADE_COLOR.get(grade, "dim")
+        label   = _GRADE_ZH.get(grade, grade)
+        vol     = s.get("vol_ratio", 0)
+        chg     = s.get("day_chg_pct", 0)
+        chg_clr = _chg_color(chg)
+        sign    = "+" if chg >= 0 else ""
+        vol_clr = "bold bright_red" if vol >= 3 else ("red" if vol >= 2 else "dim")
+
+        # Real-time price from MIS cache
+        pd = surge_prices.get(s["ticker"])
+        if pd and pd.get("price") is not None:
+            live     = pd.get("is_live", False)
+            rt_price = pd["price"]
+            rt_chg   = pd["change_pct"]
+            rt_clr   = _chg_color(rt_chg)
+            rt_sign  = "+" if rt_chg >= 0 else ""
+            price_str = f"[{rt_clr}]{rt_price:.2f}[/{rt_clr}]" if live else f"[dim]{rt_price:.2f}[/dim]"
+            chg_str   = f"[{rt_clr}]{_arrow(rt_chg)} {rt_sign}{rt_chg:.2f}%[/{rt_clr}]" if live else f"[dim]{sign}{chg:.2f}%[/dim]"
+        else:
+            price_str = "[dim]--[/dim]"
+            chg_str   = f"[{chg_clr}]{sign}{chg:.2f}%[/{chg_clr}]"
+
+        t.add_row(
+            f"[dim]{i}[/dim]",
+            f"[cyan]{s['ticker']}[/cyan]",
+            (s.get("name") or "")[:6],
+            f"[{clr}]{label}[/{clr}]",
+            price_str,
+            chg_str,
+            f"[{vol_clr}]{vol:.1f}x[/{vol_clr}]",
+            f"[{clr}]{s['score']}[/{clr}]",
+        )
+
+    alpha = sum(1 for s in signals if s["grade"] == "SURGE_ALPHA")
+    beta  = sum(1 for s in signals if s["grade"] == "SURGE_BETA")
+    gamma = len(signals) - alpha - beta
+    counts = Text.from_markup(
+        f"[dim]強噴★ {alpha}  噴發 {beta}  量增 {gamma}  共 {len(signals)}[/dim]",
+        justify="right",
+    )
+    return Panel(
+        Group(t, counts),
+        title="[bold magenta]⚡ Surge Live[/bold magenta]",
+        subtitle=sub,
+        border_style="magenta",
+        box=box.ROUNDED,
+    )
+
+
 # ── LLM selection ────────────────────────────────────────────────────────────
 
 def _select_llm(arg: str | None) -> str:
@@ -1345,22 +1398,21 @@ def _render_watchlist_detail_panel() -> Panel:
 
 def _try_preload_shortlist() -> None:
     """On startup, populate shortlist from the most recent scan CSV (today or yesterday)."""
-    for offset in (0, 1, 2):
-        csv_path = _latest_scan_csv(offset)
-        if csv_path:
-            signals = _parse_scan_csv(csv_path)
-            if signals:
-                _state["shortlist"] = signals
-                _state["last_scan_time"] = datetime.fromtimestamp(csv_path.stat().st_mtime)
-                logger.info("startup: preloaded shortlist n=%d from %s", len(signals), csv_path.name)
-                return
+    paths = sorted(_SCAN_DIR.glob("scan_????-??-??.csv"), reverse=True)
+    for csv_path in paths[:10]:
+        signals = _parse_scan_csv(csv_path)
+        if signals:
+            _state["shortlist"] = signals
+            _state["last_scan_time"] = datetime.fromtimestamp(csv_path.stat().st_mtime)
+            logger.info("startup: preloaded shortlist n=%d from %s", len(signals), csv_path.name)
+            return
     logger.info("startup: no scan CSV found, shortlist empty")
 
 
 async def main_async(llm: str) -> None:
     _state["llm"] = llm
-    _state["scan_lock"] = asyncio.Lock()
-    _state["precheck_lock"] = asyncio.Lock()
+    _state["scan_lock"]  = asyncio.Lock()
+    _state["surge_lock"] = asyncio.Lock()
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -1369,6 +1421,12 @@ async def main_async(llm: str) -> None:
         sys.exit(1)
     _state["chat_id"] = chat_id
     _try_preload_shortlist()
+    # Preload surge signals from existing CSV if available
+    surge_signals = _parse_surge_csv(_SURGE_CSV)
+    if surge_signals:
+        _state["surge_signals"] = surge_signals
+        _state["surge_updated_at"] = datetime.fromtimestamp(_SURGE_CSV.stat().st_mtime)
+        logger.info("startup: preloaded surge signals n=%d", len(surge_signals))
     logger.info("Bot START llm=%s chat_id=%s log=%s", llm, chat_id, _LOG_PATH)
 
     app = Application.builder().token(token).build()
@@ -1380,7 +1438,7 @@ async def main_async(llm: str) -> None:
         ("pause", cmd_pause), ("resume", cmd_resume),
         ("params", cmd_params), ("optimize", cmd_optimize),
         ("approve", cmd_approve), ("rollback", cmd_rollback),
-        ("plan", cmd_plan), ("trade", cmd_trade), ("report", cmd_report),
+        ("plan", cmd_plan), ("surge", cmd_surge), ("report", cmd_report),
         ("test", cmd_test), ("help", cmd_help),
     ]:
         app.add_handler(CommandHandler(cmd_name, handler))
@@ -1391,19 +1449,8 @@ async def main_async(llm: str) -> None:
     # Hourly rescan 10:05–13:05
     for h in [10, 11, 12, 13]:
         scheduler.add_job(_job_hourly_rescan, "cron", day_of_week="mon-fri", hour=h, minute=5)
-    # 10-min precheck 09:05–13:25 (market hours, close at 13:30)
-    scheduler.add_job(
-        _job_precheck, "cron",
-        day_of_week="mon-fri",
-        hour="9-12",
-        minute="5,15,25,35,45,55",
-    )
-    scheduler.add_job(
-        _job_precheck, "cron",
-        day_of_week="mon-fri",
-        hour="13",
-        minute="5,15,25",
-    )
+    # Surge live: every 30 min during trading hours 09:05–13:05
+    scheduler.add_job(_job_surge_live, "interval", minutes=1)
     # 17:00 post-market report
     scheduler.add_job(_job_postmarket_report, "cron", day_of_week="mon-fri", hour=17, minute=0)
     # 18:00 optimize on Tue and Fri
@@ -1417,7 +1464,7 @@ async def main_async(llm: str) -> None:
     # Start background market data refresh
     market_task = asyncio.create_task(_refresh_market_loop())
 
-    # Build dashboard: header strip + main body + log footer
+    # Build dashboard: header + left/right columns + log footer
     layout = Layout()
     layout.split_column(
         Layout(name="header", size=3),
@@ -1425,26 +1472,28 @@ async def main_async(llm: str) -> None:
         Layout(name="footer", size=7),
     )
     layout["main"].split_row(
-        Layout(name="left", ratio=1),
-        Layout(name="right", ratio=1),
+        Layout(name="left",  ratio=5),
+        Layout(name="right", ratio=6),
     )
-    
-    # Left Column: Bot Status, Market Monitor, Global Markets (3 blocks)
+    # Left: Bot Status · Market Monitor · Global Markets
     layout["left"].split_column(
-        Layout(name="bot_l", ratio=1),
+        Layout(name="bot_l",  ratio=1),
         Layout(name="market", ratio=1),
         Layout(name="global", ratio=1),
     )
-    
-    # Right Column: Watchlist Prices
-    layout["right"].update(_render_watchlist_detail_panel())
+    # Right: Surge Live (top) + Watchlist Prices (bottom)
+    layout["right"].split_column(
+        Layout(name="surge",     ratio=3),
+        Layout(name="watchlist", ratio=2),
+    )
 
     def _update_layout() -> None:
         layout["header"].update(_render_header())
         layout["bot_l"].update(_render_status_panel())
         layout["market"].update(_render_market_panel())
         layout["global"].update(_render_global_panel())
-        layout["right"].update(_render_watchlist_detail_panel())
+        layout["surge"].update(_render_surge_panel())
+        layout["watchlist"].update(_render_watchlist_detail_panel())
         layout["footer"].update(_render_log_panel())
 
     _update_layout()

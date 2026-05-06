@@ -16,10 +16,15 @@ import json
 import os
 import resource
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
+
+import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from rich import box
 from rich.console import Console
@@ -40,11 +45,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from trade import (  # noqa: E402
-    _fetch_realtime_with_otc_fallback as _mis_fetch,
-    _time_ratio as _get_time_ratio,
-)
-
 from taiwan_stock_agent.domain.models import DailyOHLCV
 from taiwan_stock_agent.domain.surge_radar import SurgeRadar
 from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
@@ -57,6 +57,90 @@ except ImportError:
 
 _console = Console()
 _lock = Lock()
+
+# ── TWSE MIS real-time quote helpers ─────────────────────────────────────────
+
+_MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+_MIS_BATCH = 20
+
+
+def _fetch_realtime_batch(mis_keys: list[str]) -> dict[str, dict]:
+    results: dict[str, dict] = {}
+    for i in range(0, len(mis_keys), _MIS_BATCH):
+        batch = mis_keys[i : i + _MIS_BATCH]
+        ex_ch = "|".join(batch)
+        try:
+            resp = requests.get(
+                _MIS_URL,
+                params={"ex_ch": ex_ch, "json": "1", "delay": "0", "_": str(int(time.time() * 1000))},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10,
+                verify=False,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            continue
+        for item in data.get("msgArray", []):
+            ticker = item.get("c", "")
+            if not ticker:
+                continue
+            price: float | None = None
+            price_source = ""
+            for field, src in [("z", "last"), ("b", "bid"), ("o", "open")]:
+                val = item.get(field, "-")
+                if val not in ("-", ""):
+                    try:
+                        price = float(val.split("_")[0]) if src == "bid" else float(val)
+                        price_source = src
+                        break
+                    except ValueError:
+                        pass
+            if price is None:
+                h_str, l_str = item.get("h", "-"), item.get("l", "-")
+                if h_str not in ("-", "") and l_str not in ("-", ""):
+                    try:
+                        price = (float(h_str) + float(l_str)) / 2
+                        price_source = "hl_mid"
+                    except ValueError:
+                        pass
+            if price is None:
+                continue
+            try:
+                results[ticker] = {
+                    "price": price,
+                    "price_source": price_source,
+                    "volume": int(item.get("v", "0").replace(",", "")),
+                    "yesterday_close": float(item.get("y", "0")),
+                    "timestamp": item.get("t", ""),
+                    "name": item.get("n", ""),
+                    "high": float(item["h"]) if item.get("h", "-") not in ("-", "") else None,
+                    "low": float(item["l"]) if item.get("l", "-") not in ("-", "") else None,
+                    "open": float(item["o"]) if item.get("o", "-") not in ("-", "") else None,
+                }
+            except (ValueError, TypeError):
+                continue
+        if i + _MIS_BATCH < len(mis_keys):
+            time.sleep(0.3)
+    return results
+
+
+def _mis_fetch(tickers: list[str]) -> dict[str, dict]:
+    """Fetch real-time quotes; retry missing tickers as OTC."""
+    results = _fetch_realtime_batch([f"tse_{t}.tw" for t in tickers])
+    missing = [t for t in tickers if t not in results]
+    if missing:
+        results.update(_fetch_realtime_batch([f"otc_{t}.tw" for t in missing]))
+    return results
+
+
+def _get_time_ratio() -> float:
+    """Fraction of trading day elapsed (09:00–13:30 = 1.0)."""
+    now = datetime.now()
+    open_ = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    close_ = now.replace(hour=13, minute=30, second=0, microsecond=0)
+    elapsed = (now - open_).total_seconds() / 60
+    return max(0.0, min(1.0, elapsed / 270))
 
 SURGE_CSV_FIELDS = [
     "scan_date", "analysis_date", "ticker", "name", "market", "industry",
@@ -694,6 +778,7 @@ def run_surge_scan(
     csv_path: Path | None = None,
     notify: bool = False,
     intraday: bool = False,
+    no_html: bool = False,
 ) -> list[dict]:
     from taiwan_stock_agent.infrastructure.twse_client import ChipProxyFetcher
 
@@ -825,9 +910,12 @@ def run_surge_scan(
     if csv_path and results:
         _save_surge_csv(results, scan_date, analysis_date, csv_path, name_map, industry_map)
         html_path = csv_path.with_suffix(".html")
-        _generate_html_report(results, scan_date, name_map or {}, html_path, intraday=intraday, industry_map=industry_map)
-        _console.print(f"  [green]📊 HTML 報告:[/green] file://{html_path.resolve()}")
-        os.system(f'open "{html_path.resolve()}"')
+        if no_html:
+            _console.print(f"  [dim]📊 HTML 略過（--no-html）: file://{html_path.resolve()}[/dim]")
+        else:
+            _generate_html_report(results, scan_date, name_map or {}, html_path, intraday=intraday, industry_map=industry_map)
+            _console.print(f"  [green]📊 HTML 報告:[/green] file://{html_path.resolve()}")
+            os.system(f'open "{html_path.resolve()}"')
         if notify:
             _notify_surge_telegram(csv_path, scan_date)
 
@@ -867,6 +955,7 @@ def main() -> None:
     parser.add_argument("--only-notify", action="store_true", help="僅推播現有 CSV")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--intraday", action="store_true", help="盤中即時模式（MIS 報價取代 FinMind 今日 bar）")
+    parser.add_argument("--no-html", action="store_true", dest="no_html", help="不產生 HTML 報告也不自動開啟瀏覽器")
     args = parser.parse_args()
 
     if args.intraday:
@@ -928,6 +1017,7 @@ def main() -> None:
         csv_path=final_csv_path,
         notify=args.notify,
         intraday=args.intraday,
+        no_html=args.no_html,
     )
 
 

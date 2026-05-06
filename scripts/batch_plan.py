@@ -533,10 +533,11 @@ def _make_label_repo():
 
 def _default_date() -> date:
     from datetime import datetime
+    from taiwan_stock_agent.utils.trading_calendar import is_trading_day
     now = datetime.now()
     # 17:00 前用前一交易日；之後用今天（收盤資料已回傳）
     candidate = date.today() if now.hour >= 17 else date.today() - timedelta(days=1)
-    while candidate.weekday() >= 5:
+    while not is_trading_day(candidate):
         candidate -= timedelta(days=1)
     return candidate
 
@@ -1304,6 +1305,7 @@ def main() -> None:
 
     if args.tickers:
         tickers = args.tickers
+        args.min_confidence = 0  # 指定個股時不設門檻
     else:
         industry_map = _build_industry_map()
         if not industry_map:
