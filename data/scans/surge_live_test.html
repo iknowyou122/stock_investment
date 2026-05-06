@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>噴發雷達 2026-05-04</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}
+.header{background:linear-gradient(135deg,#1a1a2e,#16213e,#0f3460);padding:32px;border-bottom:1px solid #21262d}
+.header h1{font-size:30px;font-weight:800;color:#ff6b6b;letter-spacing:-0.5px}
+.subtitle{color:#8b949e;margin-top:6px;font-size:14px}
+.stats{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap}
+.stat{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:12px 20px}
+.sv{font-size:24px;font-weight:700}.sl{font-size:11px;color:#8b949e;margin-top:2px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:16px;padding:24px}
+.card{background:#161b22;border:1px solid #21262d;border-radius:12px;overflow:hidden;
+  transition:border-color .2s,transform .2s;animation:fadeIn .5s ease forwards;opacity:0}
+.card:hover{border-color:#388bfd;transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,0,.4)}
+@keyframes fadeIn{to{opacity:1}}
+.card-header{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid #21262d}
+.rank{background:#21262d;border-radius:8px;width:34px;height:34px;display:flex;align-items:center;
+  justify-content:center;font-weight:700;font-size:13px;color:#8b949e;flex-shrink:0}
+.info{flex:1;min-width:0}
+.ticker{font-size:18px;font-weight:700;letter-spacing:1px}
+.cname{font-size:12px;color:#8b949e;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge{padding:5px 12px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;flex-shrink:0}
+.g-alpha{background:rgba(248,81,73,.15);color:#ff6b6b;border:1px solid rgba(248,81,73,.3)}
+.g-beta{background:rgba(210,153,34,.15);color:#e3b341;border:1px solid rgba(210,153,34,.3)}
+.g-gamma{background:rgba(56,189,248,.15);color:#38bdf8;border:1px solid rgba(56,189,248,.3)}
+.metrics{display:flex;border-bottom:1px solid #21262d}
+.m{flex:1;padding:10px 6px;text-align:center;border-right:1px solid #21262d}
+.m:last-child{border-right:none}
+.mv{font-size:13px;font-weight:600}.ml{font-size:10px;color:#8b949e;margin-top:2px}
+.pos{color:#3fb950}.neg{color:#f85149}
+.chart{height:300px}
+.footer{text-align:center;padding:32px;color:#484f58;font-size:12px}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>🔥 噴發雷達</h1>
+  <div class="subtitle">2026-05-04 &nbsp;·&nbsp; 收盤掃描 &nbsp;·&nbsp; 共 28 支</div>
+  <div class="stats">
+    <div class="stat"><div class="sv" style="color:#ff6b6b">21</div><div class="sl">強噴★</div></div>
+    <div class="stat"><div class="sv" style="color:#e3b341">5</div><div class="sl">噴發</div></div>
+    <div class="stat"><div class="sv" style="color:#38bdf8">2</div><div class="sl">量增</div></div>
+  </div>
+</div>
+<div class="grid">
+
+    <div class="card" style="animation-delay:0.00s">
+      <div class="card-header">
+        <div class="rank">1</div>
+        <div class="info">
+          <div class="ticker">8150</div>
+          <div class="cname">南茂</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">82</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">42.5x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+50.89%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">63</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">89%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_8150_0"></div>
+    </div>
+    <div class="card" style="animation-delay:0.05s">
+      <div class="card-header">
+        <div class="rank">2</div>
+        <div class="info">
+          <div class="ticker">2395</div>
+          <div class="cname">研華</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">76</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">2.9x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+9.87%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">61</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">33%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_2395_1"></div>
+    </div>
+    <div class="card" style="animation-delay:0.10s">
+      <div class="card-header">
+        <div class="rank">3</div>
+        <div class="info">
+          <div class="ticker">3094</div>
+          <div class="cname">聯傑</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">76</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">2.7x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+6.87%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">68</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">89%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_3094_2"></div>
+    </div>
+    <div class="card" style="animation-delay:0.15s">
+      <div class="card-header">
+        <div class="rank">4</div>
+        <div class="info">
+          <div class="ticker">6166</div>
+          <div class="cname">凌華</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">76</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">2.7x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+9.73%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">68</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">33%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_6166_3"></div>
+    </div>
+    <div class="card" style="animation-delay:0.20s">
+      <div class="card-header">
+        <div class="rank">5</div>
+        <div class="info">
+          <div class="ticker">5443</div>
+          <div class="cname">均豪</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">75</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">2.5x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+6.18%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">61</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">89%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_5443_4"></div>
+    </div>
+    <div class="card" style="animation-delay:0.25s">
+      <div class="card-header">
+        <div class="rank">6</div>
+        <div class="info">
+          <div class="ticker">6789</div>
+          <div class="cname">采鈺</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">74</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">32.5x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+643.31%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">65</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">89%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_6789_5"></div>
+    </div>
+    <div class="card" style="animation-delay:0.30s">
+      <div class="card-header">
+        <div class="rank">7</div>
+        <div class="info">
+          <div class="ticker">3033</div>
+          <div class="cname">威健</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">73</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">7.0x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+6.01%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">70</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">78%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_3033_6"></div>
+    </div>
+    <div class="card" style="animation-delay:0.35s">
+      <div class="card-header">
+        <div class="rank">8</div>
+        <div class="info">
+          <div class="ticker">6805</div>
+          <div class="cname">富世達</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">73</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">4.6x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+2594.65%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">65</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">67%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_6805_7"></div>
+    </div>
+    <div class="card" style="animation-delay:0.40s">
+      <div class="card-header">
+        <div class="rank">9</div>
+        <div class="info">
+          <div class="ticker">2342</div>
+          <div class="cname">茂矽</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">72</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">5.1x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+7.44%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">75</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">89%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_2342_8"></div>
+    </div>
+    <div class="card" style="animation-delay:0.45s">
+      <div class="card-header">
+        <div class="rank">10</div>
+        <div class="info">
+          <div class="ticker">6146</div>
+          <div class="cname">耕興</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">72</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">2.5x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+7.92%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">69</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">44%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_6146_9"></div>
+    </div>
+    <div class="card" style="animation-delay:0.50s">
+      <div class="card-header">
+        <div class="rank">11</div>
+        <div class="info">
+          <div class="ticker">6412</div>
+          <div class="cname">群電</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">71</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">6.6x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+10.00%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">53</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">67%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_6412_10"></div>
+    </div>
+    <div class="card" style="animation-delay:0.55s">
+      <div class="card-header">
+        <div class="rank">12</div>
+        <div class="info">
+          <div class="ticker">8131</div>
+          <div class="cname">福懋科</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">71</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">4.3x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+13.99%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">55</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">89%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_8131_11"></div>
+    </div>
+    <div class="card" style="animation-delay:0.60s">
+      <div class="card-header">
+        <div class="rank">13</div>
+        <div class="info">
+          <div class="ticker">3498</div>
+          <div class="cname">陽程</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">67</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv ">1.9x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+9.92%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">59</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">44%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_3498_12"></div>
+    </div>
+    <div class="card" style="animation-delay:0.65s">
+      <div class="card-header">
+        <div class="rank">14</div>
+        <div class="info">
+          <div class="ticker">2465</div>
+          <div class="cname">麗臺</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">65</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">3.3x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+10.00%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">76</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">33%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_2465_13"></div>
+    </div>
+    <div class="card" style="animation-delay:0.70s">
+      <div class="card-header">
+        <div class="rank">15</div>
+        <div class="info">
+          <div class="ticker">6669</div>
+          <div class="cname">緯穎</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">65</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">4.1x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+14194.12%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">51</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">33%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_6669_14"></div>
+    </div>
+    <div class="card" style="animation-delay:0.75s">
+      <div class="card-header">
+        <div class="rank">16</div>
+        <div class="info">
+          <div class="ticker">3535</div>
+          <div class="cname">晶彩科</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">61</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv ">1.9x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+9.73%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">44</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">56%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_3535_15"></div>
+    </div>
+    <div class="card" style="animation-delay:0.80s">
+      <div class="card-header">
+        <div class="rank">17</div>
+        <div class="info">
+          <div class="ticker">2388</div>
+          <div class="cname">威盛</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">60</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">3.8x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+5.73%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">76</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">89%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_2388_16"></div>
+    </div>
+    <div class="card" style="animation-delay:0.85s">
+      <div class="card-header">
+        <div class="rank">18</div>
+        <div class="info">
+          <div class="ticker">6126</div>
+          <div class="cname">信音</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">60</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">2.4x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+8.20%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">43</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">67%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_6126_17"></div>
+    </div>
+    <div class="card" style="animation-delay:0.90s">
+      <div class="card-header">
+        <div class="rank">19</div>
+        <div class="info">
+          <div class="ticker">6588</div>
+          <div class="cname">東典光電</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">60</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">5.7x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+354.41%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">51</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">22%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_6588_18"></div>
+    </div>
+    <div class="card" style="animation-delay:0.95s">
+      <div class="card-header">
+        <div class="rank">20</div>
+        <div class="info">
+          <div class="ticker">6174</div>
+          <div class="cname">安��</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">56</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv ">1.6x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+9.98%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">66</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">67%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_6174_19"></div>
+    </div>
+    <div class="card" style="animation-delay:1.00s">
+      <div class="card-header">
+        <div class="rank">21</div>
+        <div class="info">
+          <div class="ticker">6664</div>
+          <div class="cname">群翊</div>
+        </div>
+        <div class="badge g-alpha">強噴★</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">56</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">5.9x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+1260.29%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">51</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">67%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_6664_20"></div>
+    </div>
+    <div class="card" style="animation-delay:1.05s">
+      <div class="card-header">
+        <div class="rank">22</div>
+        <div class="info">
+          <div class="ticker">3691</div>
+          <div class="cname">碩禾</div>
+        </div>
+        <div class="badge g-beta">噴發</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">54</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">2.3x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+9.75%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">50</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">56%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_3691_21"></div>
+    </div>
+    <div class="card" style="animation-delay:1.10s">
+      <div class="card-header">
+        <div class="rank">23</div>
+        <div class="info">
+          <div class="ticker">3437</div>
+          <div class="cname">榮創</div>
+        </div>
+        <div class="badge g-beta">噴發</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">53</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">2.8x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+4.14%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">61</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">56%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_3437_22"></div>
+    </div>
+    <div class="card" style="animation-delay:1.15s">
+      <div class="card-header">
+        <div class="rank">24</div>
+        <div class="info">
+          <div class="ticker">3580</div>
+          <div class="cname">友威科</div>
+        </div>
+        <div class="badge g-beta">噴發</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">53</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv ">1.9x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+9.90%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">61</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">44%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_3580_23"></div>
+    </div>
+    <div class="card" style="animation-delay:1.20s">
+      <div class="card-header">
+        <div class="rank">25</div>
+        <div class="info">
+          <div class="ticker">6125</div>
+          <div class="cname">廣運</div>
+        </div>
+        <div class="badge g-beta">噴發</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">48</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">2.2x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+4.12%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">64</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">56%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_6125_24"></div>
+    </div>
+    <div class="card" style="animation-delay:1.25s">
+      <div class="card-header">
+        <div class="rank">26</div>
+        <div class="info">
+          <div class="ticker">3402</div>
+          <div class="cname">漢科</div>
+        </div>
+        <div class="badge g-beta">噴發</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">41</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv ">1.7x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+6.98%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">56</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">44%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_3402_25"></div>
+    </div>
+    <div class="card" style="animation-delay:1.30s">
+      <div class="card-header">
+        <div class="rank">27</div>
+        <div class="info">
+          <div class="ticker">6770</div>
+          <div class="cname">力積電</div>
+        </div>
+        <div class="badge g-gamma">量增</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">34</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">177.6x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv neg">-35.40%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">65</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">89%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_6770_26"></div>
+    </div>
+    <div class="card" style="animation-delay:1.35s">
+      <div class="card-header">
+        <div class="rank">28</div>
+        <div class="info">
+          <div class="ticker">1785</div>
+          <div class="cname">光洋科</div>
+        </div>
+        <div class="badge g-gamma">量增</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv">31</div><div class="ml">分數</div></div>
+        <div class="m"><div class="mv pos">2.2x</div><div class="ml">量比</div></div>
+        <div class="m"><div class="mv pos">+2.72%</div><div class="ml">漲幅</div></div>
+        <div class="m"><div class="mv">76</div><div class="ml">RSI</div></div>
+        <div class="m"><div class="mv">44%</div><div class="ml">產業排名</div></div>
+        <div class="m"><div class="mv">0</div><div class="ml">法人連買</div></div>
+      </div>
+      <div class="chart" id="tv_1785_27"></div>
+    </div>
+</div>
+<div class="footer">噴發雷達自動生成 · 2026-05-04</div>
+<script src="https://s3.tradingview.com/tv.js"></script>
+<script>
+  new TradingView.widget({
+    "container_id":"tv_8150_0","autosize":true,"height":300,
+    "symbol":"TWSE:8150","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_2395_1","autosize":true,"height":300,
+    "symbol":"TWSE:2395","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_3094_2","autosize":true,"height":300,
+    "symbol":"TWSE:3094","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_6166_3","autosize":true,"height":300,
+    "symbol":"TWSE:6166","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_5443_4","autosize":true,"height":300,
+    "symbol":"TPEX:5443","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_6789_5","autosize":true,"height":300,
+    "symbol":"TWSE:6789","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_3033_6","autosize":true,"height":300,
+    "symbol":"TWSE:3033","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_6805_7","autosize":true,"height":300,
+    "symbol":"TWSE:6805","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_2342_8","autosize":true,"height":300,
+    "symbol":"TWSE:2342","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_6146_9","autosize":true,"height":300,
+    "symbol":"TPEX:6146","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_6412_10","autosize":true,"height":300,
+    "symbol":"TWSE:6412","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_8131_11","autosize":true,"height":300,
+    "symbol":"TWSE:8131","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_3498_12","autosize":true,"height":300,
+    "symbol":"TPEX:3498","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_2465_13","autosize":true,"height":300,
+    "symbol":"TWSE:2465","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_6669_14","autosize":true,"height":300,
+    "symbol":"TWSE:6669","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_3535_15","autosize":true,"height":300,
+    "symbol":"TWSE:3535","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_2388_16","autosize":true,"height":300,
+    "symbol":"TWSE:2388","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_6126_17","autosize":true,"height":300,
+    "symbol":"TPEX:6126","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_6588_18","autosize":true,"height":300,
+    "symbol":"TPEX:6588","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_6174_19","autosize":true,"height":300,
+    "symbol":"TPEX:6174","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_6664_20","autosize":true,"height":300,
+    "symbol":"TPEX:6664","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_3691_21","autosize":true,"height":300,
+    "symbol":"TPEX:3691","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_3437_22","autosize":true,"height":300,
+    "symbol":"TWSE:3437","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_3580_23","autosize":true,"height":300,
+    "symbol":"TPEX:3580","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_6125_24","autosize":true,"height":300,
+    "symbol":"TPEX:6125","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_3402_25","autosize":true,"height":300,
+    "symbol":"TPEX:3402","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_6770_26","autosize":true,"height":300,
+    "symbol":"TWSE:6770","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+  new TradingView.widget({
+    "container_id":"tv_1785_27","autosize":true,"height":300,
+    "symbol":"TPEX:1785","interval":"D","timezone":"Asia/Taipei",
+    "theme":"dark","style":"1","locale":"zh_TW",
+    "toolbar_bg":"#161b22","enable_publishing":false,
+    "hide_top_toolbar":false,"save_image":false,
+    "studies":["Volume@tv-basicstudies"]
+  });
+</script>
+</body>
+</html>
