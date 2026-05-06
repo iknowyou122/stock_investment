@@ -371,11 +371,11 @@ def _fetch_chart_candles(ticker: str, market: str) -> dict:
     try:
         import pandas as pd
         import yfinance as yf
-        # Fetch extra warmup bars so BB covers every displayed candle
+        # Use Ticker.history() instead of yf.download() — each call creates an
+        # independent session object, safe for concurrent use in ThreadPoolExecutor.
         period = 20
-        hist = yf.download(
-            f"{ticker}{suffix}", period="5mo", interval="1d",
-            progress=False, auto_adjust=True, multi_level_index=False,
+        hist = yf.Ticker(f"{ticker}{suffix}").history(
+            period="5mo", interval="1d", auto_adjust=True,
         )
         rows = []
         for idx, row in hist.iterrows():
