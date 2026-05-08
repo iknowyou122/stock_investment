@@ -2043,7 +2043,7 @@ class TripleConfirmationEngine:
 
         entry_bid_limit = close × 0.995  (lower bound, limit order)
         entry_max_chase = close × 1.005  (upper bound, max acceptable chase)
-        stop_loss       = T+0 closing price
+        stop_loss       = close × 0.97   (3% below T+0 close, below entry)
         target          = max(poc_proxy × 1.05, close × 1.05)
                           Guarantees target > entry. poc_proxy may be lower than
                           current close when the highest-volume day was a panic
@@ -2055,6 +2055,6 @@ class TripleConfirmationEngine:
         return ExecutionPlan(
             entry_bid_limit=round(close * 0.995, 2),
             entry_max_chase=round(close * 1.005, 2),
-            stop_loss=close,
+            stop_loss=round(close * 0.97, 2),
             target=target,
         )
