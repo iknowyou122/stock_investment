@@ -333,6 +333,64 @@ class SurgeRadar:
             return 0, [f"RSI_HOT:{rsi}"]
         return 0, [f"RSI_WEAK:{rsi}"]
 
+    def _score_bb_squeeze_breakout(
+        self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
+    ) -> tuple[int, list[str]]:
+        """Reward breakouts from prior Bollinger Band compression.
+
+        On the surge day BBs are already expanding, so we look back to check
+        whether they were recently squeezed — indicating stored energy release.
+
+        bb_width = 4σ / mean  (fractional band width, period=20)
+        squeeze  = recent-10-day minimum width vs 50-day percentile distribution
+        """
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        period = 20
+        if len(sorted_h) < period + 10:
+            return 0, []
+
+        closes = [b.close for b in sorted_h]
+
+        # Compute BB width for every bar in history (excluding today)
+        bb_widths: list[float] = []
+        for i in range(period - 1, len(closes)):
+            window = closes[i - period + 1: i + 1]
+            mean = sum(window) / period
+            if mean <= 0:
+                continue
+            std = (sum((x - mean) ** 2 for x in window) / period) ** 0.5
+            bb_widths.append(std * 4 / mean)
+
+        if len(bb_widths) < 10:
+            return 0, []
+
+        # Recent squeeze: minimum BB width in the last 10 bars
+        recent_min = min(bb_widths[-10:])
+
+        # Historical context: 50-day percentile thresholds
+        hist = bb_widths[-50:] if len(bb_widths) >= 50 else bb_widths
+        hist_sorted = sorted(hist)
+        p25 = hist_sorted[max(0, len(hist_sorted) // 4 - 1)]
+        p40 = hist_sorted[max(0, int(len(hist_sorted) * 0.4) - 1)]
+
+        # Today's BB width (history + today)
+        all_closes = closes + [ohlcv.close]
+        w = all_closes[-period:]
+        mean_t = sum(w) / period
+        if mean_t <= 0:
+            return 0, []
+        std_t = (sum((x - mean_t) ** 2 for x in w) / period) ** 0.5
+        current_width = std_t * 4 / mean_t
+
+        f = self._params.get("factors", {})
+        label = f"BB:{recent_min:.3f}→{current_width:.3f}"
+
+        if recent_min <= p25 and current_width >= recent_min * 1.5:
+            return f.get("bb_squeeze_strong", 8), [f"BB_SQUEEZE_BREAK:{label}"]
+        if recent_min <= p40 and current_width >= recent_min * 1.3:
+            return f.get("bb_squeeze_mild", 4), [f"BB_SQUEEZE_EXPAND:{label}"]
+        return 0, [f"BB_WIDE:{current_width:.3f}"]
+
     def _score_margin_not_hot(
         self, proxy: TWSEChipProxy | None
     ) -> tuple[int, list[str]]:
@@ -381,7 +439,7 @@ class SurgeRadar:
         raw = 0
 
         # pocket_pivot and breakout_20d frequently co-fire (both require price above recent
-        # highs with strong volume). Combined max = 22/85 pts. Intentional: double confirmation
+        # highs with strong volume). Combined max = 22/93 pts. Intentional: double confirmation
         # raises conviction. Adjust individual weights in surge_params.json if over-rewarding.
         factors = [
             ("vol_ratio", self._score_vol_ratio(ohlcv, history)),
@@ -394,6 +452,7 @@ class SurgeRadar:
             ("breakout_20d", self._score_breakout_20d(ohlcv, history)),
             ("rsi_healthy", self._score_rsi_healthy(history)),
             ("margin_not_hot", self._score_margin_not_hot(proxy)),
+            ("bb_squeeze", self._score_bb_squeeze_breakout(ohlcv, history)),
         ]
 
         for name, (pts, flags) in factors:

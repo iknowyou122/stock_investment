@@ -401,6 +401,54 @@ class TestScoreFull:
             assert result["grade"] in ("SURGE_ALPHA", "SURGE_BETA", "SURGE_GAMMA")
 
 
+class TestBBSqueezeBreakout:
+    """Tests for _score_bb_squeeze_breakout."""
+
+    def _squeeze_history(self, n: int = 60, tight_days: int = 15) -> list[DailyOHLCV]:
+        """History with `tight_days` of very tight bands followed by flat bars."""
+        import math
+        bars: list[DailyOHLCV] = []
+        for i in range(n):
+            if i >= n - tight_days:
+                # very tight: tiny oscillation
+                close = 100.0 + 0.05 * math.sin(i)
+            else:
+                # wider oscillation
+                close = 100.0 + 2.0 * math.sin(i * 0.3)
+            bars.append(_bar(close=close, volume=600_000, day=i))
+        return bars
+
+    def test_deep_squeeze_breakout_scores_strong(self):
+        """After ≥15 tight-band days, current bar expands → 8 pts + BB_SQUEEZE_BREAK."""
+        eng = SurgeRadar()
+        hist = self._squeeze_history(60, tight_days=15)
+        # Surge day: wide move up
+        today = _bar(close=104.0, volume=1_500_000, day=60, o=100.0, h=104.5, lo=99.5)
+        pts, flags = eng._score_bb_squeeze_breakout(today, hist)
+        assert pts == 8
+        assert any("BB_SQUEEZE_BREAK" in f for f in flags)
+
+    def test_insufficient_history_returns_zero(self):
+        """Fewer than period+10=30 bars → skip."""
+        eng = SurgeRadar()
+        hist = _flat_history(25)
+        today = _bar(close=105, volume=1_500_000, day=26)
+        pts, flags = eng._score_bb_squeeze_breakout(today, hist)
+        assert pts == 0
+        assert flags == []
+
+    def test_wide_bands_no_squeeze_returns_zero(self):
+        """Consistently wide bands → no squeeze, should return 0 with BB_WIDE flag."""
+        import math
+        eng = SurgeRadar()
+        # Large oscillation throughout history → always wide bands
+        hist = [_bar(close=100.0 + 5.0 * math.sin(i * 0.5), volume=600_000, day=i) for i in range(60)]
+        today = _bar(close=105.0, volume=1_500_000, day=60)
+        pts, flags = eng._score_bb_squeeze_breakout(today, hist)
+        assert pts == 0
+        assert any("BB_WIDE" in f for f in flags)
+
+
 class TestConsecutiveSurge:
     def test_count_increments_when_bars_above_threshold(self):
         eng = SurgeRadar()
