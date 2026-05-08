@@ -80,10 +80,10 @@ def _fetch_close(ticker: str, target_date: date, market: str) -> float | None:
     start = target_date - timedelta(days=1)
     end = target_date + timedelta(days=2)
     try:
-        hist = yf.download(
-            f"{ticker}{suffix}", start=str(start), end=str(end),
-            interval="1d", progress=False, auto_adjust=True,
-            multi_level_index=False,
+        # Use Ticker.history() — independent session per call, safe for concurrent use.
+        hist = yf.Ticker(f"{ticker}{suffix}").history(
+            start=str(start), end=str(end),
+            interval="1d", auto_adjust=True, actions=False,
         )
         if hist.empty:
             return None

@@ -294,13 +294,13 @@ class FinMindClient:
                 _prev_level = _yf_logger.level
                 _yf_logger.setLevel(_logging.CRITICAL)
                 try:
-                    raw = yf.download(
-                        symbol,
+                    # Use Ticker.history() instead of yf.download() — each Ticker object
+                    # has an independent session, making it safe for concurrent threads.
+                    raw = yf.Ticker(symbol).history(
                         start=str(start_date),
-                        end=str(end_date + timedelta(days=1)),  # yfinance end is exclusive
+                        end=str(end_date + timedelta(days=1)),
                         auto_adjust=True,
-                        progress=False,
-                        multi_level_index=False,
+                        actions=False,
                     )
                 finally:
                     _yf_logger.setLevel(_prev_level)
