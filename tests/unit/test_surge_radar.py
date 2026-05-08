@@ -143,13 +143,22 @@ class TestVolumeRatio:
         assert pts == 6
 
     def test_extreme_warning(self):
-        """≥ 3× vol → reduced score (exhaustion risk)."""
+        """3-5× vol → moderate penalty (VOL_EXTREME, 7 pts)."""
         eng = SurgeRadar()
         hist = _flat_history(60, volume=600_000)
         today = _bar(close=105, volume=2_000_000, day=99, lo=100, h=106)  # 3.33x
         pts, flags = eng._score_vol_ratio(today, hist)
-        assert pts == 5
+        assert pts == 7
         assert any("VOL_EXTREME" in f for f in flags)
+
+    def test_hyperchase_penalty(self):
+        """≥ 5× vol → strong penalty (VOL_HYPERCHASE, 2 pts); backtest: 30.9% T+5 WR."""
+        eng = SurgeRadar()
+        hist = _flat_history(60, volume=600_000)
+        today = _bar(close=105, volume=3_200_000, day=99, lo=100, h=106)  # 5.33x
+        pts, flags = eng._score_vol_ratio(today, hist)
+        assert pts == 2
+        assert any("VOL_HYPERCHASE" in f for f in flags)
 
 
 class TestCloseStrength:

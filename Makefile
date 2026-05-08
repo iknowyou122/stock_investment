@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune
+.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune surge-backtest
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -194,6 +194,11 @@ surge-factor:
 
 surge-tune:
 	$(PYTHON) scripts/surge_factor_report.py --llm --apply --min-signals $(MIN_SIGNALS)
+
+SURGE_BACKTEST_DAYS ?= 90
+SURGE_BACKTEST_OUTPUT ?= data/surge_backtest.csv
+surge-backtest:
+	$(PYTHON) scripts/surge_backtest.py --days $(SURGE_BACKTEST_DAYS) --output $(SURGE_BACKTEST_OUTPUT)
 
 # ── 信號準確度監控 ──────────────────────────────────────────────────────────────
 # 載入歷史 scan CSV，驗證突破結果，顯示滾動勝率 Dashboard

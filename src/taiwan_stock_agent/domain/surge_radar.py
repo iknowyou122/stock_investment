@@ -174,10 +174,13 @@ class SurgeRadar:
             return 0, []
         ratio = ohlcv.volume / vol_20ma
         f = self._params.get("factors", {})
-        # >3x scores LESS than 2-3x by design: extreme volume in Taiwan often signals
-        # short squeeze, news-driven retail chase, or distribution — not institutional accumulation.
+        # Backtest (90-day, n=952): 5x+ vol → only 30.9% T+5 WR vs 51%+ for 2-5x.
+        # Hyperchase regime (panic news, squeeze) has mean-reversion tendency.
+        # 3-5x is actually fine (51.5% WR) so penalty only kicks in above 5x.
+        if ratio >= 5.0:
+            return f.get("vol_ratio_hyperchase", 2), [f"VOL_HYPERCHASE:{ratio:.2f}x"]
         if ratio >= 3.0:
-            return f.get("vol_ratio_extreme_warn", 5), [f"VOL_EXTREME:{ratio:.2f}x"]
+            return f.get("vol_ratio_extreme_warn", 7), [f"VOL_EXTREME:{ratio:.2f}x"]
         if ratio >= 2.0:
             return f.get("vol_ratio_ideal", 10), [f"VOL_IDEAL:{ratio:.2f}x"]
         if ratio >= 1.5:

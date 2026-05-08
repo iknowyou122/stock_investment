@@ -2,9 +2,9 @@
   "grade_thresholds": {
     "SURGE_ALPHA": 55,
     "SURGE_BETA": 40,
-    "SURGE_GAMMA": 28
+    "SURGE_GAMMA": 40
   },
-  "raw_max_pts": 93,
+  "raw_max_pts": 95,
   "gates": {
     "min_turnover_tse": 20000000,
     "min_turnover_tpex": 8000000,
@@ -16,7 +16,8 @@
   },
   "factors": {
     "vol_ratio_ideal": 10,
-    "vol_ratio_extreme_warn": 5,
+    "vol_ratio_extreme_warn": 7,
+    "vol_ratio_hyperchase": 2,
     "vol_ratio_mild": 6,
     "close_strong": 8,
     "close_healthy": 5,
