@@ -10,7 +10,7 @@ import pytest
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from batch_scan import _load_recent_csvs, _apply_persistence_bonus
+from batch_plan import _load_recent_csvs, _apply_persistence_bonus
 
 
 CSV_FIELDS = [
