@@ -956,6 +956,78 @@ class TestRegimeThresholds:
 
 
 # ---------------------------------------------------------------------------
+# 11b. _map_action: proximity_pts=12 lowers threshold by 5
+# ---------------------------------------------------------------------------
+
+class TestMapActionProximityThreshold:
+    """Verify that proximity_pts=12 lowers the LONG threshold by 5."""
+
+    def _make_bd_with_proximity(self, proximity: int) -> _ScoreBreakdown:
+        bd = _ScoreBreakdown()
+        bd.proximity_pts = proximity
+        return bd
+
+    def _make_taiex_history(self, rising: bool, n: int = 30):
+        from datetime import date, timedelta
+        bars = []
+        base = date(2026, 1, 2)
+        for i in range(n):
+            close = 20000.0 + (i * 50 if rising else -i * 50)
+            d = base + timedelta(days=i)
+            bars.append(DailyOHLCV(
+                ticker="^TWII", trade_date=d,
+                open=close, high=close + 50, low=close - 50, close=close, volume=1_000_000,
+            ))
+        return bars
+
+    def test_uptrend_proximity12_threshold_55(self):
+        """Uptrend + proximity_pts=12 → LONG threshold drops 60→55."""
+        eng = TripleConfirmationEngine()
+        eng._taiex_history = self._make_taiex_history(rising=True, n=30)
+        bd = self._make_bd_with_proximity(12)
+        assert eng._map_action(57, bd=bd) == "LONG"
+        assert eng._map_action(54, bd=bd) == "WATCH"  # still below 55
+
+    def test_uptrend_no_proximity_still_60(self):
+        """Uptrend without proximity=12 → threshold unchanged at 60."""
+        eng = TripleConfirmationEngine()
+        eng._taiex_history = self._make_taiex_history(rising=True, n=30)
+        bd = self._make_bd_with_proximity(6)
+        assert eng._map_action(59, bd=bd) == "WATCH"
+        assert eng._map_action(60, bd=bd) == "LONG"
+
+    def test_neutral_proximity12_threshold_60(self):
+        """Neutral regime + proximity_pts=12 → LONG threshold drops 65→60."""
+        eng = TripleConfirmationEngine()
+        # No taiex history → neutral
+        bd = self._make_bd_with_proximity(12)
+        assert eng._map_action(62, bd=bd) == "LONG"
+        assert eng._map_action(59, bd=bd) == "WATCH"
+
+    def test_neutral_no_proximity_still_65(self):
+        """Neutral without proximity=12 → threshold unchanged at 65."""
+        eng = TripleConfirmationEngine()
+        bd = self._make_bd_with_proximity(0)
+        assert eng._map_action(64, bd=bd) == "WATCH"
+        assert eng._map_action(65, bd=bd) == "LONG"
+
+    def test_downtrend_proximity12_unchanged_70(self):
+        """Downtrend + proximity_pts=12 → threshold stays 70 (cautious)."""
+        eng = TripleConfirmationEngine()
+        eng._taiex_history = self._make_taiex_history(rising=False, n=30)
+        bd = self._make_bd_with_proximity(12)
+        assert eng._map_action(69, bd=bd) == "WATCH"
+        assert eng._map_action(70, bd=bd) == "LONG"
+
+    def test_no_bd_backward_compatible(self):
+        """_map_action(score) without bd arg still uses standard thresholds."""
+        eng = TripleConfirmationEngine()
+        eng._taiex_history = self._make_taiex_history(rising=True, n=30)
+        assert eng._map_action(62) == "LONG"   # uptrend threshold 60
+        assert eng._map_action(59) == "WATCH"
+
+
+# ---------------------------------------------------------------------------
 # 12. scoring_version: score_full() result contains "v2" marker
 # ---------------------------------------------------------------------------
 
@@ -1749,3 +1821,207 @@ class TestNewGate:
         signal = eng.score(ohlcv, hist, chip, vp)
         assert "NO_SETUP" in signal.data_quality_flags
         assert any("G2_BB_WIDE" in f for f in signal.data_quality_flags)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# G2 Dynamic BB Threshold tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_alternating_history(
+    n: int, amplitude: float, base: float = 100.0, start_day: int = 0
+) -> list[DailyOHLCV]:
+    """Close alternates base±amplitude every bar. High amplitude → wide BB."""
+    d = date(2026, 1, 1)
+    bars = []
+    for i in range(n):
+        c = base + (amplitude if i % 2 == 0 else -amplitude)
+        bars.append(DailyOHLCV(
+            ticker="TEST",
+            trade_date=d + timedelta(start_day + i),
+            open=c, high=c + 1.0, low=c - 1.0, close=c,
+            volume=1_000_000,
+        ))
+    return bars
+
+
+class TestG2DynamicThreshold:
+    def _g2_flag(self, history: list[DailyOHLCV], close: float = 100.0, tdh: float = 105.0) -> str | None:
+        engine = TripleConfirmationEngine()
+        ohlcv = _make_ohlcv(close=close)
+        vp = _make_volume_profile(twenty_day_high=tdh)
+        _, _, _, flags = engine._gate_check(ohlcv, history, vp)
+        return next((f for f in flags if "G2" in f), None)
+
+    def test_low_percentile_passes(self):
+        # 59 wide-BB bars, then 20 narrow-BB bars → current BB at low percentile → PASS
+        history = (
+            _make_alternating_history(59, amplitude=20.0) +
+            _make_alternating_history(20, amplitude=0.05, start_day=59)
+        )
+        flag = self._g2_flag(history, close=100.0, tdh=105.0)
+        assert flag is not None
+        assert "GATE_PASS:G2_BB_PCT:" in flag
+
+    def test_high_percentile_fails(self):
+        # 59 narrow-BB bars, then 20 wide-BB bars → current BB at high percentile → FAIL
+        history = (
+            _make_alternating_history(59, amplitude=0.05) +
+            _make_alternating_history(20, amplitude=20.0, start_day=59)
+        )
+        flag = self._g2_flag(history, close=100.0, tdh=115.0)
+        assert flag is not None
+        assert "GATE_FAIL:G2_BB_WIDE_PCT:" in flag
+
+    def test_short_history_fallback_narrow_passes(self):
+        # 40 bars → bb_width_pct is None → fallback to absolute ≤15%; amplitude 0.05 → BB ≈ 0.2% → PASS
+        history = _make_alternating_history(40, amplitude=0.05)
+        flag = self._g2_flag(history, close=100.0, tdh=105.0)
+        assert flag is not None
+        assert "GATE_PASS:G2_BB_PCT:" in flag
+
+    def test_short_history_fallback_wide_fails(self):
+        # 40 bars, amplitude=20 → BB ≈ wide → fallback absolute > 15% → FAIL
+        history = _make_alternating_history(40, amplitude=20.0)
+        flag = self._g2_flag(history, close=100.0, tdh=115.0)
+        assert flag is not None
+        assert "GATE_FAIL:G2_BB_WIDE_PCT:" in flag
+
+    def test_flag_uses_p_suffix_for_percentile(self):
+        # When bb_width_pct is computed (79+ bars), flag value ends with 'p'
+        history = (
+            _make_alternating_history(59, amplitude=20.0) +
+            _make_alternating_history(20, amplitude=0.05, start_day=59)
+        )
+        flag = self._g2_flag(history, close=100.0, tdh=105.0)
+        assert flag is not None
+        assert flag.endswith("p")
+
+    def test_flag_uses_pct_suffix_for_fallback(self):
+        # When bb_width_pct is None (40 bars), flag value ends with '%'
+        history = _make_alternating_history(40, amplitude=0.05)
+        flag = self._g2_flag(history, close=100.0, tdh=105.0)
+        assert flag is not None
+        assert flag.endswith("%")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5MA Walk Factor tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_declining_history(n: int, step: float = 1.0) -> list[DailyOHLCV]:
+    """Linearly declining closes. In declining trend, close < MA5 most of the time."""
+    d = date(2026, 1, 1)
+    bars = []
+    for i in range(n):
+        c = 200.0 - i * step
+        bars.append(DailyOHLCV(
+            ticker="TEST", trade_date=d + timedelta(i),
+            open=c, high=c + 1.0, low=c - 1.0, close=c, volume=10_000,
+        ))
+    return bars
+
+
+class TestMa5WalkScore:
+    def test_rising_history_gets_2(self):
+        # Gently rising (close = 100 + i*0.5): close is always above MA5 → 100% ratio ≥ 80% → 2 pts
+        history = _make_history(30, base_close=100.0)
+        pts = TripleConfirmationEngine._ma5_walk_score(history)
+        assert pts == 2
+
+    def test_declining_history_gets_0(self):
+        # Declining: close < MA5 every day (MA5 lags above) → ratio < 80% → 0 pts
+        history = _make_declining_history(20, step=2.0)
+        pts = TripleConfirmationEngine._ma5_walk_score(history)
+        assert pts == 0
+
+    def test_insufficient_history_gets_0(self):
+        history = _make_history(4)  # < 5 bars → cannot compute MA5
+        pts = TripleConfirmationEngine._ma5_walk_score(history)
+        assert pts == 0
+
+    def test_field_exists_in_breakdown(self):
+        bd = _ScoreBreakdown()
+        assert hasattr(bd, "ma5_walk_pts")
+        assert bd.ma5_walk_pts == 0
+
+    def test_ma5_walk_in_total(self):
+        bd = _ScoreBreakdown()
+        bd.ma5_walk_pts = 2
+        base = _ScoreBreakdown().total
+        assert bd.total == base + 2
+
+    def test_rising_history_returns_2_pts(self):
+        history = _make_history(40, base_close=100.0)
+        pts = TripleConfirmationEngine._ma5_walk_score(history)
+        assert pts == 2
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BB Upper Walk Factor tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_rising_history(n: int, step: float = 2.0) -> list[DailyOHLCV]:
+    """Linearly rising closes. In a 2pt/day uptrend, close stays within 3% of BB upper."""
+    d = date(2026, 1, 1)
+    bars = []
+    for i in range(n):
+        c = 100.0 + i * step
+        bars.append(DailyOHLCV(
+            ticker="TEST", trade_date=d + timedelta(i),
+            open=c - 0.5, high=c + 1.0, low=c - 1.0, close=c, volume=1_000_000,
+        ))
+    return bars
+
+
+class TestBbUpperWalkScore:
+    def test_rising_trend_near_upper_gets_3(self):
+        # Step=2 per day: close stays within ~3% of BB upper
+        history = _make_rising_history(25, step=2.0)
+        pts = TripleConfirmationEngine._bb_upper_walk_score(history)
+        assert pts == 3
+
+    def test_flat_history_not_rising_bb_gets_0(self):
+        # Flat closes → std=0 → BB upper = close; BB_upper not rising → 0
+        history = _make_history(25, flat=True)
+        pts = TripleConfirmationEngine._bb_upper_walk_score(history)
+        assert pts == 0
+
+    def test_declining_close_below_upper_gets_0(self):
+        # Declining: close falls away from BB upper (MA lags above) → fewer than 3 near upper
+        history = _make_declining_history(25, step=1.0)
+        pts = TripleConfirmationEngine._bb_upper_walk_score(history)
+        assert pts == 0
+
+    def test_insufficient_history_gets_0(self):
+        history = _make_rising_history(15)  # < 20 bars → BB not computable
+        pts = TripleConfirmationEngine._bb_upper_walk_score(history)
+        assert pts == 0
+
+    def test_field_exists_in_breakdown(self):
+        bd = _ScoreBreakdown()
+        assert hasattr(bd, "bb_upper_walk_pts")
+        assert bd.bb_upper_walk_pts == 0
+
+    def test_bb_upper_walk_in_total(self):
+        bd = _ScoreBreakdown()
+        bd.bb_upper_walk_pts = 3
+        base = _ScoreBreakdown().total
+        assert bd.total == base + 3
+
+    def test_only_awarded_when_proximity12(self):
+        # proximity_pts=6 (85-91% zone) → bb_upper_walk_pts must remain 0
+        history = _make_rising_history(40, step=2.0)
+        ohlcv = _make_ohlcv(close=history[-1].close)
+        # Proximity 6: close at 87% of twenty_day_high (85–91% range)
+        twenty_day_high = history[-1].close / 0.87
+        vp = _make_volume_profile(twenty_day_high=twenty_day_high)
+        chip = _make_chip_report(net_buyer_diff=0, active_branches=0)
+        engine = TripleConfirmationEngine()
+        engine._taiex_history = _make_history(30, base_close=17000.0)
+        _, bd, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history[:-1],
+            chip_report=chip,
+            volume_profile=vp,
+        )
+        assert bd.bb_upper_walk_pts == 0

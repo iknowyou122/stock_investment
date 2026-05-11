@@ -216,6 +216,7 @@ class _ScoreBreakdown:
     dmi_initiation_pts: int = 0       # 0/2/4/6 — DMI: fresh cross/rising ADX → 6
     volume_dryup_pts: int = 0         # 0/4/8 — last 5d avg vs 20d avg (lower = better)
     volume_climax_pts: int = 0        # 0/4 — prior spike day + current dryup
+    ma5_walk_pts: int = 0             # 0/2 — close ≥ MA5 for ≥80% of last 10 days
 
     # --- Pillar 2A: Chip paid (max _PILLAR2_PAID_MAX = 40) ---
     breadth_pts: int = 0              # 0/5/10
@@ -245,6 +246,7 @@ class _ScoreBreakdown:
     ma20_slope_pts: int = 0           # 0/5
     relative_strength_pts: int = 0    # 0/3/5
     bb_squeeze_breakout_pts: int = 0  # 0/2/3/5 — (deprecated for compression)
+    bb_upper_walk_pts: int = 0        # 0/3 — proximity=12, 3/5 days near BB upper and rising
 
     # --- Pillar 4: Accumulation Detection (max 13) ---
     emerging_setup_pts: int = 0       # 0/10
@@ -280,6 +282,7 @@ class _ScoreBreakdown:
             + self.dmi_initiation_pts
             + self.volume_dryup_pts
             + self.volume_climax_pts
+            + self.ma5_walk_pts
             # Pillar 2A paid
             + self.breadth_pts
             + self.concentration_pts
@@ -306,6 +309,7 @@ class _ScoreBreakdown:
             + self.ma20_slope_pts
             + self.relative_strength_pts
             + self.bb_squeeze_breakout_pts
+            + self.bb_upper_walk_pts
             # Pillar 4
             + self.emerging_setup_pts
             + self.pullback_setup_pts
@@ -359,6 +363,7 @@ class _ScoreBreakdown:
             + self.dmi_initiation_pts
             + self.volume_dryup_pts
             + self.volume_climax_pts
+            + self.ma5_walk_pts
         )
 
     @property
@@ -375,6 +380,7 @@ class _ScoreBreakdown:
             + self.ma20_slope_pts
             + self.relative_strength_pts
             + self.bb_squeeze_breakout_pts
+            + self.bb_upper_walk_pts
         )
 
 
@@ -479,7 +485,7 @@ class TripleConfirmationEngine:
         Returns (passes, conditions_available, conditions_met, detail_flags).
         Conditions:
         G1: Price Zone (85% <= close / 20d_high < 99%)
-        G2: BB Compression (BB width <= 15%)
+        G2: BB Compression (≤35th pct of 60d history; fallback: absolute ≤15%)
         G3: Liquidity (Turnover 20MA > Threshold)
         G4: Market Regime (TAIEX not downtrend)
         """
@@ -500,14 +506,20 @@ class TripleConfirmationEngine:
         else:
             detail_flags.append("GATE_SKIP:G1_NO_HIGH")
 
-        # G2: BB Compression
-        _, _, bb_w, _ = self._calculate_bb(ohlcv_history)
+        # G2: BB Compression (dynamic: ≤35th percentile of 60d history; fallback: absolute ≤15%)
+        _, _, bb_w, bb_width_pct = self._calculate_bb(ohlcv_history)
         if bb_w is not None:
-            if bb_w <= 0.15:
-                conditions_met += 1
-                detail_flags.append(f"GATE_PASS:G2_BB:{bb_w*100:.1f}%")
+            if bb_width_pct is not None:
+                threshold_met = bb_width_pct <= 35.0
+                label = f"{bb_width_pct:.1f}p"
             else:
-                detail_flags.append(f"GATE_FAIL:G2_BB_WIDE:{bb_w*100:.1f}%")
+                threshold_met = bb_w <= 0.15
+                label = f"{bb_w * 100:.1f}%"
+            if threshold_met:
+                conditions_met += 1
+                detail_flags.append(f"GATE_PASS:G2_BB_PCT:{label}")
+            else:
+                detail_flags.append(f"GATE_FAIL:G2_BB_WIDE_PCT:{label}")
         else:
             detail_flags.append("GATE_SKIP:G2_NO_BB")
 
@@ -605,6 +617,10 @@ class TripleConfirmationEngine:
         bd.rsi_momentum_pts = self._rsi_momentum_score(ohlcv_history)
         bd.volume_dryup_pts = self._volume_dryup_score(ohlcv_history)
         bd.volume_climax_pts = self._volume_climax_score(ohlcv_history)
+        ma5_walk = self._ma5_walk_score(ohlcv_history)
+        bd.ma5_walk_pts = ma5_walk
+        if ma5_walk > 0:
+            bd.flags.append("MA5_WALK")
 
         # Pre-compute DMI once — shared by initiation score + risk deductions
         sorted_hist = sorted(ohlcv_history, key=lambda x: x.trade_date)
@@ -632,6 +648,11 @@ class TripleConfirmationEngine:
 
         # --- Pillar 3: Compression Structure ---
         bd.proximity_pts = self._proximity_score(ohlcv.close, volume_profile.twenty_day_high)
+        if bd.proximity_pts == 12:
+            bb_walk = self._bb_upper_walk_score(ohlcv_history)
+            bd.bb_upper_walk_pts = bb_walk
+            if bb_walk > 0:
+                bd.flags.append("BB_UPPER_COIL")
         bd.bb_compression_pts = self._bb_compression_score(ohlcv_history)
         bd.ma_convergence_pts = self._ma_convergence_score(ohlcv_history)
         bd.consolidation_weeks_pts = self._consolidation_weeks_score(ohlcv_history)
@@ -1141,6 +1162,43 @@ class TripleConfirmationEngine:
         return 0
 
     @staticmethod
+    def _ma5_walk_score(history: list[DailyOHLCV], n: int = 10) -> int:
+        """Close >= MA5 for >= 80% of last n days → +2 pts (short-term trend quality)."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        closes = pd.Series([d.close for d in sorted_h])
+        if len(closes) < 5:
+            return 0
+        ma5 = closes.rolling(5).mean()
+        window = min(n, len(closes))
+        close_win = closes.iloc[-window:]
+        ma5_win = ma5.iloc[-window:]
+        valid = ma5_win.notna()
+        if valid.sum() == 0:
+            return 0
+        ratio = float((close_win[valid] >= ma5_win[valid]).mean())
+        return 2 if ratio >= 0.8 else 0
+
+    @staticmethod
+    def _bb_upper_walk_score(
+        history: list[DailyOHLCV], n: int = 5, tolerance: float = 0.03
+    ) -> int:
+        """3 of last n days close >= BB_upper*(1-tol) AND BB_upper rising → +3 pts."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        closes = pd.Series([d.close for d in sorted_h])
+        if len(closes) < 20:
+            return 0
+        ma = closes.rolling(20).mean()
+        std = closes.rolling(20).std(ddof=0)
+        bb_upper = ma + 2 * std
+        if len(bb_upper.dropna()) < n:
+            return 0
+        window_upper = bb_upper.iloc[-n:]
+        window_close = closes.iloc[-n:]
+        near_upper = int((window_close >= window_upper * (1 - tolerance)).sum())
+        bb_upper_rising = float(bb_upper.iloc[-1]) > float(bb_upper.iloc[-n])
+        return 3 if (near_upper >= 3 and bb_upper_rising) else 0
+
+    @staticmethod
     def _ma_convergence_score(history: list[DailyOHLCV]) -> int:
         """MA5/MA10/MA20 converging. Max 8 pts."""
         sorted_h = sorted(history, key=lambda x: x.trade_date)
@@ -1554,7 +1612,11 @@ class TripleConfirmationEngine:
     def _map_action(
         self, confidence: int, bd: _ScoreBreakdown | None = None, chip_pts: int = 0
     ) -> str:
-        """Map confidence score to action label using regime-adjusted thresholds."""
+        """Map confidence score to action label using regime-adjusted thresholds.
+
+        When proximity_pts == 12 (stock in 92-99% zone), reduce the LONG threshold
+        by 5 for uptrend and neutral regimes. Downtrend keeps the conservative 70.
+        """
         taiex = getattr(self, "_taiex_history", [])
         regime = self._compute_taiex_regime(taiex)
         if regime == "uptrend":
@@ -1563,6 +1625,9 @@ class TripleConfirmationEngine:
             long_threshold = _LONG_THRESHOLD_DOWNTREND
         else:
             long_threshold = _LONG_THRESHOLD_NEUTRAL
+
+        if bd is not None and bd.proximity_pts == 12 and regime != "downtrend":
+            long_threshold = max(long_threshold - 5, _WATCH_MIN + 1)
 
         if confidence >= long_threshold:
             return "LONG"

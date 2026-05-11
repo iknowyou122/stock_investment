@@ -478,3 +478,96 @@ class TestConsecutiveSurge:
         hist = [_bar(close=100, volume=0, day=i) for i in range(20)]
         today = _bar(close=100, volume=1000, day=21)
         assert eng._consecutive_surge_days(today, hist) == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5MA Walk scoring
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _rising_history(n: int = 30, step: float = 0.5) -> list[DailyOHLCV]:
+    """Gently rising history — close always above MA5."""
+    return [
+        _bar(close=100.0 + i * step, volume=600_000, day=i)
+        for i in range(n)
+    ]
+
+
+def _declining_history(n: int = 30, step: float = 1.0) -> list[DailyOHLCV]:
+    """Declining history — close always below MA5."""
+    return [
+        _bar(close=200.0 - i * step, volume=600_000, day=i)
+        for i in range(n)
+    ]
+
+
+class TestSurgeMa5Walk:
+    def test_walking_gets_plus2(self):
+        hist = _rising_history(30)
+        today = _bar(close=hist[-1].close + 0.5, volume=600_000, day=30)
+        pts, flags = SurgeRadar()._score_ma5_walk(today, hist)
+        assert pts == 2
+        assert "MA5_WALK" in flags
+
+    def test_breaking_down_gets_minus1(self):
+        hist = _declining_history(30)
+        today = _bar(close=hist[-1].close - 1.0, volume=600_000, day=30)
+        pts, flags = SurgeRadar()._score_ma5_walk(today, hist)
+        assert pts == -1
+        assert "MA5_BREAK" in flags
+
+    def test_neutral_gets_0(self):
+        # Alternating above/below MA5 — roughly 50% ratio → 0 pts
+        bars = []
+        for i in range(30):
+            c = 100.0 + (2.0 if i % 4 < 2 else -2.0)
+            bars.append(_bar(close=c, volume=600_000, day=i))
+        today = _bar(close=102.0, volume=600_000, day=30)
+        pts, flags = SurgeRadar()._score_ma5_walk(today, bars)
+        assert pts == 0
+
+    def test_insufficient_history_gets_0(self):
+        hist = _rising_history(3)
+        today = _bar(close=102.0, volume=600_000, day=3)
+        pts, _ = SurgeRadar()._score_ma5_walk(today, hist)
+        assert pts == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BB Upper Walk scoring
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _bb_upper_walk_history(n: int = 25, step: float = 2.0) -> list[DailyOHLCV]:
+    """Rising history at step/day — close walks BB upper."""
+    return [_bar(close=100.0 + i * step, volume=600_000, day=i) for i in range(n)]
+
+
+class TestSurgeBbUpperWalk:
+    def test_surge_day1_walking_adds_momentum_tag_no_score(self):
+        hist = _bb_upper_walk_history(25, step=2.0)
+        pts, flags = SurgeRadar()._score_bb_upper_walk(hist, surge_day=1)
+        assert pts == 0
+        assert "MOMENTUM_WALK" in flags
+
+    def test_surge_day2_walking_adds_momentum_tag(self):
+        hist = _bb_upper_walk_history(25, step=2.0)
+        pts, flags = SurgeRadar()._score_bb_upper_walk(hist, surge_day=2)
+        assert pts == 0
+        assert "MOMENTUM_WALK" in flags
+
+    def test_surge_day3_walking_gets_minus3(self):
+        hist = _bb_upper_walk_history(25, step=2.0)
+        pts, flags = SurgeRadar()._score_bb_upper_walk(hist, surge_day=3)
+        assert pts == -3
+        assert "BB_UPPER_EXHAUSTION" in flags
+
+    def test_not_walking_gets_0_no_flag(self):
+        hist = _declining_history(25)
+        pts, flags = SurgeRadar()._score_bb_upper_walk(hist, surge_day=1)
+        assert pts == 0
+        assert "MOMENTUM_WALK" not in flags
+        assert "BB_UPPER_EXHAUSTION" not in flags
+
+    def test_insufficient_history_gets_0(self):
+        hist = _rising_history(10)
+        pts, _ = SurgeRadar()._score_bb_upper_walk(hist, surge_day=1)
+        assert pts == 0

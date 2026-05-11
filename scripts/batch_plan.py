@@ -318,7 +318,7 @@ class _EmptyLabelRepo:
 # ---------------------------------------------------------------------------
 
 def _apply_sector_ranks(results: list[dict], industry_map: dict[str, str]) -> int:
-    """Boost stocks in top 20% of their sector by +5 pts.
+    """Boost stocks by sector rank tier (top 5%→+10, top 10%→+7, top 20%→+5).
 
     Only applied when a sector has ≥ 3 valid (non-halt) results.
     Adds SECTOR_RANK:N/M flag to boosted stocks.
@@ -338,11 +338,20 @@ def _apply_sector_ranks(results: list[dict], industry_map: dict[str, str]) -> in
     for sector, rs in sector_valid.items():
         if len(rs) < 3:
             continue
-        sorted_rs = sorted(rs, key=lambda r: r["confidence"], reverse=True)
-        top_n = max(1, len(sorted_rs) // 5)  # top 20%
-        for rank, r in enumerate(sorted_rs[:top_n], 1):
-            r["confidence"] = min(100, r["confidence"] + 5)
-            #r["flags"] = list(r.get("flags") or []) + [f"SECTOR_RANK:{rank}/{len(sorted_rs)}"]
+        sorted_rs = sorted(rs, key=lambda r: (-r["confidence"], r["ticker"]))
+        total = len(sorted_rs)
+        top_5pct  = max(1, total // 20)
+        top_10pct = max(1, total // 10)
+        top_20pct = max(1, total // 5)
+        for rank, r in enumerate(sorted_rs[:top_20pct], 1):
+            if rank <= top_5pct:
+                bonus = 10
+            elif rank <= top_10pct:
+                bonus = 7
+            else:
+                bonus = 5
+            r["confidence"] = min(100, r["confidence"] + bonus)
+            r["flags"] = list(r.get("flags") or []) + [f"SECTOR_RANK:{rank}/{total}"]
             boosted += 1
 
     return boosted
@@ -499,6 +508,35 @@ def _apply_persistence_bonus(
     return boosted
 
 
+def _apply_near_high_first_day(
+    results: list[dict],
+    analysis_date: date,
+    data_dir: Path,
+) -> int:
+    """Give +4 pts to stocks in the 92-99% zone (proximity_pts=12) on their first scan day.
+
+    Compensates for the missing day-1 persist bonus on strong pre-breakout setups.
+    Only activates when the ticker was absent from yesterday's CSV.
+    Called after _apply_persistence_bonus so there is no double-count.
+    Returns count of stocks boosted.
+    """
+    recent = _load_recent_csvs(analysis_date, data_dir, lookback=1, min_conf=40)
+    yesterday_tickers: set[str] = set(recent[0].keys()) if recent else set()
+
+    boosted = 0
+    for r in results:
+        if r.get("halt") or r.get("error") is not None:
+            continue
+        if r["ticker"] in yesterday_tickers:
+            continue
+        if r.get("proximity_pts", 0) == 12:  # 12 = max proximity band (92-99% of 20d high); see _proximity_score()
+            r["confidence"] = min(100, r["confidence"] + 4)
+            r["flags"] = list(r.get("flags") or []) + ["NEAR_HIGH_COIL"]
+            boosted += 1
+
+    return boosted
+
+
 def _make_label_repo():
     """Try to connect to PostgreSQL BrokerLabelRepository.
 
@@ -533,10 +571,11 @@ def _make_label_repo():
 
 def _default_date() -> date:
     from datetime import datetime
+    from taiwan_stock_agent.utils.trading_calendar import is_trading_day
     now = datetime.now()
     # 17:00 前用前一交易日；之後用今天（收盤資料已回傳）
     candidate = date.today() if now.hour >= 17 else date.today() - timedelta(days=1)
-    while candidate.weekday() >= 5:
+    while not is_trading_day(candidate):
         candidate -= timedelta(days=1)
     return candidate
 
@@ -593,6 +632,7 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "_signal": signal,
             "trend_score": trend_score,
             "institution_continuity_pts": breakdown_pts.get("institution_continuity_pts", 0),
+            "proximity_pts": breakdown_pts.get("proximity_pts", 0),
         }
     except Exception as e:
         return {
@@ -612,6 +652,7 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "error": str(e),
             "_signal": None,
             "trend_score": 0,
+            "proximity_pts": 0,
         }
 
 
@@ -1094,7 +1135,7 @@ def run_batch(
     if industry_map:
         n_sector = _apply_sector_ranks(results, industry_map)
         if n_sector:
-            _console.print(f"  [dim]↑ 產業相對排名加分: {n_sector} 檔 (+5 pts each)[/dim]")
+            _console.print(f"  [dim]↑ 產業相對排名加分: {n_sector} 檔 (+5/+7/+10 tier)[/dim]")
 
     n_no_catalyst = _apply_catalyst_filter(results, industry_map, industry_strength)
     if n_no_catalyst:
@@ -1103,6 +1144,10 @@ def run_batch(
     n_persist = _apply_persistence_bonus(results, analysis_date, scan_data_dir)
     if n_persist:
         _console.print(f"  [dim]↑ 持續訊號加分: {n_persist} 檔 (RISING +7 / STABLE +5)[/dim]")
+
+    n_near_high = _apply_near_high_first_day(results, analysis_date, scan_data_dir)
+    if n_near_high:
+        _console.print(f"  [dim]↑ 近高蓄積首日補償: {n_near_high} 檔 (NEAR_HIGH_COIL +4)[/dim]")
 
     # --- Optional: record to DB (source=live) for factor analysis ---
     if save_db:
@@ -1304,6 +1349,7 @@ def main() -> None:
 
     if args.tickers:
         tickers = args.tickers
+        args.min_confidence = 0  # 指定個股時不設門檻
     else:
         industry_map = _build_industry_map()
         if not industry_map:

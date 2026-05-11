@@ -10,7 +10,7 @@ import pytest
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from batch_scan import _load_recent_csvs, _apply_persistence_bonus
+from batch_plan import _load_recent_csvs, _apply_persistence_bonus
 
 
 CSV_FIELDS = [
@@ -156,3 +156,141 @@ class TestPersistenceBonus:
         results = [_make_result("2330", 97)]
         _apply_persistence_bonus(results, date(2026, 4, 10), tmp_path)
         assert results[0]["confidence"] == 100  # capped
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sector rank tiering tests (Fix 1)
+# ──────────────────────────────────────────────────────────────────────────────
+from batch_plan import _apply_sector_ranks
+
+
+def _make_sector_results(tickers_confs: list[tuple[str, int]]) -> list[dict]:
+    return [
+        {"ticker": t, "confidence": c, "halt": False, "error": None, "flags": []}
+        for t, c in tickers_confs
+    ]
+
+
+class TestSectorRanksTiered:
+    def test_top_5pct_gets_10(self):
+        """With 20 stocks, rank 1 is top 5% → +10."""
+        results = _make_sector_results([(str(i), 50 - i) for i in range(20)])
+        industry_map = {str(i): "半導體" for i in range(20)}
+        _apply_sector_ranks(results, industry_map)
+        top = next(r for r in results if r["ticker"] == "0")
+        assert top["confidence"] == 60  # 50 + 10
+
+    def test_top_10pct_gets_7(self):
+        """With 20 stocks, rank 2 is top 10% (not top 5%) → +7."""
+        results = _make_sector_results([(str(i), 50 - i) for i in range(20)])
+        industry_map = {str(i): "半導體" for i in range(20)}
+        _apply_sector_ranks(results, industry_map)
+        second = next(r for r in results if r["ticker"] == "1")
+        assert second["confidence"] == 49 + 7
+
+    def test_top_20pct_gets_5(self):
+        """With 20 stocks, rank 4 is top 20% but not top 10% → +5."""
+        results = _make_sector_results([(str(i), 50 - i) for i in range(20)])
+        industry_map = {str(i): "半導體" for i in range(20)}
+        _apply_sector_ranks(results, industry_map)
+        fourth = next(r for r in results if r["ticker"] == "3")
+        assert fourth["confidence"] == 47 + 5
+
+    def test_rank_21pct_gets_no_bonus(self):
+        """With 20 stocks, rank 5 is just outside top 20% → no bonus."""
+        results = _make_sector_results([(str(i), 50 - i) for i in range(20)])
+        industry_map = {str(i): "半導體" for i in range(20)}
+        _apply_sector_ranks(results, industry_map)
+        fifth = next(r for r in results if r["ticker"] == "4")
+        assert fifth["confidence"] == 46  # unchanged
+
+    def test_sector_rank_flag_added(self):
+        """SECTOR_RANK:N/M flag must appear on boosted stocks."""
+        results = _make_sector_results([(str(i), 50 - i) for i in range(10)])
+        industry_map = {str(i): "光電" for i in range(10)}
+        _apply_sector_ranks(results, industry_map)
+        top = next(r for r in results if r["ticker"] == "0")
+        assert any("SECTOR_RANK:" in f for f in top["flags"])
+
+    def test_returns_count_of_boosted(self):
+        """Return value equals number of stocks that received a bonus."""
+        results = _make_sector_results([(str(i), 50 - i) for i in range(20)])
+        industry_map = {str(i): "半導體" for i in range(20)}
+        n = _apply_sector_ranks(results, industry_map)
+        assert n == 4  # top 20% of 20 = 4
+
+    def test_fewer_than_3_stocks_no_bonus(self):
+        """Sector with < 3 valid stocks gets no bonus (unchanged)."""
+        results = _make_sector_results([("A", 70), ("B", 60)])
+        industry_map = {"A": "小產業", "B": "小產業"}
+        n = _apply_sector_ranks(results, industry_map)
+        assert n == 0
+        assert results[0]["confidence"] == 70
+        assert results[1]["confidence"] == 60
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Near-high first-day bonus tests (Fix 2)
+# ──────────────────────────────────────────────────────────────────────────────
+from batch_plan import _apply_near_high_first_day
+
+
+class TestNearHighFirstDay:
+    def test_first_day_proximity12_gets_4(self, tmp_path):
+        """Stock appearing for the first time with proximity_pts=12 gets +4."""
+        results = [
+            {"ticker": "6173", "confidence": 47, "halt": False, "error": None,
+             "flags": [], "proximity_pts": 12},
+        ]
+        n = _apply_near_high_first_day(results, date(2026, 4, 13), tmp_path)
+        assert n == 1
+        assert results[0]["confidence"] == 51  # 47 + 4
+        assert "NEAR_HIGH_COIL" in results[0]["flags"]
+
+    def test_repeat_ticker_no_bonus(self, tmp_path):
+        """Stock that appeared yesterday does NOT get the first-day bonus."""
+        # Use Wed 2026-04-15 as analysis_date; yesterday is Tue 2026-04-14 (weekday).
+        _write_csv(tmp_path, date(2026, 4, 14), [{"ticker": "6173", "confidence": 44}])
+        results = [
+            {"ticker": "6173", "confidence": 47, "halt": False, "error": None,
+             "flags": [], "proximity_pts": 12},
+        ]
+        n = _apply_near_high_first_day(results, date(2026, 4, 15), tmp_path)
+        assert n == 0
+        assert results[0]["confidence"] == 47  # unchanged
+
+    def test_low_proximity_no_bonus(self, tmp_path):
+        """proximity_pts < 12 (not in 92-99% zone) → no bonus."""
+        results = [
+            {"ticker": "2330", "confidence": 50, "halt": False, "error": None,
+             "flags": [], "proximity_pts": 6},
+        ]
+        n = _apply_near_high_first_day(results, date(2026, 4, 13), tmp_path)
+        assert n == 0
+        assert results[0]["confidence"] == 50
+
+    def test_halted_no_bonus(self, tmp_path):
+        """Halted stocks are skipped."""
+        results = [
+            {"ticker": "6173", "confidence": 47, "halt": True, "error": None,
+             "flags": [], "proximity_pts": 12},
+        ]
+        n = _apply_near_high_first_day(results, date(2026, 4, 13), tmp_path)
+        assert n == 0
+
+    def test_capped_at_100(self, tmp_path):
+        """Confidence cannot exceed 100."""
+        results = [
+            {"ticker": "6173", "confidence": 98, "halt": False, "error": None,
+             "flags": [], "proximity_pts": 12},
+        ]
+        _apply_near_high_first_day(results, date(2026, 4, 13), tmp_path)
+        assert results[0]["confidence"] == 100
+
+    def test_no_proximity_key_no_bonus(self, tmp_path):
+        """Result dict missing proximity_pts key → no bonus (graceful fallback)."""
+        results = [
+            {"ticker": "6173", "confidence": 47, "halt": False, "error": None, "flags": []},
+        ]
+        n = _apply_near_high_first_day(results, date(2026, 4, 13), tmp_path)
+        assert n == 0
