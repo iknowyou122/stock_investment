@@ -347,6 +347,56 @@ class SurgeRadar:
             return f.get("margin_not_hot", 4), [f"MARGIN_COOL:{util*100:.1f}%"]
         return 0, [f"MARGIN_HOT:{util*100:.1f}%"]
 
+    def _score_ma5_walk(
+        self, ohlcv: DailyOHLCV, history: list[DailyOHLCV], n: int = 10
+    ) -> tuple[int, list[str]]:
+        """Quality confirmer: close walking MA5 after surge indicates sustained demand."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        all_bars = sorted_h + [ohlcv]
+        closes = pd.Series([d.close for d in all_bars])
+        if len(closes) < 5:
+            return 0, []
+        ma5 = closes.rolling(5).mean()
+        window = min(n, len(closes))
+        close_win = closes.iloc[-window:]
+        ma5_win = ma5.iloc[-window:]
+        valid = ma5_win.notna()
+        if valid.sum() == 0:
+            return 0, []
+        ratio = float((close_win[valid] >= ma5_win[valid]).mean())
+        if ratio >= 0.8:
+            return 2, ["MA5_WALK"]
+        if ratio < 0.5:
+            return -1, ["MA5_BREAK"]
+        return 0, []
+
+    def _score_bb_upper_walk(
+        self,
+        history: list[DailyOHLCV],
+        surge_day: int,
+        n: int = 5,
+        tolerance: float = 0.03,
+    ) -> tuple[int, list[str]]:
+        """BB upper walk: MOMENTUM_WALK tag on surge_day<=2; exhaustion deduction on day>=3."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        closes = pd.Series([d.close for d in sorted_h])
+        if len(closes) < 20:
+            return 0, []
+        ma = closes.rolling(20).mean()
+        std = closes.rolling(20).std(ddof=0)
+        bb_upper = ma + 2 * std
+        if len(bb_upper.dropna()) < n:
+            return 0, []
+        window_upper = bb_upper.iloc[-n:]
+        window_close = closes.iloc[-n:]
+        near_upper = int((window_close >= window_upper * (1 - tolerance)).sum())
+        bb_upper_rising = float(bb_upper.iloc[-1]) > float(bb_upper.iloc[-n])
+        if near_upper >= 3 and bb_upper_rising:
+            if surge_day >= 3:
+                return -3, ["BB_UPPER_EXHAUSTION"]
+            return 0, ["MOMENTUM_WALK"]
+        return 0, []
+
     # ------------------------------------------------------------------
     # Grade + aggregate
     # ------------------------------------------------------------------
@@ -380,8 +430,10 @@ class SurgeRadar:
         breakdown: dict[str, int] = {}
         raw = 0
 
+        consec = self._consecutive_surge_days(ohlcv, history)
+
         # pocket_pivot and breakout_20d frequently co-fire (both require price above recent
-        # highs with strong volume). Combined max = 22/85 pts. Intentional: double confirmation
+        # highs with strong volume). Combined max = 22/87 pts. Intentional: double confirmation
         # raises conviction. Adjust individual weights in surge_params.json if over-rewarding.
         factors = [
             ("vol_ratio", self._score_vol_ratio(ohlcv, history)),
@@ -394,6 +446,8 @@ class SurgeRadar:
             ("breakout_20d", self._score_breakout_20d(ohlcv, history)),
             ("rsi_healthy", self._score_rsi_healthy(history)),
             ("margin_not_hot", self._score_margin_not_hot(proxy)),
+            ("ma5_walk", self._score_ma5_walk(ohlcv, history)),
+            ("bb_upper_walk", self._score_bb_upper_walk(history, consec)),
         ]
 
         for name, (pts, flags) in factors:
@@ -416,7 +470,6 @@ class SurgeRadar:
         prev_close = sorted_h[-1].close if sorted_h else ohlcv.close
         day_chg_pct = round((ohlcv.close / prev_close - 1) * 100, 2) if prev_close > 0 else 0.0
         gap_pct = round((ohlcv.open / prev_close - 1) * 100, 2) if prev_close > 0 else 0.0
-        consec = self._consecutive_surge_days(ohlcv, history)
 
         return {
             "grade": grade,
