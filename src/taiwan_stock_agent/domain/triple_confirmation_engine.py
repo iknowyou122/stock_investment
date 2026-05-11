@@ -246,6 +246,7 @@ class _ScoreBreakdown:
     ma20_slope_pts: int = 0           # 0/5
     relative_strength_pts: int = 0    # 0/3/5
     bb_squeeze_breakout_pts: int = 0  # 0/2/3/5 — (deprecated for compression)
+    bb_upper_walk_pts: int = 0        # 0/3 — proximity=12, 3/5 days near BB upper and rising
 
     # --- Pillar 4: Accumulation Detection (max 13) ---
     emerging_setup_pts: int = 0       # 0/10
@@ -308,6 +309,7 @@ class _ScoreBreakdown:
             + self.ma20_slope_pts
             + self.relative_strength_pts
             + self.bb_squeeze_breakout_pts
+            + self.bb_upper_walk_pts
             # Pillar 4
             + self.emerging_setup_pts
             + self.pullback_setup_pts
@@ -378,6 +380,7 @@ class _ScoreBreakdown:
             + self.ma20_slope_pts
             + self.relative_strength_pts
             + self.bb_squeeze_breakout_pts
+            + self.bb_upper_walk_pts
         )
 
 
@@ -645,6 +648,11 @@ class TripleConfirmationEngine:
 
         # --- Pillar 3: Compression Structure ---
         bd.proximity_pts = self._proximity_score(ohlcv.close, volume_profile.twenty_day_high)
+        if bd.proximity_pts == 12:
+            bb_walk = self._bb_upper_walk_score(ohlcv_history)
+            bd.bb_upper_walk_pts = bb_walk
+            if bb_walk > 0:
+                bd.flags.append("BB_UPPER_COIL")
         bd.bb_compression_pts = self._bb_compression_score(ohlcv_history)
         bd.ma_convergence_pts = self._ma_convergence_score(ohlcv_history)
         bd.consolidation_weeks_pts = self._consolidation_weeks_score(ohlcv_history)
@@ -1169,6 +1177,26 @@ class TripleConfirmationEngine:
             return 0
         ratio = float((close_win[valid] >= ma5_win[valid]).mean())
         return 2 if ratio >= 0.8 else 0
+
+    @staticmethod
+    def _bb_upper_walk_score(
+        history: list[DailyOHLCV], n: int = 5, tolerance: float = 0.03
+    ) -> int:
+        """3 of last n days close >= BB_upper*(1-tol) AND BB_upper rising → +3 pts."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        closes = pd.Series([d.close for d in sorted_h])
+        if len(closes) < 20:
+            return 0
+        ma = closes.rolling(20).mean()
+        std = closes.rolling(20).std(ddof=0)
+        bb_upper = ma + 2 * std
+        if len(bb_upper.dropna()) < n:
+            return 0
+        window_upper = bb_upper.iloc[-n:]
+        window_close = closes.iloc[-n:]
+        near_upper = int((window_close >= window_upper * (1 - tolerance)).sum())
+        bb_upper_rising = float(bb_upper.iloc[-1]) > float(bb_upper.iloc[-n])
+        return 3 if (near_upper >= 3 and bb_upper_rising) else 0
 
     @staticmethod
     def _ma_convergence_score(history: list[DailyOHLCV]) -> int:

@@ -1954,3 +1954,74 @@ class TestMa5WalkScore:
         history = _make_history(40, base_close=100.0)
         pts = TripleConfirmationEngine._ma5_walk_score(history)
         assert pts == 2
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BB Upper Walk Factor tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_rising_history(n: int, step: float = 2.0) -> list[DailyOHLCV]:
+    """Linearly rising closes. In a 2pt/day uptrend, close stays within 3% of BB upper."""
+    d = date(2026, 1, 1)
+    bars = []
+    for i in range(n):
+        c = 100.0 + i * step
+        bars.append(DailyOHLCV(
+            ticker="TEST", trade_date=d + timedelta(i),
+            open=c - 0.5, high=c + 1.0, low=c - 1.0, close=c, volume=1_000_000,
+        ))
+    return bars
+
+
+class TestBbUpperWalkScore:
+    def test_rising_trend_near_upper_gets_3(self):
+        # Step=2 per day: close stays within ~3% of BB upper
+        history = _make_rising_history(25, step=2.0)
+        pts = TripleConfirmationEngine._bb_upper_walk_score(history)
+        assert pts == 3
+
+    def test_flat_history_not_rising_bb_gets_0(self):
+        # Flat closes → std=0 → BB upper = close; BB_upper not rising → 0
+        history = _make_history(25, flat=True)
+        pts = TripleConfirmationEngine._bb_upper_walk_score(history)
+        assert pts == 0
+
+    def test_declining_close_below_upper_gets_0(self):
+        # Declining: close falls away from BB upper (MA lags above) → fewer than 3 near upper
+        history = _make_declining_history(25, step=1.0)
+        pts = TripleConfirmationEngine._bb_upper_walk_score(history)
+        assert pts == 0
+
+    def test_insufficient_history_gets_0(self):
+        history = _make_rising_history(15)  # < 20 bars → BB not computable
+        pts = TripleConfirmationEngine._bb_upper_walk_score(history)
+        assert pts == 0
+
+    def test_field_exists_in_breakdown(self):
+        bd = _ScoreBreakdown()
+        assert hasattr(bd, "bb_upper_walk_pts")
+        assert bd.bb_upper_walk_pts == 0
+
+    def test_bb_upper_walk_in_total(self):
+        bd = _ScoreBreakdown()
+        bd.bb_upper_walk_pts = 3
+        base = _ScoreBreakdown().total
+        assert bd.total == base + 3
+
+    def test_only_awarded_when_proximity12(self):
+        # proximity_pts=6 (85-91% zone) → bb_upper_walk_pts must remain 0
+        history = _make_rising_history(40, step=2.0)
+        ohlcv = _make_ohlcv(close=history[-1].close)
+        # Proximity 6: close at 87% of twenty_day_high (85–91% range)
+        twenty_day_high = history[-1].close / 0.87
+        vp = _make_volume_profile(twenty_day_high=twenty_day_high)
+        chip = _make_chip_report(net_buyer_diff=0, active_branches=0)
+        engine = TripleConfirmationEngine()
+        engine._taiex_history = _make_history(30, base_close=17000.0)
+        _, bd, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history[:-1],
+            chip_report=chip,
+            volume_profile=vp,
+        )
+        assert bd.bb_upper_walk_pts == 0
