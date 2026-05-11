@@ -43,6 +43,7 @@ you will create drift that is expensive to fix.
 | Phase 4.21 | ✅ Done | **預突破信號引擎重新設計**：Gate 改為 4 硬條件（85–99% 區間 + BB≤15% + 流動性 + 大盤非下跌）✅ · Pillar 3 完全重寫（壓縮質量因子：proximity/bb_compression/ma_convergence/consolidation_weeks/inside_bar/prior_advance）✅ · 市場情感系統（BreadthData+MarketSentiment+compute_sentiment，標籤多頭熱絡/中性震盪/偏空謹慎）✅ · sentiment_client.py（TWSE breadth + Yahoo RSS）✅ · batch_plan.py 產業分組輸出（industry_strength計算、按產業強度排序）✅ · bot.py sentiment widget（_fetch_sentiment_sync + 市場輿情面板）✅ · test_market_sentiment.py（6/6測試通過）✅ · test_triple_confirmation_engine_v2_fix.py Pillar3 測試 ✅ |
 | Phase 4.22 | ✅ Done | **Early Signal Scoring Fixes**：Sector rank 分級加分（top5%+10/top10%+7/top20%+5）✅ · Near-high 首日補償（NEAR_HIGH_COIL +4，proximity_pts=12 首次出現）✅ · Uptrend/Neutral proximity_pts=12 降 LONG 門檻 5 pts ✅ · `test_persistence_bonus.py` import 修正 ✅ · ticker 次要排序確保可重現 ✅ · 新增 20 個單元測試 ✅ |
 | Phase 4.23 | ❌ Removed (2026-04-22) | **蓄積信號追蹤系統已移除**：`coil_monitor.py`, `db/coil_track.db`, 5 份 coil_*.csv 快取全部刪除。`batch_plan.py` Pass 2 整合移除。`bot.py` coil panel 移除。`make flow` 改為 plan + report。 |
+| Phase 4.24 | ✅ Done | **Dynamic BB Threshold + Momentum Walk**：G2 門檻改為 60 日分位數 ≤35p（fallback 絕對 ≤15%）✅ · `ma5_walk_pts` Pillar 1 因子（≥80% 收在 MA5 上 → +2，MA5_WALK flag）✅ · `bb_upper_walk_pts` Pillar 3 因子（proximity=12 + 收盤貼 BB 上軌 3/5 天 + 上揚 → +3，BB_UPPER_COIL flag）✅ · SurgeRadar `_score_ma5_walk`（+2/−1，MA5_WALK/MA5_BREAK）✅ · `_score_bb_upper_walk`（MOMENTUM_WALK tag / BB_UPPER_EXHAUSTION −3）✅ · `raw_max_pts` 85→87 ✅ · 28 新單元測試 ✅ |
 
 **免費 vs 付費因子說明：**
 
