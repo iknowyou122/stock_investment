@@ -1950,8 +1950,7 @@ class TestMa5WalkScore:
         base = _ScoreBreakdown().total
         assert bd.total == base + 2
 
-    def test_ma5_walk_flag_added(self):
-        # Rising history → _ma5_walk_score returns 2 for rising history
+    def test_rising_history_returns_2_pts(self):
         history = _make_history(40, base_close=100.0)
         pts = TripleConfirmationEngine._ma5_walk_score(history)
-        assert pts == 2  # confirms the method returns 2 for rising history
+        assert pts == 2
