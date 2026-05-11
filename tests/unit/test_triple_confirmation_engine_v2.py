@@ -956,6 +956,78 @@ class TestRegimeThresholds:
 
 
 # ---------------------------------------------------------------------------
+# 11b. _map_action: proximity_pts=12 lowers threshold by 5
+# ---------------------------------------------------------------------------
+
+class TestMapActionProximityThreshold:
+    """Verify that proximity_pts=12 lowers the LONG threshold by 5."""
+
+    def _make_bd_with_proximity(self, proximity: int) -> _ScoreBreakdown:
+        bd = _ScoreBreakdown()
+        bd.proximity_pts = proximity
+        return bd
+
+    def _make_taiex_history(self, rising: bool, n: int = 30):
+        from datetime import date, timedelta
+        bars = []
+        base = date(2026, 1, 2)
+        for i in range(n):
+            close = 20000.0 + (i * 50 if rising else -i * 50)
+            d = base + timedelta(days=i)
+            bars.append(DailyOHLCV(
+                ticker="^TWII", trade_date=d,
+                open=close, high=close + 50, low=close - 50, close=close, volume=1_000_000,
+            ))
+        return bars
+
+    def test_uptrend_proximity12_threshold_55(self):
+        """Uptrend + proximity_pts=12 → LONG threshold drops 60→55."""
+        eng = TripleConfirmationEngine()
+        eng._taiex_history = self._make_taiex_history(rising=True, n=30)
+        bd = self._make_bd_with_proximity(12)
+        assert eng._map_action(57, bd=bd) == "LONG"
+        assert eng._map_action(54, bd=bd) == "WATCH"  # still below 55
+
+    def test_uptrend_no_proximity_still_60(self):
+        """Uptrend without proximity=12 → threshold unchanged at 60."""
+        eng = TripleConfirmationEngine()
+        eng._taiex_history = self._make_taiex_history(rising=True, n=30)
+        bd = self._make_bd_with_proximity(6)
+        assert eng._map_action(59, bd=bd) == "WATCH"
+        assert eng._map_action(60, bd=bd) == "LONG"
+
+    def test_neutral_proximity12_threshold_60(self):
+        """Neutral regime + proximity_pts=12 → LONG threshold drops 65→60."""
+        eng = TripleConfirmationEngine()
+        # No taiex history → neutral
+        bd = self._make_bd_with_proximity(12)
+        assert eng._map_action(62, bd=bd) == "LONG"
+        assert eng._map_action(59, bd=bd) == "WATCH"
+
+    def test_neutral_no_proximity_still_65(self):
+        """Neutral without proximity=12 → threshold unchanged at 65."""
+        eng = TripleConfirmationEngine()
+        bd = self._make_bd_with_proximity(0)
+        assert eng._map_action(64, bd=bd) == "WATCH"
+        assert eng._map_action(65, bd=bd) == "LONG"
+
+    def test_downtrend_proximity12_unchanged_70(self):
+        """Downtrend + proximity_pts=12 → threshold stays 70 (cautious)."""
+        eng = TripleConfirmationEngine()
+        eng._taiex_history = self._make_taiex_history(rising=False, n=30)
+        bd = self._make_bd_with_proximity(12)
+        assert eng._map_action(69, bd=bd) == "WATCH"
+        assert eng._map_action(70, bd=bd) == "LONG"
+
+    def test_no_bd_backward_compatible(self):
+        """_map_action(score) without bd arg still uses standard thresholds."""
+        eng = TripleConfirmationEngine()
+        eng._taiex_history = self._make_taiex_history(rising=True, n=30)
+        assert eng._map_action(62) == "LONG"   # uptrend threshold 60
+        assert eng._map_action(59) == "WATCH"
+
+
+# ---------------------------------------------------------------------------
 # 12. scoring_version: score_full() result contains "v2" marker
 # ---------------------------------------------------------------------------
 

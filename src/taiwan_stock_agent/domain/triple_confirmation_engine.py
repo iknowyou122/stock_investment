@@ -1554,7 +1554,11 @@ class TripleConfirmationEngine:
     def _map_action(
         self, confidence: int, bd: _ScoreBreakdown | None = None, chip_pts: int = 0
     ) -> str:
-        """Map confidence score to action label using regime-adjusted thresholds."""
+        """Map confidence score to action label using regime-adjusted thresholds.
+
+        When proximity_pts == 12 (stock in 92-99% zone), reduce the LONG threshold
+        by 5 for uptrend and neutral regimes. Downtrend keeps the conservative 70.
+        """
         taiex = getattr(self, "_taiex_history", [])
         regime = self._compute_taiex_regime(taiex)
         if regime == "uptrend":
@@ -1563,6 +1567,9 @@ class TripleConfirmationEngine:
             long_threshold = _LONG_THRESHOLD_DOWNTREND
         else:
             long_threshold = _LONG_THRESHOLD_NEUTRAL
+
+        if bd is not None and bd.proximity_pts == 12 and regime != "downtrend":
+            long_threshold = max(long_threshold - 5, _WATCH_MIN + 1)
 
         if confidence >= long_threshold:
             return "LONG"
