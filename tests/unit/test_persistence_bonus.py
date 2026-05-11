@@ -227,3 +227,70 @@ class TestSectorRanksTiered:
         assert n == 0
         assert results[0]["confidence"] == 70
         assert results[1]["confidence"] == 60
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Near-high first-day bonus tests (Fix 2)
+# ──────────────────────────────────────────────────────────────────────────────
+from batch_plan import _apply_near_high_first_day
+
+
+class TestNearHighFirstDay:
+    def test_first_day_proximity12_gets_4(self, tmp_path):
+        """Stock appearing for the first time with proximity_pts=12 gets +4."""
+        results = [
+            {"ticker": "6173", "confidence": 47, "halt": False, "error": None,
+             "flags": [], "proximity_pts": 12},
+        ]
+        n = _apply_near_high_first_day(results, date(2026, 4, 13), tmp_path)
+        assert n == 1
+        assert results[0]["confidence"] == 51  # 47 + 4
+        assert "NEAR_HIGH_COIL" in results[0]["flags"]
+
+    def test_repeat_ticker_no_bonus(self, tmp_path):
+        """Stock that appeared yesterday does NOT get the first-day bonus."""
+        # Use Wed 2026-04-15 as analysis_date; yesterday is Tue 2026-04-14 (weekday).
+        _write_csv(tmp_path, date(2026, 4, 14), [{"ticker": "6173", "confidence": 44}])
+        results = [
+            {"ticker": "6173", "confidence": 47, "halt": False, "error": None,
+             "flags": [], "proximity_pts": 12},
+        ]
+        n = _apply_near_high_first_day(results, date(2026, 4, 15), tmp_path)
+        assert n == 0
+        assert results[0]["confidence"] == 47  # unchanged
+
+    def test_low_proximity_no_bonus(self, tmp_path):
+        """proximity_pts < 12 (not in 92-99% zone) → no bonus."""
+        results = [
+            {"ticker": "2330", "confidence": 50, "halt": False, "error": None,
+             "flags": [], "proximity_pts": 6},
+        ]
+        n = _apply_near_high_first_day(results, date(2026, 4, 13), tmp_path)
+        assert n == 0
+        assert results[0]["confidence"] == 50
+
+    def test_halted_no_bonus(self, tmp_path):
+        """Halted stocks are skipped."""
+        results = [
+            {"ticker": "6173", "confidence": 47, "halt": True, "error": None,
+             "flags": [], "proximity_pts": 12},
+        ]
+        n = _apply_near_high_first_day(results, date(2026, 4, 13), tmp_path)
+        assert n == 0
+
+    def test_capped_at_100(self, tmp_path):
+        """Confidence cannot exceed 100."""
+        results = [
+            {"ticker": "6173", "confidence": 98, "halt": False, "error": None,
+             "flags": [], "proximity_pts": 12},
+        ]
+        _apply_near_high_first_day(results, date(2026, 4, 13), tmp_path)
+        assert results[0]["confidence"] == 100
+
+    def test_no_proximity_key_no_bonus(self, tmp_path):
+        """Result dict missing proximity_pts key → no bonus (graceful fallback)."""
+        results = [
+            {"ticker": "6173", "confidence": 47, "halt": False, "error": None, "flags": []},
+        ]
+        n = _apply_near_high_first_day(results, date(2026, 4, 13), tmp_path)
+        assert n == 0

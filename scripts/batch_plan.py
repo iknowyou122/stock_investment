@@ -508,6 +508,35 @@ def _apply_persistence_bonus(
     return boosted
 
 
+def _apply_near_high_first_day(
+    results: list[dict],
+    analysis_date: date,
+    data_dir: Path,
+) -> int:
+    """Give +4 pts to stocks in the 92-99% zone (proximity_pts=12) on their first scan day.
+
+    Compensates for the missing day-1 persist bonus on strong pre-breakout setups.
+    Only activates when the ticker was absent from yesterday's CSV.
+    Called after _apply_persistence_bonus so there is no double-count.
+    Returns count of stocks boosted.
+    """
+    recent = _load_recent_csvs(analysis_date, data_dir, lookback=1, min_conf=40)
+    yesterday_tickers: set[str] = set(recent[0].keys()) if recent else set()
+
+    boosted = 0
+    for r in results:
+        if r.get("halt") or r.get("error") is not None:
+            continue
+        if r["ticker"] in yesterday_tickers:
+            continue
+        if r.get("proximity_pts", 0) == 12:
+            r["confidence"] = min(100, r["confidence"] + 4)
+            r["flags"] = list(r.get("flags") or []) + ["NEAR_HIGH_COIL"]
+            boosted += 1
+
+    return boosted
+
+
 def _make_label_repo():
     """Try to connect to PostgreSQL BrokerLabelRepository.
 
@@ -603,6 +632,7 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "_signal": signal,
             "trend_score": trend_score,
             "institution_continuity_pts": breakdown_pts.get("institution_continuity_pts", 0),
+            "proximity_pts": breakdown_pts.get("proximity_pts", 0),
         }
     except Exception as e:
         return {
@@ -622,6 +652,7 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "error": str(e),
             "_signal": None,
             "trend_score": 0,
+            "proximity_pts": 0,
         }
 
 
@@ -1113,6 +1144,10 @@ def run_batch(
     n_persist = _apply_persistence_bonus(results, analysis_date, scan_data_dir)
     if n_persist:
         _console.print(f"  [dim]↑ 持續訊號加分: {n_persist} 檔 (RISING +7 / STABLE +5)[/dim]")
+
+    n_near_high = _apply_near_high_first_day(results, analysis_date, scan_data_dir)
+    if n_near_high:
+        _console.print(f"  [dim]↑ 近高蓄積首日補償: {n_near_high} 檔 (NEAR_HIGH_COIL +4)[/dim]")
 
     # --- Optional: record to DB (source=live) for factor analysis ---
     if save_db:
