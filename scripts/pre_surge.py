@@ -51,6 +51,14 @@ _HEAT_DIR = _ROOT / "data" / "market_heat"
 _WATCHLIST_DIR = _ROOT / "data" / "pre_surge_watchlist"
 
 
+def _load_name_map() -> dict[str, str]:
+    files = sorted((_ROOT / "data" / "watchlist_cache").glob("name_map_*.json"))
+    if not files:
+        return {}
+    with open(files[-1], encoding="utf-8") as f:
+        return json.load(f)
+
+
 def _load_or_refresh(days: int, refresh: bool, industry_map: dict) -> dict:
     cache_path = Path("data") / f"_ohlcv_cache_{days}d.pkl"
     if cache_path.exists() and not refresh:
@@ -80,6 +88,7 @@ def main() -> int:
     args = ap.parse_args()
 
     industry_map = _load_industry_map()
+    name_map = _load_name_map()
     cached = _load_or_refresh(args.days, args.refresh, industry_map)
     all_bars_dict = cached["all_bars"]
 
@@ -169,7 +178,9 @@ def main() -> int:
             continue
 
         candidates.append({
-            "ticker": ticker, "industry": industry,
+            "ticker": ticker,
+            "name": name_map.get(ticker, ""),
+            "industry": industry,
             "ind_rank_pct": ih.rank_pct if ih else 0,
             "ind_5d": ih.ret_5d_pct if ih else 0,
             "heat_bonus": heat_bonus,
@@ -204,7 +215,8 @@ def main() -> int:
         box=box.ROUNDED,
     )
     t.add_column("Bonus", justify="right")
-    t.add_column("代號"); t.add_column("產業")
+    t.add_column("代號"); t.add_column("名稱")
+    t.add_column("產業")
     t.add_column("產業%", justify="right")
     t.add_column("產業5d%", justify="right")
     t.add_column("熱門概念")
@@ -220,7 +232,8 @@ def main() -> int:
         else:
             bonus_str = str(c["heat_bonus"])
         t.add_row(
-            bonus_str, c["ticker"], c["industry"][:8],
+            bonus_str, c["ticker"], c["name"][:8] or "—",
+            c["industry"][:8],
             f"{c['ind_rank_pct']:.0f}",
             f"{c['ind_5d']:+.1f}",
             c["concepts"][:18] or "—",
