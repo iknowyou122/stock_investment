@@ -479,7 +479,7 @@ class TripleConfirmationEngine:
         Returns (passes, conditions_available, conditions_met, detail_flags).
         Conditions:
         G1: Price Zone (85% <= close / 20d_high < 99%)
-        G2: BB Compression (BB width <= 15%)
+        G2: BB Compression (≤35th pct of 60d history; fallback: absolute ≤15%)
         G3: Liquidity (Turnover 20MA > Threshold)
         G4: Market Regime (TAIEX not downtrend)
         """
