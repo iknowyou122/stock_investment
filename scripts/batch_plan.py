@@ -318,7 +318,7 @@ class _EmptyLabelRepo:
 # ---------------------------------------------------------------------------
 
 def _apply_sector_ranks(results: list[dict], industry_map: dict[str, str]) -> int:
-    """Boost stocks in top 20% of their sector by +5 pts.
+    """Boost stocks by sector rank tier (top 5%→+10, top 10%→+7, top 20%→+5).
 
     Only applied when a sector has ≥ 3 valid (non-halt) results.
     Adds SECTOR_RANK:N/M flag to boosted stocks.
@@ -339,10 +339,19 @@ def _apply_sector_ranks(results: list[dict], industry_map: dict[str, str]) -> in
         if len(rs) < 3:
             continue
         sorted_rs = sorted(rs, key=lambda r: r["confidence"], reverse=True)
-        top_n = max(1, len(sorted_rs) // 5)  # top 20%
-        for rank, r in enumerate(sorted_rs[:top_n], 1):
-            r["confidence"] = min(100, r["confidence"] + 5)
-            #r["flags"] = list(r.get("flags") or []) + [f"SECTOR_RANK:{rank}/{len(sorted_rs)}"]
+        total = len(sorted_rs)
+        top_5pct  = max(1, total // 20)
+        top_10pct = max(1, total // 10)
+        top_20pct = max(1, total // 5)
+        for rank, r in enumerate(sorted_rs[:top_20pct], 1):
+            if rank <= top_5pct:
+                bonus = 10
+            elif rank <= top_10pct:
+                bonus = 7
+            else:
+                bonus = 5
+            r["confidence"] = min(100, r["confidence"] + bonus)
+            r["flags"] = list(r.get("flags") or []) + [f"SECTOR_RANK:{rank}/{total}"]
             boosted += 1
 
     return boosted
@@ -1095,7 +1104,7 @@ def run_batch(
     if industry_map:
         n_sector = _apply_sector_ranks(results, industry_map)
         if n_sector:
-            _console.print(f"  [dim]↑ 產業相對排名加分: {n_sector} 檔 (+5 pts each)[/dim]")
+            _console.print(f"  [dim]↑ 產業相對排名加分: {n_sector} 檔 (+5/+7/+10 tier)[/dim]")
 
     n_no_catalyst = _apply_catalyst_filter(results, industry_map, industry_strength)
     if n_no_catalyst:

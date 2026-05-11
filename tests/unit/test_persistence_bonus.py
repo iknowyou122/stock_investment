@@ -156,3 +156,74 @@ class TestPersistenceBonus:
         results = [_make_result("2330", 97)]
         _apply_persistence_bonus(results, date(2026, 4, 10), tmp_path)
         assert results[0]["confidence"] == 100  # capped
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sector rank tiering tests (Fix 1)
+# ──────────────────────────────────────────────────────────────────────────────
+from batch_plan import _apply_sector_ranks
+
+
+def _make_sector_results(tickers_confs: list[tuple[str, int]]) -> list[dict]:
+    return [
+        {"ticker": t, "confidence": c, "halt": False, "error": None, "flags": []}
+        for t, c in tickers_confs
+    ]
+
+
+class TestSectorRanksTiered:
+    def test_top_5pct_gets_10(self):
+        """With 20 stocks, rank 1 is top 5% → +10."""
+        results = _make_sector_results([(str(i), 50 - i) for i in range(20)])
+        industry_map = {str(i): "半導體" for i in range(20)}
+        _apply_sector_ranks(results, industry_map)
+        top = next(r for r in results if r["ticker"] == "0")
+        assert top["confidence"] == 60  # 50 + 10
+
+    def test_top_10pct_gets_7(self):
+        """With 20 stocks, rank 2 is top 10% (not top 5%) → +7."""
+        results = _make_sector_results([(str(i), 50 - i) for i in range(20)])
+        industry_map = {str(i): "半導體" for i in range(20)}
+        _apply_sector_ranks(results, industry_map)
+        second = next(r for r in results if r["ticker"] == "1")
+        assert second["confidence"] == 49 + 7
+
+    def test_top_20pct_gets_5(self):
+        """With 20 stocks, rank 4 is top 20% but not top 10% → +5."""
+        results = _make_sector_results([(str(i), 50 - i) for i in range(20)])
+        industry_map = {str(i): "半導體" for i in range(20)}
+        _apply_sector_ranks(results, industry_map)
+        fourth = next(r for r in results if r["ticker"] == "3")
+        assert fourth["confidence"] == 47 + 5
+
+    def test_rank_21pct_gets_no_bonus(self):
+        """With 20 stocks, rank 5 is just outside top 20% → no bonus."""
+        results = _make_sector_results([(str(i), 50 - i) for i in range(20)])
+        industry_map = {str(i): "半導體" for i in range(20)}
+        _apply_sector_ranks(results, industry_map)
+        fifth = next(r for r in results if r["ticker"] == "4")
+        assert fifth["confidence"] == 46  # unchanged
+
+    def test_sector_rank_flag_added(self):
+        """SECTOR_RANK:N/M flag must appear on boosted stocks."""
+        results = _make_sector_results([(str(i), 50 - i) for i in range(10)])
+        industry_map = {str(i): "光電" for i in range(10)}
+        _apply_sector_ranks(results, industry_map)
+        top = next(r for r in results if r["ticker"] == "0")
+        assert any("SECTOR_RANK:" in f for f in top["flags"])
+
+    def test_returns_count_of_boosted(self):
+        """Return value equals number of stocks that received a bonus."""
+        results = _make_sector_results([(str(i), 50 - i) for i in range(20)])
+        industry_map = {str(i): "半導體" for i in range(20)}
+        n = _apply_sector_ranks(results, industry_map)
+        assert n == 4  # top 20% of 20 = 4
+
+    def test_fewer_than_3_stocks_no_bonus(self):
+        """Sector with < 3 valid stocks gets no bonus (unchanged)."""
+        results = _make_sector_results([("A", 70), ("B", 60)])
+        industry_map = {"A": "小產業", "B": "小產業"}
+        n = _apply_sector_ranks(results, industry_map)
+        assert n == 0
+        assert results[0]["confidence"] == 70
+        assert results[1]["confidence"] == 60
