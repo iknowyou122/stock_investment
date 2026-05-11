@@ -338,7 +338,7 @@ def _apply_sector_ranks(results: list[dict], industry_map: dict[str, str]) -> in
     for sector, rs in sector_valid.items():
         if len(rs) < 3:
             continue
-        sorted_rs = sorted(rs, key=lambda r: r["confidence"], reverse=True)
+        sorted_rs = sorted(rs, key=lambda r: (-r["confidence"], r["ticker"]))
         total = len(sorted_rs)
         top_5pct  = max(1, total // 20)
         top_10pct = max(1, total // 10)
