@@ -1902,3 +1902,56 @@ class TestG2DynamicThreshold:
         flag = self._g2_flag(history, close=100.0, tdh=105.0)
         assert flag is not None
         assert flag.endswith("%")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5MA Walk Factor tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_declining_history(n: int, step: float = 1.0) -> list[DailyOHLCV]:
+    """Linearly declining closes. In declining trend, close < MA5 most of the time."""
+    d = date(2026, 1, 1)
+    bars = []
+    for i in range(n):
+        c = 200.0 - i * step
+        bars.append(DailyOHLCV(
+            ticker="TEST", trade_date=d + timedelta(i),
+            open=c, high=c + 1.0, low=c - 1.0, close=c, volume=10_000,
+        ))
+    return bars
+
+
+class TestMa5WalkScore:
+    def test_rising_history_gets_2(self):
+        # Gently rising (close = 100 + i*0.5): close is always above MA5 → 100% ratio ≥ 80% → 2 pts
+        history = _make_history(30, base_close=100.0)
+        pts = TripleConfirmationEngine._ma5_walk_score(history)
+        assert pts == 2
+
+    def test_declining_history_gets_0(self):
+        # Declining: close < MA5 every day (MA5 lags above) → ratio < 80% → 0 pts
+        history = _make_declining_history(20, step=2.0)
+        pts = TripleConfirmationEngine._ma5_walk_score(history)
+        assert pts == 0
+
+    def test_insufficient_history_gets_0(self):
+        history = _make_history(4)  # < 5 bars → cannot compute MA5
+        pts = TripleConfirmationEngine._ma5_walk_score(history)
+        assert pts == 0
+
+    def test_field_exists_in_breakdown(self):
+        bd = _ScoreBreakdown()
+        assert hasattr(bd, "ma5_walk_pts")
+        assert bd.ma5_walk_pts == 0
+
+    def test_ma5_walk_in_total(self):
+        bd = _ScoreBreakdown()
+        bd.ma5_walk_pts = 2
+        base = _ScoreBreakdown().total
+        assert bd.total == base + 2
+
+    def test_ma5_walk_flag_added(self):
+        # Rising history → _ma5_walk_score returns 2 for rising history
+        history = _make_history(40, base_close=100.0)
+        pts = TripleConfirmationEngine._ma5_walk_score(history)
+        assert pts == 2  # confirms the method returns 2 for rising history

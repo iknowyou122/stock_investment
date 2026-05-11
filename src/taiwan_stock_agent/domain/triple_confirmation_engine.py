@@ -216,6 +216,7 @@ class _ScoreBreakdown:
     dmi_initiation_pts: int = 0       # 0/2/4/6 — DMI: fresh cross/rising ADX → 6
     volume_dryup_pts: int = 0         # 0/4/8 — last 5d avg vs 20d avg (lower = better)
     volume_climax_pts: int = 0        # 0/4 — prior spike day + current dryup
+    ma5_walk_pts: int = 0             # 0/2 — close ≥ MA5 for ≥80% of last 10 days
 
     # --- Pillar 2A: Chip paid (max _PILLAR2_PAID_MAX = 40) ---
     breadth_pts: int = 0              # 0/5/10
@@ -280,6 +281,7 @@ class _ScoreBreakdown:
             + self.dmi_initiation_pts
             + self.volume_dryup_pts
             + self.volume_climax_pts
+            + self.ma5_walk_pts
             # Pillar 2A paid
             + self.breadth_pts
             + self.concentration_pts
@@ -359,6 +361,7 @@ class _ScoreBreakdown:
             + self.dmi_initiation_pts
             + self.volume_dryup_pts
             + self.volume_climax_pts
+            + self.ma5_walk_pts
         )
 
     @property
@@ -611,6 +614,10 @@ class TripleConfirmationEngine:
         bd.rsi_momentum_pts = self._rsi_momentum_score(ohlcv_history)
         bd.volume_dryup_pts = self._volume_dryup_score(ohlcv_history)
         bd.volume_climax_pts = self._volume_climax_score(ohlcv_history)
+        ma5_walk = self._ma5_walk_score(ohlcv_history)
+        bd.ma5_walk_pts = ma5_walk
+        if ma5_walk > 0:
+            bd.flags.append("MA5_WALK")
 
         # Pre-compute DMI once — shared by initiation score + risk deductions
         sorted_hist = sorted(ohlcv_history, key=lambda x: x.trade_date)
@@ -1145,6 +1152,23 @@ class TripleConfirmationEngine:
         if bb_width_raw < 0.12:
             return 5
         return 0
+
+    @staticmethod
+    def _ma5_walk_score(history: list[DailyOHLCV], n: int = 10) -> int:
+        """Close >= MA5 for >= 80% of last n days → +2 pts (short-term trend quality)."""
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        closes = pd.Series([d.close for d in sorted_h])
+        if len(closes) < 5:
+            return 0
+        ma5 = closes.rolling(5).mean()
+        window = min(n, len(closes))
+        close_win = closes.iloc[-window:]
+        ma5_win = ma5.iloc[-window:]
+        valid = ma5_win.notna()
+        if valid.sum() == 0:
+            return 0
+        ratio = float((close_win[valid] >= ma5_win[valid]).mean())
+        return 2 if ratio >= 0.8 else 0
 
     @staticmethod
     def _ma_convergence_score(history: list[DailyOHLCV]) -> int:
