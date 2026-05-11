@@ -529,7 +529,7 @@ def _apply_near_high_first_day(
             continue
         if r["ticker"] in yesterday_tickers:
             continue
-        if r.get("proximity_pts", 0) == 12:
+        if r.get("proximity_pts", 0) == 12:  # 12 = max proximity band (92-99% of 20d high); see _proximity_score()
             r["confidence"] = min(100, r["confidence"] + 4)
             r["flags"] = list(r.get("flags") or []) + ["NEAR_HIGH_COIL"]
             boosted += 1
