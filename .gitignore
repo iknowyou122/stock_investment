@@ -21,3 +21,11 @@ data/scans/*.csv
 data/scans/*.html
 data/surge_signals.db
 data/watchlist_cache/
+
+# Phase 4.25 heat engine — daily snapshots & cached OHLCV
+data/_ohlcv_cache_*.pkl
+data/market_heat/
+data/pre_surge_watchlist/
+data/tight_base_backtest.csv
+data/tight_base_v2_backtest.csv
+data/surge_backtest_test.csv
