@@ -455,7 +455,7 @@ class SurgeRadar:
             raw += pts
             all_flags.extend(flags)
 
-        raw_max = self._params.get("raw_max_pts", 85)
+        raw_max = self._params.get("raw_max_pts", 87)
         score = min(100, round(raw / raw_max * 100))
         grade = self._grade(score)
 
