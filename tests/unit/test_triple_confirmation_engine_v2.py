@@ -1821,3 +1821,84 @@ class TestNewGate:
         signal = eng.score(ohlcv, hist, chip, vp)
         assert "NO_SETUP" in signal.data_quality_flags
         assert any("G2_BB_WIDE" in f for f in signal.data_quality_flags)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# G2 Dynamic BB Threshold tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_alternating_history(
+    n: int, amplitude: float, base: float = 100.0, start_day: int = 0
+) -> list[DailyOHLCV]:
+    """Close alternates base±amplitude every bar. High amplitude → wide BB."""
+    d = date(2026, 1, 1)
+    bars = []
+    for i in range(n):
+        c = base + (amplitude if i % 2 == 0 else -amplitude)
+        bars.append(DailyOHLCV(
+            ticker="TEST",
+            trade_date=d + timedelta(start_day + i),
+            open=c, high=c + 1.0, low=c - 1.0, close=c,
+            volume=1_000_000,
+        ))
+    return bars
+
+
+class TestG2DynamicThreshold:
+    def _g2_flag(self, history: list[DailyOHLCV], close: float = 100.0, tdh: float = 105.0) -> str | None:
+        engine = TripleConfirmationEngine()
+        ohlcv = _make_ohlcv(close=close)
+        vp = _make_volume_profile(twenty_day_high=tdh)
+        _, _, _, flags = engine._gate_check(ohlcv, history, vp)
+        return next((f for f in flags if "G2" in f), None)
+
+    def test_low_percentile_passes(self):
+        # 59 wide-BB bars, then 20 narrow-BB bars → current BB at low percentile → PASS
+        history = (
+            _make_alternating_history(59, amplitude=20.0) +
+            _make_alternating_history(20, amplitude=0.05, start_day=59)
+        )
+        flag = self._g2_flag(history, close=100.0, tdh=105.0)
+        assert flag is not None
+        assert "GATE_PASS:G2_BB_PCT:" in flag
+
+    def test_high_percentile_fails(self):
+        # 59 narrow-BB bars, then 20 wide-BB bars → current BB at high percentile → FAIL
+        history = (
+            _make_alternating_history(59, amplitude=0.05) +
+            _make_alternating_history(20, amplitude=20.0, start_day=59)
+        )
+        flag = self._g2_flag(history, close=100.0, tdh=115.0)
+        assert flag is not None
+        assert "GATE_FAIL:G2_BB_WIDE_PCT:" in flag
+
+    def test_short_history_fallback_narrow_passes(self):
+        # 40 bars → bb_width_pct is None → fallback to absolute ≤15%; amplitude 0.05 → BB ≈ 0.2% → PASS
+        history = _make_alternating_history(40, amplitude=0.05)
+        flag = self._g2_flag(history, close=100.0, tdh=105.0)
+        assert flag is not None
+        assert "GATE_PASS:G2_BB_PCT:" in flag
+
+    def test_short_history_fallback_wide_fails(self):
+        # 40 bars, amplitude=20 → BB ≈ wide → fallback absolute > 15% → FAIL
+        history = _make_alternating_history(40, amplitude=20.0)
+        flag = self._g2_flag(history, close=100.0, tdh=115.0)
+        assert flag is not None
+        assert "GATE_FAIL:G2_BB_WIDE_PCT:" in flag
+
+    def test_flag_uses_p_suffix_for_percentile(self):
+        # When bb_width_pct is computed (79+ bars), flag value ends with 'p'
+        history = (
+            _make_alternating_history(59, amplitude=20.0) +
+            _make_alternating_history(20, amplitude=0.05, start_day=59)
+        )
+        flag = self._g2_flag(history, close=100.0, tdh=105.0)
+        assert flag is not None
+        assert flag.endswith("p")
+
+    def test_flag_uses_pct_suffix_for_fallback(self):
+        # When bb_width_pct is None (40 bars), flag value ends with '%'
+        history = _make_alternating_history(40, amplitude=0.05)
+        flag = self._g2_flag(history, close=100.0, tdh=105.0)
+        assert flag is not None
+        assert flag.endswith("%")

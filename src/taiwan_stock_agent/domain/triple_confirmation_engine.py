@@ -500,14 +500,20 @@ class TripleConfirmationEngine:
         else:
             detail_flags.append("GATE_SKIP:G1_NO_HIGH")
 
-        # G2: BB Compression
-        _, _, bb_w, _ = self._calculate_bb(ohlcv_history)
+        # G2: BB Compression (dynamic: ≤35th percentile of 60d history; fallback: absolute ≤15%)
+        _, _, bb_w, bb_width_pct = self._calculate_bb(ohlcv_history)
         if bb_w is not None:
-            if bb_w <= 0.15:
-                conditions_met += 1
-                detail_flags.append(f"GATE_PASS:G2_BB:{bb_w*100:.1f}%")
+            if bb_width_pct is not None:
+                threshold_met = bb_width_pct <= 35.0
+                label = f"{bb_width_pct:.1f}p"
             else:
-                detail_flags.append(f"GATE_FAIL:G2_BB_WIDE:{bb_w*100:.1f}%")
+                threshold_met = bb_w <= 0.15
+                label = f"{bb_w * 100:.1f}%"
+            if threshold_met:
+                conditions_met += 1
+                detail_flags.append(f"GATE_PASS:G2_BB_PCT:{label}")
+            else:
+                detail_flags.append(f"GATE_FAIL:G2_BB_WIDE_PCT:{label}")
         else:
             detail_flags.append("GATE_SKIP:G2_NO_BB")
 
