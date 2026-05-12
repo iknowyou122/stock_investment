@@ -179,7 +179,7 @@ bot:
 
 # ── 噴發雷達掃描（短線爆量捕捉）─────────────────────────────────────────────
 surge:
-	$(PYTHON) scripts/surge_scan.py --save-csv $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(DATE),--date $(DATE))
+	$(PYTHON) scripts/surge_scan.py --save-csv --llm $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(DATE),--date $(DATE))
 
 surge-live:
 	$(PYTHON) scripts/surge_scan.py --intraday $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS))
