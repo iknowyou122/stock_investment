@@ -767,6 +767,13 @@ def _generate_html_report(
         <ul class="vlist">{pros_html}{cons_html}</ul>
       </div>"""
 
+        llm_text = r.get("llm_analysis", "")
+        llm_html = f"""
+      <div class="ai-box">
+        <div class="ai-label">🤖 AI 評估</div>
+        <div class="ai-text">{_esc(llm_text)}</div>
+      </div>""" if llm_text else ""
+
         cards.append(f"""
     <div class="card" style="animation-delay:{delay}s">
       <div class="card-header">
@@ -785,7 +792,7 @@ def _generate_html_report(
         <div class="m"><div class="mv">{ind_s}</div><div class="ml">產業排名</div></div>
         <div class="m"><div class="mv">{inst}</div><div class="ml">法人連買</div></div>
       </div>
-      <div class="chart" data-ticker="{_esc(ticker)}"></div>{verdict_html}
+      <div class="chart" data-ticker="{_esc(ticker)}"></div>{verdict_html}{llm_html}
       <div class="links">
         <a class="link-btn tv" href="{tv_url}" target="_blank" rel="noopener">TradingView</a>
         <a class="link-btn gi" href="{gi_url}" target="_blank" rel="noopener">Goodinfo</a>
@@ -849,6 +856,9 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .vlist li::before{{content:"";position:absolute;left:2px;top:6px;width:6px;height:6px;border-radius:50%}}
 .pro{{color:#7ee787}}.pro::before{{background:#3fb950}}
 .con{{color:#ffa198}}.con::before{{background:#f85149}}
+.ai-box{{padding:10px 16px 14px;border-top:1px solid #21262d;background:rgba(56,139,248,.04)}}
+.ai-label{{font-size:10px;color:#58a6ff;font-weight:700;letter-spacing:.5px;margin-bottom:5px}}
+.ai-text{{font-size:12px;color:#c9d1d9;line-height:1.65}}
 </style>
 </head>
 <body>
@@ -994,6 +1004,63 @@ def _notify_surge_telegram(csv_path: Path, scan_date: str) -> None:
         _console.print(f"  [dim red]TG surge notify error: {exc}[/dim red]")
 
 
+def _run_llm_analysis(results: list[dict], llm_provider) -> None:
+    """Call LLM for every result and store 'llm_analysis' field in-place."""
+    import re as _re2
+    from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+
+    def _one(r: dict) -> tuple[str, str]:
+        ticker = r.get("ticker", "")
+        name   = r.get("name") or ticker
+        raw    = r.get("flags", "")
+        flags  = "|".join(raw) if isinstance(raw, list) else (raw or "")
+        fset   = set(flags.split("|"))
+
+        day      = "DAY1（首次噴發）" if "SURGE_DAY1" in fset else "DAY2（連續第二天）"
+        rsi_m    = _re2.search(r'RSI_(\w+):([\d.]+)', flags)
+        rsi_desc = f"RSI {rsi_m.group(2)}（{rsi_m.group(1)}）" if rsi_m else ""
+        margin   = next((f for f in ["MARGIN_HOT", "MARGIN_WARM", "MARGIN_COOL"] if f in fset), "")
+        ind_m    = _re2.search(r'IND_(HOT|WARM|COLD):(\d+)', flags)
+        ind_desc = f"產業熱度 {ind_m.group(1)}:{ind_m.group(2)}" if ind_m else ""
+
+        extras = []
+        if "BB_SQUEEZE_BREAK" in fset: extras.append("BB 壓縮突破（高品質型態）")
+        if "INTL_TAIL"        in fset: extras.append("美股半導體昨夜強，國際順風")
+        if "MA5_BREAK"        in fset: extras.append("⚠️ MA5 均線結構破壞")
+        if "RSI_BREAKOUT"     in fset: extras.append("⚠️ RSI 已過熱")
+        if "MARGIN_HOT"       in fset: extras.append("⚠️ 融資水位過高，強制賣壓風險")
+
+        prompt = (
+            "你是台灣短線交易員，策略是噴發信號出現後 T+2 日進場。\n"
+            "請根據以下資料，用繁體中文寫 2-3 句操作建議：明確說買或不買、"
+            "指出最值得注意的一個風險或優勢、語氣像交易員告訴同事，不要廢話。\n\n"
+            f"代號: {ticker} {name} | 產業: {r.get('industry','')}\n"
+            f"今日: 漲 {r.get('day_chg_pct',0):.1f}%，量比 {r.get('vol_ratio',0):.1f}x，"
+            f"收盤強度 {r.get('close_strength',0):.2f}\n"
+            f"信號: {day} | {rsi_desc} | {margin} | {ind_desc}\n"
+            f"特徵: {', '.join(extras) if extras else '無特殊加分/扣分項'}\n\n"
+            "操作建議:"
+        )
+        try:
+            return ticker, llm_provider.complete(prompt, max_tokens=120).strip()
+        except Exception as e:
+            return ticker, f"（LLM 分析失敗: {e}）"
+
+    _console.print(f"  [dim]🤖 LLM 分析 {len(results)} 檔（parallel 4）…[/dim]")
+    ticker_map = {r.get("ticker", ""): r for r in results}
+    done = 0
+    with _TPE(max_workers=4) as pool:
+        futures = {pool.submit(_one, r): r for r in results}
+        for fut in _ac(futures):
+            ticker, text = fut.result()
+            if ticker in ticker_map:
+                ticker_map[ticker]["llm_analysis"] = text
+            done += 1
+            if done % 5 == 0 or done == len(results):
+                _console.print(f"  [dim]  ✓ {done}/{len(results)}[/dim]")
+    _console.print("  [green]✅ LLM 分析完成[/green]")
+
+
 def run_surge_scan(
     tickers: list[str],
     analysis_date: date,
@@ -1005,6 +1072,7 @@ def run_surge_scan(
     notify: bool = False,
     intraday: bool = False,
     no_html: bool = False,
+    llm_provider=None,
 ) -> list[dict]:
     from taiwan_stock_agent.infrastructure.twse_client import ChipProxyFetcher
 
@@ -1140,6 +1208,9 @@ def run_surge_scan(
         inserted = _surge_db_insert(_db_rows)
         _console.print(f"  [dim]📋 surge_signals DB: {inserted} 筆新增[/dim]")
 
+    if llm_provider is not None and results:
+        _run_llm_analysis(results, llm_provider)
+
     if csv_path and results:
         _save_surge_csv(results, scan_date, analysis_date, csv_path, name_map, industry_map)
         html_path = csv_path.with_suffix(".html")
@@ -1189,6 +1260,8 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--intraday", action="store_true", help="盤中即時模式（MIS 報價取代 FinMind 今日 bar）")
     parser.add_argument("--no-html", action="store_true", dest="no_html", help="不產生 HTML 報告也不自動開啟瀏覽器")
+    parser.add_argument("--llm", action="store_true", help="對所有個股執行 LLM 評估並嵌入 HTML")
+    parser.add_argument("--llm-model", default=None, help="指定 LLM provider: claude / openai / gemini（預設自動偵測）")
     args = parser.parse_args()
 
     if args.intraday:
@@ -1240,6 +1313,13 @@ def main() -> None:
     save_csv = args.save_csv and not args.no_save
     final_csv_path = csv_path if save_csv else None
 
+    llm_provider = None
+    if args.llm:
+        from taiwan_stock_agent.domain.llm_provider import create_llm_provider
+        llm_provider = create_llm_provider(args.llm_model)
+        if llm_provider is None:
+            _console.print("  [yellow]⚠ 找不到 LLM API Key，略過 LLM 分析[/yellow]")
+
     run_surge_scan(
         tickers=tickers,
         analysis_date=analysis_date,
@@ -1251,6 +1331,7 @@ def main() -> None:
         notify=args.notify,
         intraday=args.intraday,
         no_html=args.no_html,
+        llm_provider=llm_provider,
     )
 
     # ── 訊號追蹤（盤後模式才執行）────────────────────────────────────────────
