@@ -146,7 +146,7 @@ SURGE_CSV_FIELDS = [
     "scan_date", "analysis_date", "ticker", "name", "market", "industry",
     "grade", "score", "vol_ratio", "close_strength", "day_chg_pct",
     "gap_pct", "surge_day", "industry_rank_pct", "rsi", "inst_consec_days",
-    "score_breakdown", "flags",
+    "close_price", "score_breakdown", "flags",
 ]
 
 GRADE_COLOR = {
@@ -804,6 +804,7 @@ def _save_surge_csv(
                 "industry_rank_pct": r.get("industry_rank_pct", ""),
                 "rsi": r.get("rsi", ""),
                 "inst_consec_days": r.get("inst_consec_days", 0),
+                "close_price": r.get("close_price", ""),
                 "score_breakdown": json.dumps(r.get("score_breakdown", {})),
                 "flags": "|".join(r.get("flags", [])),
             })

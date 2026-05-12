@@ -647,11 +647,15 @@ async def _job_surge_live(force: bool = False, notify_fn=None) -> None:
 
 
 async def _job_surge_postmarket(force: bool = False, notify_fn=None) -> None:
-    """17:05 — save today's final surge results + update market heat snapshots."""
+    """17:05 — surge scan + market heat + D+1 tracker + entry alert."""
     if not force and not is_trading_day(date.today()):
         logger.info("surge_postmarket skipped — not a trading day")
         return
+    notify = notify_fn or _send
+    today = date.today()
     logger.info("surge_postmarket START")
+
+    # ── 1. Surge scan ─────────────────────────────────────────────────────────
     code, out = await _run_subprocess_async([
         sys.executable, "scripts/surge_scan.py", "--save-csv",
     ])
@@ -659,7 +663,28 @@ async def _job_surge_postmarket(force: bool = False, notify_fn=None) -> None:
         logger.error("surge_postmarket FAILED code=%d\n%s", code, out[:300])
     else:
         logger.info("surge_postmarket DONE")
-    # Update market heat snapshots for tomorrow's surge scoring
+
+    # ── 2 & 3. Surge tracker: save today's watch + check D+1 confirmation ─────
+    try:
+        _scripts_dir = str(Path(__file__).parent)
+        if _scripts_dir not in sys.path:
+            sys.path.insert(0, _scripts_dir)
+        import surge_tracker  # noqa: PLC0415
+
+        _SCANS_DIR = _ROOT / "data" / "scans"
+        surge_tracker.save_watch(_SCANS_DIR / f"surge_{today.isoformat()}.csv", today)
+
+        yesterday = today - timedelta(days=1)
+        confirmed = surge_tracker.check_d1(yesterday, _get_latest_market_map())
+        if confirmed:
+            await notify(surge_tracker.format_d1_alert(confirmed, yesterday))
+            logger.info("surge_tracker: pushed D+1 alert (%d signals)", len(confirmed))
+        else:
+            logger.info("surge_tracker: no D+1 confirmations for %s", yesterday)
+    except Exception as e:
+        logger.error("surge_tracker error: %s", e)
+
+    # ── 4. Update market heat snapshots for tomorrow's surge scoring ──────────
     code2, out2 = await _run_subprocess_async([
         sys.executable, "scripts/update_market_heat.py",
     ])
