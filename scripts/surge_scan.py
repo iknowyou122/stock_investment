@@ -1111,6 +1111,70 @@ def main() -> None:
         no_html=args.no_html,
     )
 
+    # ── 訊號追蹤（盤後模式才執行）────────────────────────────────────────────
+    if not args.intraday and final_csv_path:
+        _run_tracker(final_csv_path, analysis_date, market_map, notify=args.notify)
+
+
+def _run_tracker(csv_path: Path, scan_date: "date", market_map: dict, notify: bool = False) -> None:
+    """D+0 存 watch → D+1 驗條件 → 印出（並選擇性推播）進場提醒。"""
+    import sys as _sys
+    _scripts = str(Path(__file__).parent)
+    if _scripts not in _sys.path:
+        _sys.path.insert(0, _scripts)
+    try:
+        import surge_tracker
+    except ImportError as e:
+        _console.print(f"[yellow]surge_tracker import 失敗，略過追蹤: {e}[/yellow]")
+        return
+
+    # D+0：存今日 ALPHA watch
+    watch_path = surge_tracker.save_watch(csv_path, scan_date)
+    if watch_path:
+        _console.print(f"  [dim]📌 Watch 已儲存: {watch_path}[/dim]")
+
+    # D+1：驗昨日 watch
+    from datetime import timedelta
+    yesterday = scan_date - timedelta(days=1)
+    confirmed = surge_tracker.check_d1(yesterday, market_map)
+    if not confirmed:
+        _console.print(f"  [dim]🔍 D+1 確認（{yesterday}）：無通過候選[/dim]")
+        return
+
+    # 印出確認清單
+    from rich.table import Table
+    t = Table(title=f"✅ T+2 進場候選（D+0={yesterday}）", show_header=True, box=None)
+    for col in ["代號", "名稱", "D+0收", "D+1收", "漲跌%", "得分", "進場參考≤"]:
+        t.add_column(col)
+    for sig in confirmed:
+        arrow = "📈" if sig["d1_chg_pct"] >= 0 else "📉"
+        t.add_row(
+            sig["ticker"], sig["name"],
+            str(sig["close_d0"]), str(sig["close_d1"]),
+            f"{arrow}{sig['d1_chg_pct']:+.1f}%",
+            str(int(sig["score"])),
+            str(sig["entry_hi"]),
+        )
+    _console.print(t)
+
+    # 選擇性推播 Telegram
+    if notify:
+        msg = surge_tracker.format_d1_alert(confirmed, yesterday)
+        _notify_text_telegram(msg)
+
+
+def _notify_text_telegram(text: str) -> None:
+    import urllib.request, urllib.parse
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        return
+    try:
+        data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}).encode()
+        urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=10)
+    except Exception as e:
+        _console.print(f"  [yellow]Telegram 推播失敗: {e}[/yellow]")
+
 
 if __name__ == "__main__":
     main()
