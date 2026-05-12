@@ -574,7 +574,24 @@ def _fetch_chart_candles(ticker: str, market: str) -> dict:
         return empty
 
 
-def _buy_verdict(r: dict) -> dict:
+_WEEKDAY_ZH = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
+
+def _entry_day_str(scan_date_str: str, is_day2: bool) -> str:
+    """Return human-readable T+2 entry date string, skipping weekends."""
+    from datetime import date as _d, timedelta as _td
+    try:
+        d = _d.fromisoformat(scan_date_str)
+        steps = 1 if is_day2 else 2  # DAY2: original surge was D-1, so T+2 = today+1
+        while steps > 0:
+            d += _td(days=1)
+            if d.weekday() < 5:
+                steps -= 1
+        return f"{d.month}/{d.day}（{_WEEKDAY_ZH[d.weekday()]}）"
+    except Exception:
+        return "T+2"
+
+
+def _buy_verdict(r: dict, scan_date: str = "") -> dict:
     """Derive buy / watch / avoid verdict from a surge result dict."""
     import re as _re
 
@@ -614,7 +631,7 @@ def _buy_verdict(r: dict) -> dict:
     bb_m    = _re.search(r'BB_WIDE:([\d.]+)', flags)
     bb_w    = float(bb_m.group(1)) if bb_m else 0
 
-    entry_day = "5/13（週二）" if is_day2 else "5/14（週三）"
+    entry_day = _entry_day_str(scan_date, is_day2)
 
     pros: list[str] = []
     cons: list[str] = []
@@ -755,7 +772,7 @@ def _generate_html_report(
         ind_s    = f"{ind_pct:.0f}%" if ind_pct is not None else "--"
         delay    = f"{i * 0.05:.2f}"
 
-        vd = _buy_verdict(r)
+        vd = _buy_verdict(r, scan_date=scan_date)
         pros_html = "".join(f'<li class="pro">{_esc(p)}</li>' for p in vd["pros"])
         cons_html = "".join(f'<li class="con">{_esc(c)}</li>' for c in vd["cons"])
         verdict_html = f"""
