@@ -574,6 +574,123 @@ def _fetch_chart_candles(ticker: str, market: str) -> dict:
         return empty
 
 
+def _buy_verdict(r: dict) -> dict:
+    """Derive buy / watch / avoid verdict from a surge result dict."""
+    import re as _re
+
+    flags = r.get("flags", "")
+    score = r.get("score", 0)
+    vol   = r.get("vol_ratio", 0)
+    cs    = r.get("close_strength", 0)
+
+    rsi_m   = _re.search(r'RSI_(?:HEALTHY|WEAK|BREAKOUT):([\d.]+)', flags)
+    rsi_val = float(rsi_m.group(1)) if rsi_m else None
+
+    is_day1         = "SURGE_DAY1"       in flags
+    is_day2         = "SURGE_DAY2"       in flags
+    rsi_healthy     = "RSI_HEALTHY"      in flags
+    rsi_weak        = "RSI_WEAK"         in flags
+    rsi_overbought  = "RSI_BREAKOUT"     in flags
+    margin_cool     = "MARGIN_COOL"      in flags
+    margin_warm     = "MARGIN_WARM"      in flags
+    margin_hot      = "MARGIN_HOT"       in flags
+    has_pocket      = "POCKET_PIVOT"     in flags
+    has_ma5_walk    = "MA5_WALK"         in flags
+    has_ma5_break   = "MA5_BREAK"        in flags
+    has_momentum    = "MOMENTUM_WALK"    in flags
+    has_bb_squeeze  = "BB_SQUEEZE_BREAK" in flags
+    has_intl        = "INTL_TAIL"        in flags
+    has_ind_accel   = "IND_ACCEL"        in flags
+
+    ind_hot_m  = _re.search(r'IND_HOT:(\d+)',  flags)
+    ind_warm_m = _re.search(r'IND_WARM:(\d+)', flags)
+    ind_cold_m = _re.search(r'IND_COLD:(\d+)', flags)
+    ind_score  = int((ind_hot_m or ind_warm_m or ind_cold_m).group(1)) \
+                 if (ind_hot_m or ind_warm_m or ind_cold_m) else 0
+    is_cold = bool(ind_cold_m)
+    is_hot  = bool(ind_hot_m)
+
+    bb_m    = _re.search(r'BB_WIDE:([\d.]+)', flags)
+    bb_w    = float(bb_m.group(1)) if bb_m else 0
+
+    entry_day = "5/13（週二）" if is_day2 else "5/14（週三）"
+
+    pros: list[str] = []
+    cons: list[str] = []
+
+    # ── pros ──────────────────────────────────────────────
+    if is_day1:
+        pros.append("DAY1 首次噴發，進場時機最佳")
+    if has_bb_squeeze:
+        pros.append("BB 壓縮後突破，高品質型態")
+    if has_pocket:
+        pros.append("Pocket Pivot：法人出手確認")
+    if rsi_healthy:
+        rv = f"{rsi_val:.0f}" if rsi_val else "健康"
+        pros.append(f"RSI {rv}，動能健康未過熱")
+    if margin_cool:
+        pros.append("融資水位低（<15%），籌碼乾淨")
+    if is_hot and ind_score >= 80:
+        pros.append(f"產業強勢（IND:{ind_score}），順風進場")
+    if has_intl:
+        pros.append("美股 AI / 半導體隔夜強，國際順風")
+    if has_ma5_walk:
+        pros.append("MA5 持續向上走（動能健康）")
+    if has_momentum:
+        pros.append("MOMENTUM_WALK：近期持續站 MA5 上方")
+    if has_ind_accel:
+        pros.append("產業動能加速（IND_ACCEL）")
+    if vol >= 4.0:
+        pros.append(f"量能爆發 {vol:.1f}x，主力積極進場")
+    elif vol >= 2.5:
+        pros.append(f"量能充足 {vol:.1f}x，突破可信")
+    if cs >= 0.9:
+        pros.append(f"收盤接近最高（{cs:.0%}），無賣壓")
+
+    # ── cons ──────────────────────────────────────────────
+    if is_day2:
+        cons.append("DAY2 已連漲兩天，進場成本較高")
+    if rsi_overbought:
+        rv = f"{rsi_val:.0f}" if rsi_val else "70+"
+        cons.append(f"RSI 過熱（{rv}），短線回調風險")
+    if rsi_weak:
+        cons.append("RSI 偏弱，價漲動能未跟上（背離疑慮）")
+    if margin_hot:
+        cons.append("融資高（>25%），強制賣壓風險大")
+    elif margin_warm:
+        cons.append("融資偏高（15-25%），注意砍壓")
+    if has_ma5_break:
+        cons.append("MA5_BREAK：均線結構破壞，趨勢轉弱")
+    if is_cold:
+        cons.append(f"產業偏冷（IND:{ind_score}），孤立突破風險")
+    if vol < 2.0:
+        cons.append(f"量能偏弱（{vol:.1f}x），突破可信度低")
+    if cs < 0.65:
+        cons.append(f"收盤偏低（{cs:.0%}），尾盤有賣壓")
+    if bb_w > 0.5:
+        cons.append(f"BB 嚴重擴張（{bb_w:.2f}），型態過度延伸")
+    if is_day2 and rsi_val and rsi_val >= 67:
+        cons.append(f"RSI {rsi_val:.0f} 接近70，DAY2 追高需謹慎")
+
+    # ── verdict ───────────────────────────────────────────
+    fatal        = margin_hot or rsi_overbought or has_ma5_break
+    cold_weak    = is_cold and score < 72
+    strong_buy   = score >= 80 and is_day1 and rsi_healthy and not margin_warm and not is_cold
+    decent_buy   = score >= 70 and not fatal and not is_cold and len(cons) <= 1
+
+    if fatal or (cold_weak and len(cons) >= 2):
+        verdict, vcls = "不買", "vno"
+        summary = "存在重大風險因子，不建議進場"
+    elif strong_buy or decent_buy:
+        verdict, vcls = "買", "vyes"
+        summary = f"強訊號，建議 {entry_day} T+2 進場"
+    else:
+        verdict, vcls = "觀察", "vwatch"
+        summary = f"信號有疑慮，{entry_day} 確認量能後再決定"
+
+    return {"verdict": verdict, "vcls": vcls, "summary": summary, "pros": pros, "cons": cons}
+
+
 def _generate_html_report(
     results: list[dict],
     scan_date: str,
@@ -637,6 +754,18 @@ def _generate_html_report(
         ind_s    = f"{ind_pct:.0f}%" if ind_pct is not None else "--"
         delay    = f"{i * 0.05:.2f}"
 
+        vd = _buy_verdict(r)
+        pros_html = "".join(f'<li class="pro">{_esc(p)}</li>' for p in vd["pros"])
+        cons_html = "".join(f'<li class="con">{_esc(c)}</li>' for c in vd["cons"])
+        verdict_html = f"""
+      <div class="verdict {_esc(vd['vcls'])}">
+        <div class="verdict-hd">
+          <span class="vbadge">{_esc(vd['verdict'])}</span>
+          <span class="vsummary">{_esc(vd['summary'])}</span>
+        </div>
+        <ul class="vlist">{pros_html}{cons_html}</ul>
+      </div>"""
+
         cards.append(f"""
     <div class="card" style="animation-delay:{delay}s">
       <div class="card-header">
@@ -655,7 +784,7 @@ def _generate_html_report(
         <div class="m"><div class="mv">{ind_s}</div><div class="ml">產業排名</div></div>
         <div class="m"><div class="mv">{inst}</div><div class="ml">法人連買</div></div>
       </div>
-      <div class="chart" data-ticker="{_esc(ticker)}"></div>
+      <div class="chart" data-ticker="{_esc(ticker)}"></div>{verdict_html}
       <div class="links">
         <a class="link-btn tv" href="{tv_url}" target="_blank" rel="noopener">TradingView</a>
         <a class="link-btn gi" href="{gi_url}" target="_blank" rel="noopener">Goodinfo</a>
@@ -707,6 +836,18 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .tv{{background:#1565c0;color:#fff}}
 .gi{{background:#1b4332;color:#3fb950;border:1px solid #236840}}
 .footer{{text-align:center;padding:32px;color:#484f58;font-size:12px}}
+.verdict{{padding:12px 16px;border-top:1px solid #21262d}}
+.verdict-hd{{display:flex;align-items:center;gap:10px;margin-bottom:8px}}
+.vbadge{{font-size:12px;font-weight:700;padding:3px 10px;border-radius:12px;flex-shrink:0}}
+.vsummary{{font-size:11px;color:#8b949e;line-height:1.4}}
+.vyes .vbadge{{background:rgba(239,83,80,.2);color:#ef5350;border:1px solid rgba(239,83,80,.4)}}
+.vwatch .vbadge{{background:rgba(227,179,65,.2);color:#e3b341;border:1px solid rgba(227,179,65,.4)}}
+.vno .vbadge{{background:rgba(139,148,158,.12);color:#8b949e;border:1px solid #30363d}}
+.vlist{{list-style:none;display:flex;flex-direction:column;gap:4px}}
+.vlist li{{font-size:11px;padding-left:14px;position:relative;line-height:1.5}}
+.vlist li::before{{content:"";position:absolute;left:2px;top:6px;width:6px;height:6px;border-radius:50%}}
+.pro{{color:#7ee787}}.pro::before{{background:#3fb950}}
+.con{{color:#ffa198}}.con::before{{background:#f85149}}
 </style>
 </head>
 <body>
