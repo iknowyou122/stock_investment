@@ -85,10 +85,13 @@ logger = logging.getLogger(__name__)
 
 # ── In-memory state ─────────────────────────────────────────────────────────
 _state: dict = {
-    "shortlist": [],           # list[dict] — today's top signals, max 20
-    "surge_signals": [],       # list[dict] — latest surge-live results
-    "surge_updated_at": None,  # datetime
-    "surge_lock": None,        # asyncio.Lock, initialised in main_async()
+    "shortlist": [],              # list[dict] — today's top signals, max 20
+    "surge_signals": [],          # list[dict] — latest surge-live results
+    "surge_updated_at": None,     # datetime
+    "surge_lock": None,           # asyncio.Lock, initialised in main_async()
+    "pre_surge_signals": [],      # list[dict] — latest pre_surge candidates
+    "pre_surge_updated_at": None, # datetime
+    "pre_surge_narrative": "",    # str — LLM theme narrative from pre_surge
     "monitoring_active": True,
     "last_scan_time": None,
     "llm": "claude",
@@ -512,6 +515,7 @@ def _parse_surge_csv(path: Path, min_score: int = 50, max_n: int = 30) -> list[d
                 score = int(float(row.get("score", 0) or 0))
                 if score < min_score:
                     continue
+                raw_flags = row.get("flags", "") or ""
                 rows.append({
                     "ticker":           row.get("ticker", ""),
                     "name":             row.get("name", ""),
@@ -522,6 +526,7 @@ def _parse_surge_csv(path: Path, min_score: int = 50, max_n: int = 30) -> list[d
                     "rsi":              float(row.get("rsi", 0) or 0) or None,
                     "industry":         row.get("industry", ""),
                     "inst_consec_days": int(float(row.get("inst_consec_days", 0) or 0)),
+                    "flags":            [f for f in raw_flags.split("|") if f],
                 })
             except (ValueError, TypeError):
                 continue
@@ -644,6 +649,52 @@ async def _job_surge_live(force: bool = False, notify_fn=None) -> None:
         )
 
 
+async def _job_surge_postmarket(force: bool = False, notify_fn=None) -> None:
+    """17:05 — save today's final surge results (post-close, not intraday)."""
+    if not force and not is_trading_day(date.today()):
+        logger.info("surge_postmarket skipped — not a trading day")
+        return
+    logger.info("surge_postmarket START")
+    code, out = await _run_subprocess_async([
+        sys.executable, "scripts/surge_scan.py", "--save-csv",
+    ])
+    if code != 0:
+        logger.error("surge_postmarket FAILED code=%d\n%s", code, out[:300])
+    else:
+        logger.info("surge_postmarket DONE")
+
+
+async def _job_pre_surge(force: bool = False, notify_fn=None) -> None:
+    """17:15 — run pre_surge.py and update pre_surge panel state."""
+    if not force and not is_trading_day(date.today()):
+        logger.info("pre_surge skipped — not a trading day")
+        return
+    logger.info("pre_surge START")
+    code, out = await _run_subprocess_async([
+        sys.executable, "scripts/pre_surge.py",
+    ])
+    if code != 0:
+        logger.error("pre_surge FAILED code=%d\n%s", code, out[:300])
+        return
+    wl_dir = _ROOT / "data" / "pre_surge_watchlist"
+    files = sorted(wl_dir.glob("watchlist_*.json"))
+    if not files:
+        logger.warning("pre_surge: no watchlist JSON found")
+        return
+    with open(files[-1], encoding="utf-8") as f:
+        data = json.load(f)
+    _state["pre_surge_signals"] = data.get("candidates", [])
+    _state["pre_surge_updated_at"] = datetime.now()
+    _state["pre_surge_narrative"] = data.get("narrative", "")
+    n = len(_state["pre_surge_signals"])
+    logger.info("pre_surge DONE n=%d", n)
+    if notify_fn and n:
+        await notify_fn(f"🔥 *Pre-Surge 明日候選* {n} 支\n" + "\n".join(
+            f"{s['ticker']} {s['name']} 熱+{s['heat_bonus']}"
+            for s in _state["pre_surge_signals"][:5]
+        ))
+
+
 async def _job_postmarket_report(force: bool = False, notify_fn=None) -> None:
     """17:00 — post-market report with hit rate + tomorrow's list."""
     if not force and not is_trading_day(date.today()):
@@ -753,6 +804,13 @@ async def cmd_surge(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("⚠ Surge 掃描進行中，請稍候")
         return
     await _job_surge_live(force=True, notify_fn=_send)
+
+
+@_track("presurge")
+async def cmd_presurge(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("CMD /presurge from user=%s", update.effective_user.id if update.effective_user else "?")
+    await update.message.reply_text("🔥 Pre-Surge 分析中，請稍候（約 1-2 分鐘）...")
+    await _job_pre_surge(force=True, notify_fn=_send)
 
 
 @_track("report")
@@ -898,6 +956,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "*手動觸發*\n"
         "/plan         全市場掃描，更新今日名單並推播\n"
         "/surge        爆量雷達盤中即時掃描（Surge Live）\n"
+        "/presurge     明日 Pre-Surge 熱度候選分析\n"
         "/report       盤後報告（命中率 \\+ 隔日名單）\n"
         "/optimize     啟動 AI 參數優化 Agent\n"
         "\n"
@@ -1264,6 +1323,13 @@ def _render_surge_panel() -> Panel:
 
     surge_prices = _MARKET_CACHE.get("surge", {})
 
+    _FLAG_BADGE: dict[str, str] = {
+        "MA5_WALK":           "[green]MA走[/green]",
+        "MA5_BREAK":          "[red]MA破[/red]",
+        "MOMENTUM_WALK":      "[cyan]走勢[/cyan]",
+        "BB_UPPER_EXHAUSTION":"[yellow]竭[/yellow]",
+    }
+
     t = Table(box=None, show_header=True, header_style="bold magenta", padding=(0, 1), expand=True)
     t.add_column("#",      width=3,    no_wrap=True)
     t.add_column("代號",   width=6,    no_wrap=True)
@@ -1273,6 +1339,7 @@ def _render_surge_panel() -> Panel:
     t.add_column("漲幅",   width=7,    justify="right",  no_wrap=True)
     t.add_column("量比",   width=5,    justify="right",  no_wrap=True)
     t.add_column("分數",   width=4,    justify="right",  no_wrap=True)
+    t.add_column("特徵",   max_width=8, no_wrap=True)
 
     for i, s in enumerate(signals, 1):
         grade   = s.get("grade", "")
@@ -1298,6 +1365,9 @@ def _render_surge_panel() -> Panel:
             price_str = "[dim]--[/dim]"
             chg_str   = f"[{chg_clr}]{sign}{chg:.2f}%[/{chg_clr}]"
 
+        sig_flags = s.get("flags", [])
+        badges = " ".join(_FLAG_BADGE[f] for f in sig_flags if f in _FLAG_BADGE)
+
         t.add_row(
             f"[dim]{i}[/dim]",
             f"[cyan]{s['ticker']}[/cyan]",
@@ -1307,6 +1377,7 @@ def _render_surge_panel() -> Panel:
             chg_str,
             f"[{vol_clr}]{vol:.1f}x[/{vol_clr}]",
             f"[{clr}]{s['score']}[/{clr}]",
+            badges,
         )
 
     alpha = sum(1 for s in signals if s["grade"] == "SURGE_ALPHA")
@@ -1321,6 +1392,65 @@ def _render_surge_panel() -> Panel:
         title="[bold magenta]⚡ Surge Live[/bold magenta]",
         subtitle=sub,
         border_style="magenta",
+        box=box.ROUNDED,
+    )
+
+
+def _render_pre_surge_panel() -> Panel:
+    """Pre-Surge watchlist panel — tomorrow's TIGHT_BASE + heat candidates."""
+    signals = _state.get("pre_surge_signals", [])
+    updated = _state.get("pre_surge_updated_at")
+    narrative = _state.get("pre_surge_narrative", "")
+
+    if updated:
+        sub = f"[dim]{updated.strftime('%H:%M')}[/dim]"
+    else:
+        sub = "[dim]尚未執行 · /presurge 手動觸發[/dim]"
+
+    if not signals:
+        body = Text(f"\n  (尚無資料)\n  {narrative[:60]}" if narrative else "\n  (尚無資料)", style="dim")
+        return Panel(
+            body,
+            title="[bold yellow]🔥 Pre-Surge 明日候選[/bold yellow]",
+            subtitle=sub,
+            border_style="yellow",
+            box=box.ROUNDED,
+        )
+
+    t = Table(box=None, show_header=True, header_style="bold yellow", padding=(0, 1), expand=True)
+    t.add_column("#",     width=3,    no_wrap=True)
+    t.add_column("代號",  width=6,    no_wrap=True)
+    t.add_column("名稱",  max_width=6, no_wrap=True)
+    t.add_column("產業",  max_width=7, no_wrap=True)
+    t.add_column("熱+",   width=4,    justify="right", no_wrap=True)
+    t.add_column("密合%", width=5,    justify="right", no_wrap=True)
+    t.add_column("量比",  width=5,    justify="right", no_wrap=True)
+
+    for i, s in enumerate(signals[:12], 1):
+        bonus = s.get("heat_bonus", 0)
+        bonus_clr = "bold red" if bonus >= 8 else ("yellow" if bonus >= 5 else "dim")
+        rng = s.get("range_pct", 0)
+        vol = s.get("vol_ratio", 0)
+        concepts = s.get("concepts", "")
+        ind_label = (concepts[:7] if concepts else (s.get("industry", "") or "")[:7])
+        t.add_row(
+            f"[dim]{i}[/dim]",
+            f"[cyan]{s['ticker']}[/cyan]",
+            (s.get("name") or "")[:6],
+            f"[dim]{ind_label}[/dim]",
+            f"[{bonus_clr}]+{bonus}[/{bonus_clr}]",
+            f"[dim]{rng:.1f}%[/dim]",
+            f"[dim]{vol:.1f}x[/dim]",
+        )
+
+    body_items: list = [t]
+    if narrative:
+        body_items.append(Text(f"\n{narrative[:80]}", style="dim italic"))
+    return Panel(
+        Group(*body_items),
+        title="[bold yellow]🔥 Pre-Surge 明日候選[/bold yellow]",
+        subtitle=sub,
+        border_style="yellow",
         box=box.ROUNDED,
     )
 
@@ -1438,7 +1568,7 @@ async def main_async(llm: str) -> None:
         ("pause", cmd_pause), ("resume", cmd_resume),
         ("params", cmd_params), ("optimize", cmd_optimize),
         ("approve", cmd_approve), ("rollback", cmd_rollback),
-        ("plan", cmd_plan), ("surge", cmd_surge), ("report", cmd_report),
+        ("plan", cmd_plan), ("surge", cmd_surge), ("presurge", cmd_presurge), ("report", cmd_report),
         ("test", cmd_test), ("help", cmd_help),
     ]:
         app.add_handler(CommandHandler(cmd_name, handler))
@@ -1453,6 +1583,10 @@ async def main_async(llm: str) -> None:
     scheduler.add_job(_job_surge_live, "interval", minutes=1)
     # 17:00 post-market report
     scheduler.add_job(_job_postmarket_report, "cron", day_of_week="mon-fri", hour=17, minute=0)
+    # 17:05 save today's final surge results (post-close)
+    scheduler.add_job(_job_surge_postmarket, "cron", day_of_week="mon-fri", hour=17, minute=5)
+    # 17:15 pre-surge analysis for tomorrow
+    scheduler.add_job(_job_pre_surge, "cron", day_of_week="mon-fri", hour=17, minute=15)
     # 18:00 optimize on Tue and Fri
     scheduler.add_job(_job_optimize, "cron", day_of_week="tue,fri", hour=18, minute=0)
     scheduler.start()
@@ -1481,9 +1615,10 @@ async def main_async(llm: str) -> None:
         Layout(name="market", ratio=1),
         Layout(name="global", ratio=1),
     )
-    # Right: Surge Live (top) + Watchlist Prices (bottom)
+    # Right: Surge Live (top) + Pre-Surge (middle) + Watchlist Prices (bottom)
     layout["right"].split_column(
         Layout(name="surge",     ratio=3),
+        Layout(name="pre_surge", ratio=2),
         Layout(name="watchlist", ratio=2),
     )
 
@@ -1493,6 +1628,7 @@ async def main_async(llm: str) -> None:
         layout["market"].update(_render_market_panel())
         layout["global"].update(_render_global_panel())
         layout["surge"].update(_render_surge_panel())
+        layout["pre_surge"].update(_render_pre_surge_panel())
         layout["watchlist"].update(_render_watchlist_detail_panel())
         layout["footer"].update(_render_log_panel())
 
