@@ -748,9 +748,9 @@ const _obs = new IntersectionObserver(function(entries) {{
       crosshair: {{ mode: 1 }},
     }});
     const cs = chart.addCandlestickSeries({{
-      upColor: "#3fb950", downColor: "#f85149",
-      borderUpColor: "#3fb950", borderDownColor: "#f85149",
-      wickUpColor: "#3fb950", wickDownColor: "#f85149",
+      upColor: "#ef5350", downColor: "#26a69a",
+      borderUpColor: "#ef5350", borderDownColor: "#26a69a",
+      wickUpColor: "#ef5350", wickDownColor: "#26a69a",
     }});
     cs.setData(data.candles);
     const lineOpts = {{ lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }};
