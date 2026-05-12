@@ -578,7 +578,8 @@ def _buy_verdict(r: dict) -> dict:
     """Derive buy / watch / avoid verdict from a surge result dict."""
     import re as _re
 
-    flags = r.get("flags", "")
+    raw_flags = r.get("flags", "")
+    flags = "|".join(raw_flags) if isinstance(raw_flags, list) else (raw_flags or "")
     score = r.get("score", 0)
     vol   = r.get("vol_ratio", 0)
     cs    = r.get("close_strength", 0)
