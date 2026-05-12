@@ -1021,19 +1021,21 @@ def _notify_surge_telegram(csv_path: Path, scan_date: str) -> None:
         _console.print(f"  [dim red]TG surge notify error: {exc}[/dim red]")
 
 
-def _run_llm_analysis(results: list[dict], llm_provider) -> None:
+def _run_llm_analysis(results: list[dict], llm_provider, scan_date: str = "") -> None:
     """Call LLM for every result and store 'llm_analysis' field in-place."""
     import re as _re2
     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
 
     def _one(r: dict) -> tuple[str, str]:
-        ticker = r.get("ticker", "")
-        name   = r.get("name") or ticker
-        raw    = r.get("flags", "")
-        flags  = "|".join(raw) if isinstance(raw, list) else (raw or "")
-        fset   = set(flags.split("|"))
+        ticker  = r.get("ticker", "")
+        name    = r.get("name") or ticker
+        raw     = r.get("flags", "")
+        flags   = "|".join(raw) if isinstance(raw, list) else (raw or "")
+        fset    = set(flags.split("|"))
 
-        day      = "DAY1（首次噴發）" if "SURGE_DAY1" in fset else "DAY2（連續第二天）"
+        is_day2  = "SURGE_DAY2" in fset
+        day      = "DAY2（連續第二天）" if is_day2 else "DAY1（首次噴發）"
+        entry    = _entry_day_str(scan_date, is_day2) if scan_date else "T+2"
         rsi_m    = _re2.search(r'RSI_(\w+):([\d.]+)', flags)
         rsi_desc = f"RSI {rsi_m.group(2)}（{rsi_m.group(1)}）" if rsi_m else ""
         margin   = next((f for f in ["MARGIN_HOT", "MARGIN_WARM", "MARGIN_COOL"] if f in fset), "")
@@ -1048,7 +1050,7 @@ def _run_llm_analysis(results: list[dict], llm_provider) -> None:
         if "MARGIN_HOT"       in fset: extras.append("⚠️ 融資水位過高，強制賣壓風險")
 
         prompt = (
-            "你是台灣短線交易員，策略是噴發信號出現後 T+2 日進場。\n"
+            f"你是台灣短線交易員，策略是噴發信號出現後 T+2 日（{entry}）進場。\n"
             "請根據以下資料，用繁體中文寫 2-3 句操作建議：明確說買或不買、"
             "指出最值得注意的一個風險或優勢、語氣像交易員告訴同事，不要廢話。\n\n"
             f"代號: {ticker} {name} | 產業: {r.get('industry','')}\n"
@@ -1226,7 +1228,7 @@ def run_surge_scan(
         _console.print(f"  [dim]📋 surge_signals DB: {inserted} 筆新增[/dim]")
 
     if llm_provider is not None and results:
-        _run_llm_analysis(results, llm_provider)
+        _run_llm_analysis(results, llm_provider, scan_date=scan_date)
 
     if csv_path and results:
         _save_surge_csv(results, scan_date, analysis_date, csv_path, name_map, industry_map)
