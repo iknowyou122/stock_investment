@@ -1157,7 +1157,7 @@ def run_surge_scan(
 
     # Pass 2: full surge scoring
     results: list[dict] = []
-    scan_date = date.today().isoformat()
+    scan_date = analysis_date.isoformat()
 
     with Progress(
         SpinnerColumn(),
