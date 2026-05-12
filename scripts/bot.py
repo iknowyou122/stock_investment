@@ -89,9 +89,6 @@ _state: dict = {
     "surge_signals": [],          # list[dict] — latest surge-live results
     "surge_updated_at": None,     # datetime
     "surge_lock": None,           # asyncio.Lock, initialised in main_async()
-    "pre_surge_signals": [],      # list[dict] — latest pre_surge candidates
-    "pre_surge_updated_at": None, # datetime
-    "pre_surge_narrative": "",    # str — LLM theme narrative from pre_surge
     "monitoring_active": True,
     "last_scan_time": None,
     "llm": "claude",
@@ -650,7 +647,7 @@ async def _job_surge_live(force: bool = False, notify_fn=None) -> None:
 
 
 async def _job_surge_postmarket(force: bool = False, notify_fn=None) -> None:
-    """17:05 — save today's final surge results (post-close, not intraday)."""
+    """17:05 — save today's final surge results + update market heat snapshots."""
     if not force and not is_trading_day(date.today()):
         logger.info("surge_postmarket skipped — not a trading day")
         return
@@ -662,37 +659,14 @@ async def _job_surge_postmarket(force: bool = False, notify_fn=None) -> None:
         logger.error("surge_postmarket FAILED code=%d\n%s", code, out[:300])
     else:
         logger.info("surge_postmarket DONE")
-
-
-async def _job_pre_surge(force: bool = False, notify_fn=None) -> None:
-    """17:15 — run pre_surge.py and update pre_surge panel state."""
-    if not force and not is_trading_day(date.today()):
-        logger.info("pre_surge skipped — not a trading day")
-        return
-    logger.info("pre_surge START")
-    code, out = await _run_subprocess_async([
-        sys.executable, "scripts/pre_surge.py",
+    # Update market heat snapshots for tomorrow's surge scoring
+    code2, out2 = await _run_subprocess_async([
+        sys.executable, "scripts/update_market_heat.py",
     ])
-    if code != 0:
-        logger.error("pre_surge FAILED code=%d\n%s", code, out[:300])
-        return
-    wl_dir = _ROOT / "data" / "pre_surge_watchlist"
-    files = sorted(wl_dir.glob("watchlist_*.json"))
-    if not files:
-        logger.warning("pre_surge: no watchlist JSON found")
-        return
-    with open(files[-1], encoding="utf-8") as f:
-        data = json.load(f)
-    _state["pre_surge_signals"] = data.get("candidates", [])
-    _state["pre_surge_updated_at"] = datetime.now()
-    _state["pre_surge_narrative"] = data.get("narrative", "")
-    n = len(_state["pre_surge_signals"])
-    logger.info("pre_surge DONE n=%d", n)
-    if notify_fn and n:
-        await notify_fn(f"🔥 *Pre-Surge 明日候選* {n} 支\n" + "\n".join(
-            f"{s['ticker']} {s['name']} 熱+{s['heat_bonus']}"
-            for s in _state["pre_surge_signals"][:5]
-        ))
+    if code2 != 0:
+        logger.error("market_heat update FAILED code=%d\n%s", code2, out2[:200])
+    else:
+        logger.info("market_heat update DONE")
 
 
 async def _job_postmarket_report(force: bool = False, notify_fn=None) -> None:
@@ -804,13 +778,6 @@ async def cmd_surge(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("⚠ Surge 掃描進行中，請稍候")
         return
     await _job_surge_live(force=True, notify_fn=_send)
-
-
-@_track("presurge")
-async def cmd_presurge(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info("CMD /presurge from user=%s", update.effective_user.id if update.effective_user else "?")
-    await update.message.reply_text("🔥 Pre-Surge 分析中，請稍候（約 1-2 分鐘）...")
-    await _job_pre_surge(force=True, notify_fn=_send)
 
 
 @_track("report")
@@ -956,7 +923,6 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "*手動觸發*\n"
         "/plan         全市場掃描，更新今日名單並推播\n"
         "/surge        爆量雷達盤中即時掃描（Surge Live）\n"
-        "/presurge     明日 Pre-Surge 熱度候選分析\n"
         "/report       盤後報告（命中率 \\+ 隔日名單）\n"
         "/optimize     啟動 AI 參數優化 Agent\n"
         "\n"
@@ -1396,65 +1362,6 @@ def _render_surge_panel() -> Panel:
     )
 
 
-def _render_pre_surge_panel() -> Panel:
-    """Pre-Surge watchlist panel — tomorrow's TIGHT_BASE + heat candidates."""
-    signals = _state.get("pre_surge_signals", [])
-    updated = _state.get("pre_surge_updated_at")
-    narrative = _state.get("pre_surge_narrative", "")
-
-    if updated:
-        sub = f"[dim]{updated.strftime('%H:%M')}[/dim]"
-    else:
-        sub = "[dim]尚未執行 · /presurge 手動觸發[/dim]"
-
-    if not signals:
-        body = Text(f"\n  (尚無資料)\n  {narrative[:60]}" if narrative else "\n  (尚無資料)", style="dim")
-        return Panel(
-            body,
-            title="[bold yellow]🔥 Pre-Surge 明日候選[/bold yellow]",
-            subtitle=sub,
-            border_style="yellow",
-            box=box.ROUNDED,
-        )
-
-    t = Table(box=None, show_header=True, header_style="bold yellow", padding=(0, 1), expand=True)
-    t.add_column("#",     width=3,    no_wrap=True)
-    t.add_column("代號",  width=6,    no_wrap=True)
-    t.add_column("名稱",  max_width=6, no_wrap=True)
-    t.add_column("產業",  max_width=7, no_wrap=True)
-    t.add_column("熱+",   width=4,    justify="right", no_wrap=True)
-    t.add_column("密合%", width=5,    justify="right", no_wrap=True)
-    t.add_column("量比",  width=5,    justify="right", no_wrap=True)
-
-    for i, s in enumerate(signals[:12], 1):
-        bonus = s.get("heat_bonus", 0)
-        bonus_clr = "bold red" if bonus >= 8 else ("yellow" if bonus >= 5 else "dim")
-        rng = s.get("range_pct", 0)
-        vol = s.get("vol_ratio", 0)
-        concepts = s.get("concepts", "")
-        ind_label = (concepts[:7] if concepts else (s.get("industry", "") or "")[:7])
-        t.add_row(
-            f"[dim]{i}[/dim]",
-            f"[cyan]{s['ticker']}[/cyan]",
-            (s.get("name") or "")[:6],
-            f"[dim]{ind_label}[/dim]",
-            f"[{bonus_clr}]+{bonus}[/{bonus_clr}]",
-            f"[dim]{rng:.1f}%[/dim]",
-            f"[dim]{vol:.1f}x[/dim]",
-        )
-
-    body_items: list = [t]
-    if narrative:
-        body_items.append(Text(f"\n{narrative[:80]}", style="dim italic"))
-    return Panel(
-        Group(*body_items),
-        title="[bold yellow]🔥 Pre-Surge 明日候選[/bold yellow]",
-        subtitle=sub,
-        border_style="yellow",
-        box=box.ROUNDED,
-    )
-
-
 # ── LLM selection ────────────────────────────────────────────────────────────
 
 def _select_llm(arg: str | None) -> str:
@@ -1568,7 +1475,7 @@ async def main_async(llm: str) -> None:
         ("pause", cmd_pause), ("resume", cmd_resume),
         ("params", cmd_params), ("optimize", cmd_optimize),
         ("approve", cmd_approve), ("rollback", cmd_rollback),
-        ("plan", cmd_plan), ("surge", cmd_surge), ("presurge", cmd_presurge), ("report", cmd_report),
+        ("plan", cmd_plan), ("surge", cmd_surge), ("report", cmd_report),
         ("test", cmd_test), ("help", cmd_help),
     ]:
         app.add_handler(CommandHandler(cmd_name, handler))
@@ -1583,10 +1490,8 @@ async def main_async(llm: str) -> None:
     scheduler.add_job(_job_surge_live, "interval", minutes=1)
     # 17:00 post-market report
     scheduler.add_job(_job_postmarket_report, "cron", day_of_week="mon-fri", hour=17, minute=0)
-    # 17:05 save today's final surge results (post-close)
+    # 17:05 save today's final surge results + update market heat snapshots
     scheduler.add_job(_job_surge_postmarket, "cron", day_of_week="mon-fri", hour=17, minute=5)
-    # 17:15 pre-surge analysis for tomorrow
-    scheduler.add_job(_job_pre_surge, "cron", day_of_week="mon-fri", hour=17, minute=15)
     # 18:00 optimize on Tue and Fri
     scheduler.add_job(_job_optimize, "cron", day_of_week="tue,fri", hour=18, minute=0)
     scheduler.start()
@@ -1615,21 +1520,15 @@ async def main_async(llm: str) -> None:
         Layout(name="market", ratio=1),
         Layout(name="global", ratio=1),
     )
-    # Right: Surge Live (top) + Pre-Surge (middle) + Watchlist Prices (bottom)
-    layout["right"].split_column(
-        Layout(name="surge",     ratio=3),
-        Layout(name="pre_surge", ratio=2),
-        Layout(name="watchlist", ratio=2),
-    )
+    # Right: Surge Live (full right column)
+    layout["right"].update(Layout(name="surge"))
 
     def _update_layout() -> None:
         layout["header"].update(_render_header())
         layout["bot_l"].update(_render_status_panel())
         layout["market"].update(_render_market_panel())
         layout["global"].update(_render_global_panel())
-        layout["surge"].update(_render_surge_panel())
-        layout["pre_surge"].update(_render_pre_surge_panel())
-        layout["watchlist"].update(_render_watchlist_detail_panel())
+        layout["right"].update(_render_surge_panel())
         layout["footer"].update(_render_log_panel())
 
     _update_layout()

@@ -260,6 +260,87 @@ def _compute_industry_strength(
     return ranks
 
 
+def _load_heat_lookup(
+    heat_dir: Path,
+    industry_map: dict[str, str],
+) -> dict[str, dict]:
+    """Load latest market heat + concept + intl snapshots → per-ticker heat context.
+
+    Returns {} if no snapshots available (graceful fallback).
+    """
+    if not heat_dir.exists():
+        return {}
+    try:
+        import json as _json
+
+        # Industry heat (5d momentum)
+        heat_files = sorted(heat_dir.glob("heat_*.json"))
+        ind_heat: dict[str, dict] = {}
+        if heat_files:
+            with open(heat_files[-1], encoding="utf-8") as f:
+                heat_data = _json.load(f)
+            for ind, meta in heat_data.get("industries", {}).items():
+                ind_heat[ind] = {
+                    "rank_pct": meta.get("rank_pct", 0),
+                    "accelerating": meta.get("acceleration_pct", 0) > 0.5,
+                }
+
+        # Concept heat
+        concept_files = sorted(heat_dir.glob("concept_heat_*.json"))
+        hot_concept_names: dict[str, str] = {}  # concept_key → name_zh
+        concept_tickers: dict[str, list[str]] = {}  # concept_key → tickers
+        if concept_files:
+            with open(concept_files[-1], encoding="utf-8") as f:
+                concept_data = _json.load(f)
+            for ck, meta in concept_data.get("concepts", {}).items():
+                if meta.get("rank_pct", 0) >= 70:
+                    hot_concept_names[ck] = meta.get("name_zh", ck)
+            # Load concept definitions for membership
+            concepts_path = Path("config/concepts.json")
+            if concepts_path.exists():
+                with open(concepts_path, encoding="utf-8") as f:
+                    concepts_def = _json.load(f)
+                for ck, cdef in concepts_def.items():
+                    concept_tickers[ck] = cdef.get("tickers", [])
+
+        # International tailwinds
+        intl_files = sorted(heat_dir.glob("intl_signals_*.json"))
+        intl_ind: dict[str, int] = {}
+        intl_concept: dict[str, int] = {}
+        if intl_files:
+            with open(intl_files[-1], encoding="utf-8") as f:
+                intl_data = _json.load(f)
+            tw = intl_data.get("tailwinds", {})
+            intl_ind = tw.get("industry_tailwinds", {})
+            intl_concept = tw.get("concept_tailwinds", {})
+
+        if not ind_heat and not hot_concept_names:
+            return {}
+
+        # Build per-ticker lookup
+        lookup: dict[str, dict] = {}
+        for ticker, industry in industry_map.items():
+            ih = ind_heat.get(industry, {})
+            ticker_concepts = [ck for ck, tks in concept_tickers.items() if ticker in tks]
+            hot = [ck for ck in ticker_concepts if ck in hot_concept_names]
+            hot_labels = [hot_concept_names[ck] for ck in hot]
+
+            intl = max(
+                (intl_ind.get(industry, 0),
+                 max((intl_concept.get(ck, 0) for ck in ticker_concepts), default=0))
+            )
+
+            lookup[ticker] = {
+                "ind_5d_rank_pct": ih.get("rank_pct", 0),
+                "accelerating": ih.get("accelerating", False),
+                "hot_concepts": hot_labels,
+                "intl_tailwind": max(0, intl),
+            }
+        return lookup
+    except Exception:
+        return {}
+
+
 def _scan_one_surge(
     ticker: str,
     analysis_date: date,
@@ -269,6 +350,7 @@ def _scan_one_surge(
     taiex_history: list[DailyOHLCV],
     industry_rank_pct: float | None,
     intraday_bar: DailyOHLCV | None = None,
+    heat_context: dict | None = None,
 ) -> dict | None:
     """Full surge scoring for a single ticker."""
     try:
@@ -317,6 +399,7 @@ def _scan_one_surge(
             taiex_history=taiex_history,
             turnover_20ma=turnover_20ma,
             industry_rank_pct=industry_rank_pct,
+            heat_context=heat_context,
         )
         if result is None:
             return None
@@ -836,6 +919,12 @@ def run_surge_scan(
     )
     industry_ranks = _compute_industry_strength(snapshot, industry_map)
 
+    # Load market heat context (pre-surge snapshot from previous close, if available)
+    _heat_dir = Path(__file__).resolve().parents[1] / "data" / "market_heat"
+    heat_lookup = _load_heat_lookup(_heat_dir, industry_map)
+    if heat_lookup:
+        _console.print(f"  [dim]市場熱度快照已載入（{len(heat_lookup)} 檔）[/dim]")
+
     # Pass 2: full surge scoring
     results: list[dict] = []
     scan_date = date.today().isoformat()
@@ -869,6 +958,7 @@ def run_surge_scan(
                         taiex_history,
                         ind_rank,
                         intraday_bars.get(ticker),  # None = use FinMind bar (normal mode)
+                        heat_lookup.get(ticker),    # market heat context (optional)
                     )
                 ] = ticker
             for future in as_completed(futures):

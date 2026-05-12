@@ -4,7 +4,7 @@
     "SURGE_BETA": 40,
     "SURGE_GAMMA": 40
   },
-  "raw_max_pts": 95,
+  "raw_max_pts": 90,
   "gates": {
     "min_turnover_tse": 20000000,
     "min_turnover_tpex": 8000000,
@@ -15,16 +15,16 @@
     "fresh_ignition_max_days": 2
   },
   "factors": {
+    "vol_ratio_surge": 8,
     "vol_ratio_ideal": 10,
-    "vol_ratio_extreme_warn": 7,
-    "vol_ratio_hyperchase": 2,
+    "vol_ratio_solid": 8,
     "vol_ratio_mild": 6,
     "close_strong": 8,
     "close_healthy": 5,
     "close_soft": 2,
-    "inst_buy_fresh_1d": 4,
+    "inst_buy_fresh_1d": 8,
     "inst_buy_fresh_2d": 7,
-    "inst_buy_fresh_3d": 10,
+    "inst_buy_fresh_3d": 6,
     "industry_top_20pct": 10,
     "industry_top_40pct": 5,
     "pocket_pivot": 12,
@@ -32,9 +32,16 @@
     "breakaway_gap_partial": 4,
     "relative_strength": 8,
     "breakout_20d": 10,
+    "rsi_breakout": 3,
     "rsi_healthy": 5,
     "margin_not_hot": 4,
+    "margin_warm": 2,
     "bb_squeeze_strong": 8,
-    "bb_squeeze_mild": 4
+    "bb_squeeze_mild": 4,
+    "heat_ind_hot": 3,
+    "heat_ind_warm": 2,
+    "heat_ind_accel": 2,
+    "heat_concept": 3,
+    "heat_intl_max": 2
   }
 }

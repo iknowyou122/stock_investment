@@ -128,12 +128,13 @@ class TestGate:
 
 class TestVolumeRatio:
     def test_ideal_zone(self):
+        """2-3× vol → VOL_SOLID (8 pts)."""
         eng = SurgeRadar()
         hist = _flat_history(60, volume=600_000)
         today = _bar(close=105, volume=1_500_000, day=99, lo=100, h=106)  # 2.5x
         pts, flags = eng._score_vol_ratio(today, hist)
-        assert pts == 10
-        assert any("VOL_IDEAL" in f for f in flags)
+        assert pts == 8
+        assert any("VOL_SOLID" in f for f in flags)
 
     def test_mild_surge(self):
         eng = SurgeRadar()
@@ -143,22 +144,22 @@ class TestVolumeRatio:
         assert pts == 6
 
     def test_extreme_warning(self):
-        """3-5× vol → moderate penalty (VOL_EXTREME, 7 pts)."""
+        """3-5× vol → 理想爆量 VOL_IDEAL (10 pts)。"""
         eng = SurgeRadar()
         hist = _flat_history(60, volume=600_000)
         today = _bar(close=105, volume=2_000_000, day=99, lo=100, h=106)  # 3.33x
         pts, flags = eng._score_vol_ratio(today, hist)
-        assert pts == 7
-        assert any("VOL_EXTREME" in f for f in flags)
+        assert pts == 10
+        assert any("VOL_IDEAL" in f for f in flags)
 
     def test_hyperchase_penalty(self):
-        """≥ 5× vol → strong penalty (VOL_HYPERCHASE, 2 pts); backtest: 30.9% T+5 WR."""
+        """≥ 5× vol → 主力啟動訊號 VOL_SURGE (8 pts)。"""
         eng = SurgeRadar()
         hist = _flat_history(60, volume=600_000)
         today = _bar(close=105, volume=3_200_000, day=99, lo=100, h=106)  # 5.33x
         pts, flags = eng._score_vol_ratio(today, hist)
-        assert pts == 2
-        assert any("VOL_HYPERCHASE" in f for f in flags)
+        assert pts == 8
+        assert any("VOL_SURGE" in f for f in flags)
 
 
 class TestCloseStrength:
@@ -186,9 +187,10 @@ class TestCloseStrength:
 
 class TestInstBuyFresh:
     def test_1_day_fresh(self):
+        """第 1 天法人買超是起漲點最強訊號 (8 pts)。"""
         eng = SurgeRadar()
         pts, flags = eng._score_inst_buy_fresh(_proxy_with(foreign_days=1))
-        assert pts == 4
+        assert pts == 8
         assert any("INST_FRESH:1D" in f for f in flags)
 
     def test_2_day_fresh(self):
@@ -197,9 +199,10 @@ class TestInstBuyFresh:
         assert pts == 7
 
     def test_3_day_peak(self):
+        """連買 3 天以上已是追漲訊號，降至 6 pts。"""
         eng = SurgeRadar()
         pts, _ = eng._score_inst_buy_fresh(_proxy_with(foreign_days=3))
-        assert pts == 10
+        assert pts == 6
 
     def test_unavailable_proxy_zero(self):
         eng = SurgeRadar()
@@ -328,10 +331,13 @@ class TestRsiHealthy:
         hist = [_bar(close=c, volume=1, day=i) for i, c in enumerate(closes)]
         rsi = eng._rsi(hist)
         assert rsi is not None
-        # Verify the helper works; actual RSI value tested elsewhere
         pts, _ = eng._score_rsi_healthy(hist)
-        # With monotonic rise, RSI likely > 70; test that scoring gives 0 if so
+        # RSI > 70 = 起漲點動能確認 (+3), RSI 55-70 = 健康 (+5)
         if rsi > 70:
+            assert pts == 3
+        elif rsi >= 55:
+            assert pts == 5
+        else:
             assert pts == 0
 
 

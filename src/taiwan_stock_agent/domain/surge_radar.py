@@ -174,15 +174,14 @@ class SurgeRadar:
             return 0, []
         ratio = ohlcv.volume / vol_20ma
         f = self._params.get("factors", {})
-        # Backtest (90-day, n=952): 5x+ vol → only 30.9% T+5 WR vs 51%+ for 2-5x.
-        # Hyperchase regime (panic news, squeeze) has mean-reversion tendency.
-        # 3-5x is actually fine (51.5% WR) so penalty only kicks in above 5x.
+        # 爆量分級：5x+ 是主力啟動訊號（前提是 G3 已確保收盤在上半段）
+        # 3-5x 為理想爆量（最佳 T+2 勝率帶），2-3x 為有效爆量，1.5-2x 為輕度放量
         if ratio >= 5.0:
-            return f.get("vol_ratio_hyperchase", 2), [f"VOL_HYPERCHASE:{ratio:.2f}x"]
+            return f.get("vol_ratio_surge", 8), [f"VOL_SURGE:{ratio:.2f}x"]
         if ratio >= 3.0:
-            return f.get("vol_ratio_extreme_warn", 7), [f"VOL_EXTREME:{ratio:.2f}x"]
-        if ratio >= 2.0:
             return f.get("vol_ratio_ideal", 10), [f"VOL_IDEAL:{ratio:.2f}x"]
+        if ratio >= 2.0:
+            return f.get("vol_ratio_solid", 8), [f"VOL_SOLID:{ratio:.2f}x"]
         if ratio >= 1.5:
             return f.get("vol_ratio_mild", 6), [f"VOL_MILD:{ratio:.2f}x"]
         return 0, [f"VOL_LOW:{ratio:.2f}x"]
@@ -202,17 +201,17 @@ class SurgeRadar:
     def _score_inst_buy_fresh(
         self, proxy: TWSEChipProxy | None
     ) -> tuple[int, list[str]]:
-        """Reward 1-3 day consecutive inst buying (fresh ignition, not late-stage)."""
+        """Reward institutional buying — day 1 is the highest-value signal (起漲點)."""
         if proxy is None or not proxy.is_available:
             return 0, []
         f = self._params.get("factors", {})
         days = max(proxy.foreign_consecutive_buy_days, proxy.trust_consecutive_buy_days)
-        if days >= 3:
-            return f.get("inst_buy_fresh_3d", 10), [f"INST_FRESH:{days}D"]
+        if days == 1:
+            return f.get("inst_buy_fresh_1d", 8), [f"INST_FRESH:{days}D"]
         if days == 2:
             return f.get("inst_buy_fresh_2d", 7), [f"INST_FRESH:{days}D"]
-        if days == 1:
-            return f.get("inst_buy_fresh_1d", 4), [f"INST_FRESH:{days}D"]
+        if days >= 3:
+            return f.get("inst_buy_fresh_3d", 6), [f"INST_FRESH:{days}D"]
         return 0, []
 
     def _score_industry_strength(
@@ -330,10 +329,11 @@ class SurgeRadar:
         if rsi is None:
             return 0, []
         f = self._params.get("factors", {})
-        if 55 <= rsi <= 70:
-            return f.get("rsi_healthy", 5), [f"RSI_HEALTHY:{rsi}"]
+        # RSI > 70 on surge day = momentum confirmation, not overbought warning
         if rsi > 70:
-            return 0, [f"RSI_HOT:{rsi}"]
+            return f.get("rsi_breakout", 3), [f"RSI_BREAKOUT:{rsi}"]
+        if rsi >= 55:
+            return f.get("rsi_healthy", 5), [f"RSI_HEALTHY:{rsi}"]
         return 0, [f"RSI_WEAK:{rsi}"]
 
     def _score_bb_squeeze_breakout(
@@ -397,7 +397,7 @@ class SurgeRadar:
     def _score_margin_not_hot(
         self, proxy: TWSEChipProxy | None
     ) -> tuple[int, list[str]]:
-        """Margin utilization not overheated (< 15%) — crowd not piled in yet."""
+        """Margin utilization tiers: <15% cool (+4), 15-20% warm (+2), >20% hot (0)."""
         if proxy is None or not proxy.is_available:
             return 0, []
         util = proxy.margin_utilization_rate
@@ -406,6 +406,8 @@ class SurgeRadar:
         f = self._params.get("factors", {})
         if util < 0.15:
             return f.get("margin_not_hot", 4), [f"MARGIN_COOL:{util*100:.1f}%"]
+        if util < 0.20:
+            return f.get("margin_warm", 2), [f"MARGIN_WARM:{util*100:.1f}%"]
         return 0, [f"MARGIN_HOT:{util*100:.1f}%"]
 
     def _score_ma5_walk(
@@ -427,7 +429,11 @@ class SurgeRadar:
         ratio = float((close_win[valid] >= ma5_win[valid]).mean())
         if ratio >= 0.8:
             return 2, ["MA5_WALK"]
-        if ratio < 0.5:
+        # Only penalise if surge-day close is itself below MA5 (downtrend still active).
+        # Stocks recovering from a crash base will have a low historical ratio but their
+        # surge-day close may already be above MA5 — don't penalise that breakout.
+        current_ma5 = ma5.iloc[-1]
+        if ratio < 0.5 and pd.notna(current_ma5) and ohlcv.close < current_ma5:
             return -1, ["MA5_BREAK"]
         return 0, []
 
@@ -472,6 +478,45 @@ class SurgeRadar:
             return "SURGE_GAMMA"
         return None
 
+    def _score_market_heat(self, ctx: dict | None) -> tuple[int, list[str]]:
+        """Bonus from overnight market heat snapshot (industry 5d trend + concepts + intl).
+
+        ctx keys (all optional):
+            ind_5d_rank_pct  float  — industry 5d momentum percentile (0–100)
+            accelerating     bool   — industry 1d > 5d/5 by > 0.5%
+            hot_concepts     list   — concept keys with rank_pct >= 70
+            intl_tailwind    int    — sum of overseas tailwind scores for this ticker
+        """
+        if not ctx:
+            return 0, []
+        pts, flags = 0, []
+        f = self._params.get("factors", {})
+
+        ind_rank = ctx.get("ind_5d_rank_pct", 0) or 0
+        if ind_rank >= 80:
+            pts += f.get("heat_ind_hot", 3)
+            flags.append(f"IND_HEAT_HOT:{ind_rank:.0f}")
+        elif ind_rank >= 60:
+            pts += f.get("heat_ind_warm", 2)
+            flags.append(f"IND_HEAT_WARM:{ind_rank:.0f}")
+
+        if ctx.get("accelerating"):
+            pts += f.get("heat_ind_accel", 2)
+            flags.append("IND_ACCEL")
+
+        hot_concepts = ctx.get("hot_concepts") or []
+        if hot_concepts:
+            pts += f.get("heat_concept", 3)
+            flags.append(f"CONCEPT_HOT:{hot_concepts[0]}")
+
+        intl = ctx.get("intl_tailwind", 0) or 0
+        if intl > 0:
+            bonus = min(intl, f.get("heat_intl_max", 2))
+            pts += bonus
+            flags.append(f"INTL_TAIL:+{intl}")
+
+        return pts, flags
+
     def score_full(
         self,
         ohlcv: DailyOHLCV,
@@ -481,6 +526,7 @@ class SurgeRadar:
         taiex_history: list[DailyOHLCV],
         turnover_20ma: float,
         industry_rank_pct: float | None = None,
+        heat_context: dict | None = None,
     ) -> dict | None:
         """Returns dict if passes gates AND grade >= SURGE_GAMMA, else None."""
         passed, gate_flags = self._gate_check(ohlcv, history, taiex_regime, turnover_20ma)
@@ -510,6 +556,7 @@ class SurgeRadar:
             ("bb_squeeze", self._score_bb_squeeze_breakout(ohlcv, history)),
             ("ma5_walk", self._score_ma5_walk(ohlcv, history)),
             ("bb_upper_walk", self._score_bb_upper_walk(history, consec)),
+            ("market_heat", self._score_market_heat(heat_context)),
         ]
 
         for name, (pts, flags) in factors:

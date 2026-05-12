@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune surge-backtest heat-scan pre-surge tight-base-bt tight-base-v2
+.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune surge-backtest heat-scan heat-update tight-base-bt tight-base-v2
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -202,16 +202,15 @@ surge-backtest:
 
 # ── Market Heat Engine (Phase 4.25) ────────────────────────────────────────
 # heat-scan:      28 大產業熱度 + 概念股 basket + 國際隔夜訊號 + LLM 主軸分析
-# pre-surge:      整合熱度的 TIGHT_BASE 預警清單（明日進場候選）
+# heat-update:    更新熱度快照供 surge 評分使用（每日 17:05 自動執行）
 # tight-base-bt:  TIGHT_BASE 偵測器回測（v1 不含熱度過濾）
 # tight-base-v2:  熱度感知 TIGHT_BASE 回測（驗證命中率提升）
 
 heat-scan:
 	$(PYTHON) scripts/heat_scan.py
 
-PRE_SURGE_MIN_BONUS ?= 5
-pre-surge:
-	$(PYTHON) scripts/pre_surge.py --min-bonus $(PRE_SURGE_MIN_BONUS)
+heat-update:
+	$(PYTHON) scripts/update_market_heat.py
 
 tight-base-bt:
 	$(PYTHON) scripts/tight_base_backtest.py --days 90
