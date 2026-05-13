@@ -1,59 +1,59 @@
 {
   "_meta": {
-    "version": "1.0",
-    "updated": "2026-05-12",
-    "note": "Curated concept → ticker baskets. Concepts cross industry boundaries (e.g., AI GPU 供應鏈 spans 半導體+光電+電子零組件). Update via scripts/llm_suggest_concepts.py or manually."
+    "version": "1.1",
+    "updated": "2026-05-13",
+    "note": "Curated concept → ticker baskets. Concepts cross industry boundaries. Update manually or via scripts/llm_suggest_concepts.py."
   },
   "concepts": {
     "AI_GPU_supply": {
       "name_zh": "AI GPU 供應鏈",
-      "description": "NVIDIA/AMD GPU 製造、封裝、測試、散熱、PCB",
-      "tickers": ["2330", "2454", "3661", "3017", "3661", "2308", "8016", "6669", "3034", "3443", "5234"]
+      "description": "NVIDIA/AMD GPU 製造、封裝、電源、伺服器",
+      "tickers": ["2330", "2454", "3661", "3017", "2308", "6669", "3443", "5234"]
     },
     "CoWoS_advanced_packaging": {
       "name_zh": "CoWoS 先進封裝",
-      "description": "台積電 CoWoS、ABF 載板、矽中介層",
-      "tickers": ["2330", "2449", "3037", "3189", "6147", "8011", "6789"]
+      "description": "台積電 CoWoS、ABF 載板、矽中介層、IC 測試",
+      "tickers": ["2330", "2449", "3037", "3189", "6147", "6789"]
     },
     "CPO_silicon_photonics": {
       "name_zh": "CPO / 矽光子",
-      "description": "共封裝光學模組、光通訊、光收發器",
-      "tickers": ["3450", "3024", "4977", "3450", "2455", "3450", "8016"]
+      "description": "共封裝光學模組、光收發器、化合物半導體",
+      "tickers": ["3450", "4977", "2455"]
     },
     "HBM_memory": {
       "name_zh": "HBM 高頻寬記憶體",
-      "description": "HBM 設計、測試介面、PCB",
-      "tickers": ["3017", "6789", "3661", "2408", "2344"]
+      "description": "HBM DRAM 設計製造、AI ASIC 含 HBM 設計",
+      "tickers": ["3661", "2408"]
     },
     "AI_server_cooling": {
       "name_zh": "AI 伺服器散熱",
-      "description": "液冷、均熱片、3D VC、水冷板",
-      "tickers": ["3017", "3653", "5009", "8163", "6230", "3580", "3036"]
+      "description": "液冷、均熱片、3D VC、水冷板、散熱材料",
+      "tickers": ["3017", "3653", "6230", "3580"]
     },
     "robotics_automation": {
       "name_zh": "機器人/工業自動化",
-      "description": "工業機器人、減速機、精密齒輪、視覺辨識",
+      "description": "工業機器人、線性運動、精密機械、馬達控制",
       "tickers": ["1503", "4576", "5443", "2049", "1597", "6202"]
     },
     "low_orbit_satellite": {
       "name_zh": "低軌衛星",
-      "description": "Starlink 供應鏈、地面站、衛星通訊",
-      "tickers": ["3211", "2392", "2419", "3038", "3491"]
+      "description": "Starlink 供應鏈、衛星通訊設備、地面站",
+      "tickers": ["3211", "2419", "3491"]
     },
     "heavy_electric": {
       "name_zh": "重電/電網",
-      "description": "電力設備、變壓器、開關設備、電網升級",
-      "tickers": ["1503", "1504", "1519", "1513", "2049"]
+      "description": "高壓變壓器、配電設備、開關設備、電網升級",
+      "tickers": ["1503", "1504", "1519", "1513"]
     },
     "auto_electronics": {
       "name_zh": "車用電子",
-      "description": "ADAS、車用 MCU、車載半導體",
-      "tickers": ["2308", "2353", "3034", "6770", "3149", "2231"]
+      "description": "車載半導體、ADAS、車用電源管理",
+      "tickers": ["2308", "3034", "6770"]
     },
     "PCB_substrate": {
       "name_zh": "PCB / 載板",
-      "description": "高階 PCB、ABF 載板、HDI",
-      "tickers": ["3037", "3189", "8046", "8081", "6274", "6790"]
+      "description": "高階 PCB、ABF 載板、HDI、銅箔基板",
+      "tickers": ["3037", "3189", "8046", "6274"]
     }
   }
 }
