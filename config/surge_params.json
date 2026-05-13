@@ -49,6 +49,11 @@
     "inst_pct_low": 2,
     "margin_declining": 3,
     "chip_large_holder_up": 5,
-    "chip_retail_exit": 3
+    "chip_retail_exit": 3,
+    "chip_retail_in_penalty": -3,
+    "chip_retail_surge_penalty": -5,
+    "retail_leverage_trap_penalty": -5,
+    "daytrade_high_penalty": -3,
+    "daytrade_extreme_penalty": -5
   }
 }

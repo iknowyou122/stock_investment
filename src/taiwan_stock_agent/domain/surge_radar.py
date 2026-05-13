@@ -456,10 +456,11 @@ class SurgeRadar:
     def _score_ownership_concentration(
         self, proxy: TWSEChipProxy | None
     ) -> tuple[int, list[str]]:
-        """集保大戶進、散戶退 — 週級籌碼集中度確認。
+        """集保大戶進、散戶退 — 週級籌碼集中度，雙向評分。
 
-        large_holder_chg_pct > 0: 400張+大戶本週增持
-        retail_holder_chg_pct < 0: 100張以下散戶本週退出
+        加分：大戶增持 / 散戶退出
+        扣分：散戶週增（主力尚未進場或正在出貨）
+        聯合懲罰：融資高 + 散戶增 = 散戶用槓桿追高，最危險組合
         """
         if proxy is None or not proxy.is_available:
             return 0, []
@@ -470,6 +471,7 @@ class SurgeRadar:
         large = proxy.large_holder_chg_pct
         retail = proxy.retail_holder_chg_pct
 
+        # ── 加分 ──────────────────────────────────────────────────────────────
         if large is not None and large > 0:
             pts += f.get("chip_large_holder_up", 5)
             flags.append(f"CHIP_LARGE_UP:{large:+.2f}%")
@@ -477,7 +479,39 @@ class SurgeRadar:
             pts += f.get("chip_retail_exit", 3)
             flags.append(f"CHIP_RETAIL_OUT:{retail:+.2f}%")
 
+        # ── 扣分：散戶流入 ────────────────────────────────────────────────────
+        if retail is not None and retail > 0:
+            if retail > 0.5:
+                pts += f.get("chip_retail_surge_penalty", -5)
+                flags.append(f"CHIP_RETAIL_SURGE:{retail:+.2f}%")
+            else:
+                pts += f.get("chip_retail_in_penalty", -3)
+                flags.append(f"CHIP_RETAIL_IN:{retail:+.2f}%")
+
+        # ── 聯合懲罰：融資過熱 + 散戶增 ──────────────────────────────────────
+        margin_util = proxy.margin_utilization_rate
+        if (retail is not None and retail > 0
+                and margin_util is not None and margin_util > 0.20):
+            pts += f.get("retail_leverage_trap_penalty", -5)
+            flags.append(f"RETAIL_LEVERAGE_TRAP:{margin_util*100:.1f}%")
+
         return pts, flags
+
+    def _score_daytrade_penalty(
+        self, proxy: TWSEChipProxy | None
+    ) -> tuple[int, list[str]]:
+        """當沖比例高 = 籌碼不穩、散戶頻繁進出，扣分。"""
+        if proxy is None or not proxy.is_available:
+            return 0, []
+        ratio = proxy.daytrade_ratio
+        if ratio is None:
+            return 0, []
+        f = self._params.get("factors", {})
+        if ratio > 0.50:
+            return f.get("daytrade_extreme_penalty", -5), [f"DAYTRADE_EXTREME:{ratio*100:.0f}%"]
+        if ratio > 0.30:
+            return f.get("daytrade_high_penalty", -3), [f"DAYTRADE_HIGH:{ratio*100:.0f}%"]
+        return 0, []
 
     def _score_ma5_walk(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV], n: int = 10
@@ -625,6 +659,7 @@ class SurgeRadar:
             ("inst_synergy", self._score_inst_synergy(proxy)),
             ("margin_declining", self._score_margin_declining(proxy)),
             ("ownership_concentration", self._score_ownership_concentration(proxy)),
+            ("daytrade_penalty", self._score_daytrade_penalty(proxy)),
             ("bb_squeeze", self._score_bb_squeeze_breakout(ohlcv, history)),
             ("ma5_walk", self._score_ma5_walk(ohlcv, history)),
             ("bb_upper_walk", self._score_bb_upper_walk(history, consec)),
