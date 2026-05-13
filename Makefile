@@ -178,8 +178,12 @@ bot:
 	$(PYTHON) scripts/bot.py $(if $(LLM),--llm $(LLM))
 
 # ── 噴發雷達掃描（短線爆量捕捉）─────────────────────────────────────────────
+# SURGE_DATE: 不設定時由 Python _default_date() 自動判斷（17:00 前 → 前一交易日；之後 → 今天）
+# 用法: make surge                          # 自動日期
+#       SURGE_DATE=2026-05-06 make surge    # 指定日期
+SURGE_DATE ?=
 surge:
-	$(PYTHON) scripts/surge_scan.py --save-csv --llm $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(DATE),--date $(DATE))
+	$(PYTHON) scripts/surge_scan.py --save-csv --llm $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(SURGE_DATE),--date $(SURGE_DATE))
 
 surge-live:
 	$(PYTHON) scripts/surge_scan.py --intraday $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS))
