@@ -4,7 +4,7 @@
     "SURGE_BETA": 40,
     "SURGE_GAMMA": 40
   },
-  "raw_max_pts": 90,
+  "raw_max_pts": 110,
   "gates": {
     "min_turnover_tse": 20000000,
     "min_turnover_tpex": 8000000,
@@ -42,6 +42,13 @@
     "heat_ind_warm": 2,
     "heat_ind_accel": 2,
     "heat_concept": 3,
-    "heat_intl_max": 2
+    "heat_intl_max": 2,
+    "inst_synergy_both": 5,
+    "inst_pct_high": 6,
+    "inst_pct_mid": 4,
+    "inst_pct_low": 2,
+    "margin_declining": 3,
+    "chip_large_holder_up": 5,
+    "chip_retail_exit": 3
   }
 }

@@ -410,6 +410,75 @@ class SurgeRadar:
             return f.get("margin_warm", 2), [f"MARGIN_WARM:{util*100:.1f}%"]
         return 0, [f"MARGIN_HOT:{util*100:.1f}%"]
 
+    def _score_inst_synergy(
+        self, proxy: TWSEChipProxy | None
+    ) -> tuple[int, list[str]]:
+        """土洋合作 + 法人買超佔比。
+
+        外資+投信同日雙買（土洋合作）: 籌碼最強訊號。
+        法人買超佔比 (inst_buy_pct) = (外資+投信淨買) / 今日成交量。
+        """
+        if proxy is None or not proxy.is_available:
+            return 0, []
+        f = self._params.get("factors", {})
+        pts = 0
+        flags: list[str] = []
+
+        if proxy.foreign_and_trust_both_buy:
+            pts += f.get("inst_synergy_both", 5)
+            flags.append("INST_SYNERGY")
+
+        pct = proxy.inst_buy_pct
+        if pct is not None and pct > 0:
+            if pct >= 0.15:
+                pts += f.get("inst_pct_high", 6)
+                flags.append(f"INST_PCT_HIGH:{pct*100:.1f}%")
+            elif pct >= 0.10:
+                pts += f.get("inst_pct_mid", 4)
+                flags.append(f"INST_PCT_MID:{pct*100:.1f}%")
+            elif pct >= 0.05:
+                pts += f.get("inst_pct_low", 2)
+                flags.append(f"INST_PCT_LOW:{pct*100:.1f}%")
+
+        return pts, flags
+
+    def _score_margin_declining(
+        self, proxy: TWSEChipProxy | None
+    ) -> tuple[int, list[str]]:
+        """融資餘額今日下降 — 浮額持續被清洗，籌碼沉澱訊號。"""
+        if proxy is None or not proxy.is_available:
+            return 0, []
+        if proxy.margin_balance_change < 0:
+            f = self._params.get("factors", {})
+            return f.get("margin_declining", 3), ["MARGIN_DECLINING"]
+        return 0, []
+
+    def _score_ownership_concentration(
+        self, proxy: TWSEChipProxy | None
+    ) -> tuple[int, list[str]]:
+        """集保大戶進、散戶退 — 週級籌碼集中度確認。
+
+        large_holder_chg_pct > 0: 400張+大戶本週增持
+        retail_holder_chg_pct < 0: 100張以下散戶本週退出
+        """
+        if proxy is None or not proxy.is_available:
+            return 0, []
+        f = self._params.get("factors", {})
+        pts = 0
+        flags: list[str] = []
+
+        large = proxy.large_holder_chg_pct
+        retail = proxy.retail_holder_chg_pct
+
+        if large is not None and large > 0:
+            pts += f.get("chip_large_holder_up", 5)
+            flags.append(f"CHIP_LARGE_UP:{large:+.2f}%")
+        if retail is not None and retail < 0:
+            pts += f.get("chip_retail_exit", 3)
+            flags.append(f"CHIP_RETAIL_OUT:{retail:+.2f}%")
+
+        return pts, flags
+
     def _score_ma5_walk(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV], n: int = 10
     ) -> tuple[int, list[str]]:
@@ -553,6 +622,9 @@ class SurgeRadar:
             ("breakout_20d", self._score_breakout_20d(ohlcv, history)),
             ("rsi_healthy", self._score_rsi_healthy(history)),
             ("margin_not_hot", self._score_margin_not_hot(proxy)),
+            ("inst_synergy", self._score_inst_synergy(proxy)),
+            ("margin_declining", self._score_margin_declining(proxy)),
+            ("ownership_concentration", self._score_ownership_concentration(proxy)),
             ("bb_squeeze", self._score_bb_squeeze_breakout(ohlcv, history)),
             ("ma5_walk", self._score_ma5_walk(ohlcv, history)),
             ("bb_upper_walk", self._score_bb_upper_walk(history, consec)),

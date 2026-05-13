@@ -374,7 +374,7 @@ def _scan_one_surge(
                 return None
             chip_date = analysis_date
 
-        proxy = chip_fetcher.fetch(ticker, chip_date)
+        proxy = chip_fetcher.fetch(ticker, chip_date, today_volume=ohlcv.volume)
 
         # TAIEX regime
         taiex_closes = [b.close for b in sorted(taiex_history, key=lambda x: x.trade_date)]

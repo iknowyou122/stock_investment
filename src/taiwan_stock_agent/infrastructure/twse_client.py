@@ -87,19 +87,20 @@ class ChipProxyFetcher:
         # skip ALL future T86 HTTP calls for this session. Reset on next process start.
         self._t86_consecutive_failures: int = 0
         self._t86_circuit_open: bool = False
+        # TDCC 集保股權分散表 — weekly, cache by ISO week string "YYYY-WW"
+        # {week_key: {ticker: (large_holder_pct, retail_holder_pct)}}
+        self._tdcc_week_cache: dict[str, dict[str, tuple[float, float]]] = {}
 
-    def fetch(self, ticker: str, trade_date: date) -> TWSEChipProxy:
+    def fetch(
+        self,
+        ticker: str,
+        trade_date: date,
+        today_volume: int = 0,
+    ) -> TWSEChipProxy:
         """Fetch chip proxy data for ticker on trade_date.
 
-        Populates:
-          - foreign_net_buy, trust_net_buy, dealer_net_buy (T86)
-          - margin_balance_change (openapi MI_MARGN 融資今日/前日餘額)
-          - foreign_consecutive_buy_days, trust_consecutive_buy_days,
-            dealer_consecutive_buy_days (multi-day T86 lookback)
-          - short_balance_increased, short_margin_ratio (openapi MI_MARGN 融券今日/前日餘額)
-          - sbl_ratio, sbl_available (TWT93U SBL endpoint)
-          - margin_utilization_rate (openapi MI_MARGN 融資限額 column)
-          - daytrade_ratio (TWTB4U 當沖 endpoint, hint only)
+        today_volume: today's actual traded volume in shares, used to compute
+        inst_buy_pct. Pass 0 to skip pct calculation.
 
         Returns TWSEChipProxy(is_available=False) on any failure — never raises.
         """
@@ -114,6 +115,15 @@ class ChipProxyFetcher:
         sbl_ratio = self._fetch_sbl_data(ticker, trade_date, flags)
         margin_util = self._fetch_margin_utilization(ticker, trade_date, flags)
         daytrade_ratio = self._fetch_daytrade_data(ticker, trade_date, flags)
+        large_chg, retail_chg = self._fetch_tdcc_ownership(ticker, trade_date)
+
+        # ── 派生欄位 ──────────────────────────────────────────────────────────
+        fn = foreign_net or 0
+        tn = trust_net or 0
+        foreign_and_trust_both_buy = fn > 0 and tn > 0
+        inst_buy_pct: float | None = None
+        if today_volume > 0 and (fn != 0 or tn != 0):
+            inst_buy_pct = (fn + tn) / today_volume  # ratio, not percentage
 
         # Only mark available if at least one data source succeeded
         is_available = (
@@ -131,8 +141,8 @@ class ChipProxyFetcher:
         return TWSEChipProxy(
             ticker=ticker,
             trade_date=trade_date,
-            foreign_net_buy=foreign_net or 0,
-            trust_net_buy=trust_net or 0,
+            foreign_net_buy=fn,
+            trust_net_buy=tn,
             dealer_net_buy=dealer_net or 0,
             margin_balance_change=margin_change or 0,
             foreign_consecutive_buy_days=foreign_consec,
@@ -145,6 +155,10 @@ class ChipProxyFetcher:
             margin_utilization_rate=margin_util,
             daytrade_ratio=daytrade_ratio,
             institution_buy_2_of_3=buy_2_of_3,
+            inst_buy_pct=inst_buy_pct,
+            foreign_and_trust_both_buy=foreign_and_trust_both_buy,
+            large_holder_chg_pct=large_chg,
+            retail_holder_chg_pct=retail_chg,
             is_available=is_available,
             data_quality_flags=flags,
         )
@@ -898,3 +912,110 @@ class ChipProxyFetcher:
             )
             self._daytrade_date_cache[trade_date] = {}
             return None
+
+    def _fetch_tdcc_ownership(
+        self, ticker: str, trade_date: date
+    ) -> tuple[float | None, float | None]:
+        """Fetch 集保股權分散表 via FinMind TaiwanStockShareholding (weekly data).
+
+        Returns (large_holder_chg_pct, retail_holder_chg_pct):
+          - large_holder_chg_pct: 400張+ 持股比例週變化（正 = 大戶增持）
+          - retail_holder_chg_pct: 100張以下持股比例週變化（負 = 散戶退出）
+          Both None if FINMIND_API_KEY missing or request fails.
+
+        大戶定義: ≥ 400,000 shares (400張)
+        散戶定義: < 100,000 shares (100張)
+        """
+        import os as _os
+        api_key = _os.environ.get("FINMIND_API_KEY", "")
+        if not api_key:
+            return None, None
+
+        # 取本週和上週的 ISO week key
+        iso_week = trade_date.isocalendar()
+        this_week_key = f"{iso_week.year}-{iso_week.week:02d}"
+        prev_date = trade_date - timedelta(weeks=1)
+        prev_iso = prev_date.isocalendar()
+        prev_week_key = f"{prev_iso.year}-{prev_iso.week:02d}"
+
+        def _fetch_week(week_key: str, ref_date: date) -> dict[str, tuple[float, float]] | None:
+            if week_key in self._tdcc_week_cache:
+                return self._tdcc_week_cache[week_key]
+            # 抓包含 ref_date 的那週資料（往前 7 天）
+            start = ref_date - timedelta(days=7)
+            try:
+                resp = requests.get(
+                    "https://api.finmindtrade.com/api/v4/data",
+                    params={
+                        "dataset": "TaiwanStockShareholding",
+                        "data_id": ticker,
+                        "start_date": str(start),
+                        "end_date": str(ref_date),
+                        "token": api_key,
+                    },
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                if body.get("status") != 200 or not body.get("data"):
+                    self._tdcc_week_cache[week_key] = {}
+                    return {}
+                records = body["data"]
+                # 找最新一筆日期
+                dates = sorted({r["date"] for r in records}, reverse=True)
+                latest = dates[0]
+                rows = [r for r in records if r["date"] == latest]
+                # 計算各持股等級的 Percent 加總
+                large_pct = sum(
+                    float(r.get("percent", 0))
+                    for r in rows
+                    # 400張 = 400,000 shares; FinMind unit 欄位通常也是 shares
+                    if self._tdcc_is_large(r)
+                )
+                retail_pct = sum(
+                    float(r.get("percent", 0))
+                    for r in rows
+                    if self._tdcc_is_retail(r)
+                )
+                result = {ticker: (large_pct, retail_pct)}
+                self._tdcc_week_cache[week_key] = result
+                return result
+            except Exception as e:
+                logger.debug("TDCC fetch failed %s %s: %s", ticker, week_key, e)
+                self._tdcc_week_cache[week_key] = {}
+                return {}
+
+        this_data = _fetch_week(this_week_key, trade_date)
+        prev_data = _fetch_week(prev_week_key, prev_date)
+
+        this_entry = (this_data or {}).get(ticker)
+        prev_entry = (prev_data or {}).get(ticker)
+        if not this_entry or not prev_entry:
+            return None, None
+
+        large_chg = this_entry[0] - prev_entry[0]
+        retail_chg = this_entry[1] - prev_entry[1]
+        return large_chg, retail_chg
+
+    @staticmethod
+    def _tdcc_is_large(row: dict) -> bool:
+        """400張 (400,000 shares) 以上為大戶。"""
+        try:
+            # FinMind HolderCountLevel 格式: "400,001-600,000" 或數字欄位
+            level = str(row.get("HolderCountLevel") or row.get("level", ""))
+            # 取下界
+            lower = int(level.replace(",", "").split("-")[0].strip())
+            return lower >= 400_000
+        except Exception:
+            return False
+
+    @staticmethod
+    def _tdcc_is_retail(row: dict) -> bool:
+        """100張 (100,000 shares) 以下為散戶。"""
+        try:
+            level = str(row.get("HolderCountLevel") or row.get("level", ""))
+            parts = level.replace(",", "").split("-")
+            upper = int(parts[-1].strip()) if len(parts) > 1 else int(parts[0].strip())
+            return upper <= 100_000
+        except Exception:
+            return False

@@ -83,6 +83,11 @@ class TWSEChipProxy(BaseModel):
     # v2 fields
     avg_20d_volume: int = 0                   # 20-day average daily volume (shares); used for ratio scoring
     institution_buy_2_of_3: bool = False      # Foreign or trust net buy on >= 2 of last 3 trading days
+    # 籌碼集中度 (Phase 4.28)
+    inst_buy_pct: float | None = None         # (外資+投信淨買) / 今日成交量; None if unavailable
+    foreign_and_trust_both_buy: bool = False  # 外資+投信同日雙買 (土洋合作)
+    large_holder_chg_pct: float | None = None  # 集保 400張+大戶持股比例週變化 (+= 增加); None if unavailable
+    retail_holder_chg_pct: float | None = None # 集保 100張以下散戶持股比例週變化 (-= 退出); None if unavailable
     is_available: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
 

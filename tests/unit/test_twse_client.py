@@ -352,6 +352,14 @@ class TestChipProxyFetcherCache:
                 Path(tmpdir) / f"twse_daytrade_{ticker}_{trade_date}.parquet", index=False
             )
 
+            # Pre-populate TDCC in-memory cache to prevent FinMind HTTP call
+            iso = trade_date.isocalendar()
+            this_wk = f"{iso.year}-{iso.week:02d}"
+            prev_iso = (trade_date - timedelta(days=7)).isocalendar()
+            prev_wk = f"{prev_iso.year}-{prev_iso.week:02d}"
+            fetcher._tdcc_week_cache[this_wk] = {ticker: (25.0, 40.0)}
+            fetcher._tdcc_week_cache[prev_wk] = {ticker: (24.0, 41.0)}
+
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get") as mock_get:
                 proxy = fetcher.fetch(ticker, trade_date)
                 mock_get.assert_not_called()
