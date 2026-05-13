@@ -1346,13 +1346,14 @@ def main() -> None:
             if not chosen:
                 _console.print("  [yellow]指定代號無效，使用預設產業[/yellow]")
                 chosen = _DEFAULT_SECTOR_NAMES
-        elif not sys.stdin.isatty():
-            # Non-interactive (e.g. make flow): use default sectors silently
-            chosen = _DEFAULT_SECTOR_NAMES
-            _console.print(f"  [dim]非互動模式，使用預設產業（{len(chosen)} 個）[/dim]")
         else:
-            rows = _sector_menu(industry_map)
-            chosen = _select_sectors(rows, _DEFAULT_SECTOR_NAMES)
+            # Always use default sectors unless --sectors explicitly given.
+            # Interactive menu is opt-in via --sectors flag only.
+            chosen = _DEFAULT_SECTOR_NAMES
+            if sys.stdin.isatty():
+                _console.print(f"  [dim]使用預設產業（{len(chosen)} 個）；指定 --sectors <代號> 可覆蓋[/dim]")
+            else:
+                _console.print(f"  [dim]非互動模式，使用預設產業（{len(chosen)} 個）[/dim]")
 
         tickers = sorted(t for t, ind in industry_map.items() if ind in chosen)
 

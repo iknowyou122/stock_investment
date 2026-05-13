@@ -11,7 +11,7 @@
     "min_avg_daily_lots": 500,
     "vol_ratio_min": 1.5,
     "vol_ratio_5ma_min": 2.0,
-    "close_strength_min": 0.5,
+    "close_strength_min": 0.4,
     "fresh_ignition_max_days": 2
   },
   "factors": {
