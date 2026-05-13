@@ -1022,11 +1022,14 @@ def _notify_surge_telegram(csv_path: Path, scan_date: str) -> None:
 
 
 def _run_llm_analysis(results: list[dict], llm_provider, scan_date: str = "") -> None:
-    """Call LLM for every result and store 'llm_analysis' field in-place."""
+    """Call LLM for every result and store 'llm_analysis' field in-place.
+
+    第一檔失敗即中止，不浪費時間在其餘個股。
+    """
     import re as _re2
     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
 
-    def _one(r: dict) -> tuple[str, str]:
+    def _build_prompt(r: dict) -> str:
         ticker  = r.get("ticker", "")
         name    = r.get("name") or ticker
         raw     = r.get("flags", "")
@@ -1049,7 +1052,7 @@ def _run_llm_analysis(results: list[dict], llm_provider, scan_date: str = "") ->
         if "RSI_BREAKOUT"     in fset: extras.append("⚠️ RSI 已過熱")
         if "MARGIN_HOT"       in fset: extras.append("⚠️ 融資水位過高，強制賣壓風險")
 
-        prompt = (
+        return (
             f"你是台灣短線交易員，策略是噴發信號出現後 T+2 日（{entry}）進場。\n"
             "請根據以下資料，用繁體中文寫 2-3 句操作建議：明確說買或不買、"
             "指出最值得注意的一個風險或優勢、語氣像交易員告訴同事，不要廢話。\n\n"
@@ -1060,16 +1063,40 @@ def _run_llm_analysis(results: list[dict], llm_provider, scan_date: str = "") ->
             f"特徵: {', '.join(extras) if extras else '無特殊加分/扣分項'}\n\n"
             "操作建議:"
         )
+
+    if not results:
+        return
+
+    ticker_map = {r.get("ticker", ""): r for r in results}
+
+    # ── 先跑第一檔做連線測試，失敗就全部跳過 ─────────────────────────────────
+    first = results[0]
+    first_ticker = first.get("ticker", "")
+    _console.print(f"  [dim]🤖 LLM 分析（先測 {first_ticker}）…[/dim]")
+    try:
+        text = llm_provider.complete(_build_prompt(first), max_tokens=120).strip()
+        ticker_map[first_ticker]["llm_analysis"] = text
+        _console.print(f"  [dim]  ✓ 1/{len(results)}[/dim]")
+    except Exception as e:
+        _console.print(f"  [yellow]⚠ LLM 第一檔失敗，略過全部分析: {e}[/yellow]")
+        return
+
+    # ── 其餘並行 ──────────────────────────────────────────────────────────────
+    remaining = results[1:]
+    if not remaining:
+        _console.print("  [green]✅ LLM 分析完成[/green]")
+        return
+
+    def _one(r: dict) -> tuple[str, str]:
+        ticker = r.get("ticker", "")
         try:
-            return ticker, llm_provider.complete(prompt, max_tokens=120).strip()
+            return ticker, llm_provider.complete(_build_prompt(r), max_tokens=120).strip()
         except Exception as e:
             return ticker, f"（LLM 分析失敗: {e}）"
 
-    _console.print(f"  [dim]🤖 LLM 分析 {len(results)} 檔（parallel 4）…[/dim]")
-    ticker_map = {r.get("ticker", ""): r for r in results}
-    done = 0
+    done = 1
     with _TPE(max_workers=4) as pool:
-        futures = {pool.submit(_one, r): r for r in results}
+        futures = {pool.submit(_one, r): r for r in remaining}
         for fut in _ac(futures):
             ticker, text = fut.result()
             if ticker in ticker_map:
