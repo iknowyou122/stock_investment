@@ -222,6 +222,9 @@ tight-base-bt:
 tight-base-v2:
 	$(PYTHON) scripts/tight_base_v2_backtest.py --days 90
 
+chip-loading-bt:
+	$(PYTHON) scripts/chip_loading_backtest.py --days 90
+
 # ── 信號準確度監控 ──────────────────────────────────────────────────────────────
 # 載入歷史 scan CSV，驗證突破結果，顯示滾動勝率 Dashboard
 # 用法: make monitor

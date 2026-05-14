@@ -2161,3 +2161,166 @@ class TestMomentumBreakoutTrack:
         assert signal.action == "CAUTION"
         assert "MOMENTUM_TRACK" not in signal.data_quality_flags
         assert "NO_SETUP" in signal.data_quality_flags
+
+
+class TestChipLoadingTrack:
+    """_is_chip_loading() + full-engine CHIP_LOADING integration."""
+
+    def _make_engine_with_uptrend_taiex(self) -> TripleConfirmationEngine:
+        engine = TripleConfirmationEngine()
+        engine._taiex_history = _make_history(30, base_close=17000.0, flat=False)
+        return engine
+
+    def _strong_proxy(
+        self,
+        foreign_consec: int = 4,
+        trust_consec: int = 0,
+        cumul_foreign: int = 5_000,
+        cumul_trust: int = 1_000,
+    ) -> TWSEChipProxy:
+        return TWSEChipProxy(
+            ticker="TEST",
+            trade_date=date(2025, 2, 1),
+            foreign_consecutive_buy_days=foreign_consec,
+            trust_consecutive_buy_days=trust_consec,
+            cumul_foreign_20d=cumul_foreign,
+            cumul_trust_20d=cumul_trust,
+            is_available=True,
+        )
+
+    # --- unit tests for _is_chip_loading ---
+
+    def test_returns_true_when_g5_fails_and_chips_strong(self):
+        gate_flags = [
+            "GATE_PASS:G1_ZONE:95.0%",
+            "GATE_PASS:G2_BB_PCT:25.0p",
+            "GATE_PASS:G3_LIQ:500.0M",
+            "GATE_PASS:G4_REGIME:uptrend",
+            "GATE_FAIL:G5_OVERHEAD:80.0%",
+        ]
+        assert TripleConfirmationEngine._is_chip_loading(gate_flags, self._strong_proxy())
+
+    def test_returns_false_when_g5_not_failing(self):
+        gate_flags = [
+            "GATE_PASS:G1_ZONE:95.0%",
+            "GATE_FAIL:G2_BB_WIDE_PCT:62.0p",
+            "GATE_PASS:G5_NO_OVERHEAD:92.0%",
+        ]
+        assert not TripleConfirmationEngine._is_chip_loading(gate_flags, self._strong_proxy())
+
+    def test_returns_false_when_g4_failing(self):
+        gate_flags = [
+            "GATE_FAIL:G4_REGIME:DOWNTREND",
+            "GATE_FAIL:G5_OVERHEAD:80.0%",
+        ]
+        assert not TripleConfirmationEngine._is_chip_loading(gate_flags, self._strong_proxy())
+
+    def test_returns_false_when_g1_failing(self):
+        gate_flags = [
+            "GATE_FAIL:G1_TOO_FAR_BELOW:70.0%",
+            "GATE_FAIL:G5_OVERHEAD:80.0%",
+        ]
+        assert not TripleConfirmationEngine._is_chip_loading(gate_flags, self._strong_proxy())
+
+    def test_returns_false_when_no_proxy(self):
+        gate_flags = ["GATE_FAIL:G5_OVERHEAD:80.0%"]
+        assert not TripleConfirmationEngine._is_chip_loading(gate_flags, None)
+
+    def test_returns_false_when_proxy_not_available(self):
+        gate_flags = ["GATE_FAIL:G5_OVERHEAD:80.0%"]
+        proxy = TWSEChipProxy(
+            ticker="TEST", trade_date=date(2025, 2, 1),
+            foreign_consecutive_buy_days=4, cumul_foreign_20d=5_000, is_available=False,
+        )
+        assert not TripleConfirmationEngine._is_chip_loading(gate_flags, proxy)
+
+    def test_returns_false_when_consecutive_buy_below_3(self):
+        gate_flags = ["GATE_FAIL:G5_OVERHEAD:80.0%"]
+        proxy = TWSEChipProxy(
+            ticker="TEST", trade_date=date(2025, 2, 1),
+            foreign_consecutive_buy_days=2,
+            trust_consecutive_buy_days=2,
+            cumul_foreign_20d=5_000,
+            is_available=True,
+        )
+        assert not TripleConfirmationEngine._is_chip_loading(gate_flags, proxy)
+
+    def test_returns_false_when_cumul_net_zero_or_negative(self):
+        gate_flags = ["GATE_FAIL:G5_OVERHEAD:80.0%"]
+        proxy = TWSEChipProxy(
+            ticker="TEST", trade_date=date(2025, 2, 1),
+            foreign_consecutive_buy_days=4,
+            cumul_foreign_20d=-500,
+            cumul_trust_20d=-200,
+            is_available=True,
+        )
+        assert not TripleConfirmationEngine._is_chip_loading(gate_flags, proxy)
+
+    def test_trust_consec_alone_satisfies_condition(self):
+        gate_flags = ["GATE_FAIL:G5_OVERHEAD:80.0%", "GATE_PASS:G4_REGIME:uptrend"]
+        proxy = TWSEChipProxy(
+            ticker="TEST", trade_date=date(2025, 2, 1),
+            foreign_consecutive_buy_days=0,
+            trust_consecutive_buy_days=5,
+            cumul_trust_20d=3_000,
+            is_available=True,
+        )
+        assert TripleConfirmationEngine._is_chip_loading(gate_flags, proxy)
+
+    # --- integration: full engine (flat history → G2 passes, G5 fails from 60D data) ---
+
+    def test_chip_loading_gives_watch_not_caution(self):
+        # flat history: BB width=0 → G2 passes; sixty_day_high > twenty_day_high → G5 fails
+        history = _make_history(65, base_close=90.0, flat=True)
+        ohlcv = _make_ohlcv(close=98.0, high=100.0, low=96.0, volume=600_000)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=120.0, sixty_day_sessions=60)
+        chip = _make_chip_report()
+        proxy = self._strong_proxy(foreign_consec=4)
+
+        engine = self._make_engine_with_uptrend_taiex()
+        signal, _, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history[:-1],
+            chip_report=chip,
+            volume_profile=vp,
+            twse_proxy=proxy,
+        )
+        assert signal.action == "WATCH", f"Expected WATCH, got {signal.action} flags={signal.data_quality_flags}"
+        assert "CHIP_LOADING" in signal.data_quality_flags
+
+    def test_chip_loading_surfaces_gate_flags(self):
+        history = _make_history(65, base_close=90.0, flat=True)
+        ohlcv = _make_ohlcv(close=98.0, high=100.0, low=96.0, volume=600_000)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=120.0, sixty_day_sessions=60)
+        chip = _make_chip_report()
+        proxy = self._strong_proxy(foreign_consec=5)
+
+        engine = self._make_engine_with_uptrend_taiex()
+        signal, _, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history[:-1],
+            chip_report=chip,
+            volume_profile=vp,
+            twse_proxy=proxy,
+        )
+        assert "CHIP_LOADING" in signal.data_quality_flags
+        assert any("GATE_FAIL:G5" in f for f in signal.data_quality_flags)
+        assert any("GATE_PASS:G4" in f for f in signal.data_quality_flags)
+
+    def test_no_chip_loading_when_no_proxy(self):
+        history = _make_history(65, base_close=90.0, flat=True)
+        ohlcv = _make_ohlcv(close=98.0, high=100.0, low=96.0, volume=600_000)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=120.0, sixty_day_sessions=60)
+        chip = _make_chip_report()
+
+        engine = self._make_engine_with_uptrend_taiex()
+        signal, _, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history[:-1],
+            chip_report=chip,
+            volume_profile=vp,
+            twse_proxy=None,
+        )
+        assert signal.action == "CAUTION"
+        assert "CHIP_LOADING" not in signal.data_quality_flags
+        assert "NO_SETUP" in signal.data_quality_flags

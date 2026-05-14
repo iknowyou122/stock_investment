@@ -590,6 +590,10 @@ class TripleConfirmationEngine:
             if self._is_momentum_breakout(ohlcv, ohlcv_history, volume_profile, gate_detail_flags):
                 bd.flags.append("MOMENTUM_TRACK")
                 # proceed to full pillar scoring below
+            elif self._is_chip_loading(gate_detail_flags, twse_proxy):
+                bd.flags.append("CHIP_LOADING")
+                bd.flags.extend(gate_detail_flags)
+                return bd
             else:
                 bd.flags.append("NO_SETUP")
                 return bd
@@ -1710,6 +1714,30 @@ class TripleConfirmationEngine:
                 free_tier_mode=True if self._free_tier_mode else None,
             )
 
+        # Chip Loading Track: institutional accumulation under overhead resistance
+        if "CHIP_LOADING" in breakdown.flags:
+            plan = self._make_execution_plan(ohlcv, volume_profile)
+            data_quality_flags = list(ohlcv.data_quality_flags)
+            data_quality_flags.extend(chip_report.data_quality_flags)
+            data_quality_flags.extend(volume_profile.data_quality_flags)
+            for f in breakdown.flags:
+                if any(f.startswith(p) for p in ("GATE_PASS:", "GATE_FAIL:", "GATE_SKIP:")):
+                    if f not in data_quality_flags:
+                        data_quality_flags.append(f)
+            data_quality_flags.append("CHIP_LOADING")
+            data_quality_flags.append("scoring_version:v2")
+            return SignalOutput(
+                ticker=ohlcv.ticker,
+                date=ohlcv.trade_date,
+                action="WATCH",
+                confidence=0,
+                reasoning=Reasoning(),
+                execution_plan=plan,
+                halt_flag=False,
+                data_quality_flags=data_quality_flags,
+                free_tier_mode=True if self._free_tier_mode else None,
+            )
+
         confidence = breakdown.total
         action = self._map_action(confidence, breakdown, breakdown.chip_pts)
         plan = self._make_execution_plan(ohlcv, volume_profile)
@@ -1901,6 +1929,42 @@ class TripleConfirmationEngine:
         if day_range > 0 and (ohlcv.close - ohlcv.low) / day_range < 0.5:
             return False
 
+        return True
+
+    @staticmethod
+    def _is_chip_loading(
+        gate_flags: list[str],
+        twse_proxy: "TWSEChipProxy | None",
+    ) -> bool:
+        """Chip Loading Track: institutional accumulation under overhead resistance.
+
+        Fires when G5 fails (stock hasn't cleared its 60D peak zone) but
+        institutions are quietly building positions. Pattern: deep correction
+        → multi-week consolidation → chip accumulation → eventual breakout.
+
+        Conditions:
+          - G5 failing (overhead resistance present — 20D_high < 85% of 60D_high)
+          - G4 NOT failing (market regime acceptable)
+          - G1 NOT failing (stock still within 85-99% of 20D high — not in freefall)
+          - Institution consecutive buy ≥ 3 days (foreign or trust)
+          - 20D cumulative net positive (sustained, not one-off buying)
+        """
+        if not any(f.startswith("GATE_FAIL:G5") for f in gate_flags):
+            return False
+        if any(f.startswith("GATE_FAIL:G4") for f in gate_flags):
+            return False
+        if any(f.startswith("GATE_FAIL:G1") for f in gate_flags):
+            return False
+        if twse_proxy is None or not twse_proxy.is_available:
+            return False
+        has_consec = (
+            twse_proxy.foreign_consecutive_buy_days >= 3
+            or twse_proxy.trust_consecutive_buy_days >= 3
+        )
+        if not has_consec:
+            return False
+        if twse_proxy.cumul_foreign_20d + twse_proxy.cumul_trust_20d <= 0:
+            return False
         return True
 
     @staticmethod
