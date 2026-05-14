@@ -108,9 +108,9 @@ class ChipProxyFetcher:
 
         foreign_net, trust_net, dealer_net = self._fetch_t86_data(ticker, trade_date, flags)
         margin_change = self._fetch_margin_balance_change(ticker, trade_date, flags)
-        foreign_consec, trust_consec, dealer_consec, buy_2_of_3 = self._fetch_institution_consecutive_days(
-            ticker, trade_date, flags
-        )
+        (foreign_consec, trust_consec, dealer_consec, buy_2_of_3,
+         cumul_foreign_20d, cumul_trust_20d, inst_buy_days_ratio, inst_flow_accel
+         ) = self._fetch_institution_consecutive_days(ticker, trade_date, flags)
         short_increased, short_margin_ratio = self._fetch_short_data(ticker, trade_date, flags)
         sbl_ratio = self._fetch_sbl_data(ticker, trade_date, flags)
         margin_util = self._fetch_margin_utilization(ticker, trade_date, flags)
@@ -159,6 +159,10 @@ class ChipProxyFetcher:
             foreign_and_trust_both_buy=foreign_and_trust_both_buy,
             large_holder_chg_pct=large_chg,
             retail_holder_chg_pct=retail_chg,
+            cumul_foreign_20d=cumul_foreign_20d,
+            cumul_trust_20d=cumul_trust_20d,
+            inst_buy_days_ratio=inst_buy_days_ratio,
+            inst_flow_accel=inst_flow_accel,
             is_available=is_available,
             data_quality_flags=flags,
         )
@@ -281,6 +285,10 @@ class ChipProxyFetcher:
                 foreign_idx = fields.index("外陸資買賣超股數")
             except ValueError:
                 flags.append("TWSE_T86_SCHEMA_CHANGED")
+                # Schema change on TWSE side — still try TPEx for OTC stocks
+                tpex_result = self._fetch_tpex_t86_data(ticker, trade_date, flags)
+                if any(v is not None for v in tpex_result):
+                    return tpex_result
                 return None, None, None
 
             # 投信買賣超股數 and 自營商買賣超股數 are optional columns
@@ -355,17 +363,19 @@ class ChipProxyFetcher:
         Uses date-level in-memory cache: one HTTP request per date serves ALL OTC tickers.
         Returns (foreign_net_buy, trust_net_buy, dealer_net_buy) in shares.
 
-        TPEx field layout (25 cols):
+        TPEx field layout — v2 (24 cols, 2026+ new API with tables wrapper):
           0: 代號, 1: 名稱
-          2-4: 外資 買進/賣出/買賣超
+          2-4: 外陸資 買進/賣出/買賣超
           5-7: 外資自營 買進/賣出/買賣超
-          8-10: 投信 買進/賣出/買賣超
-          11-13: 自營商(自行) 買進/賣出/買賣超
-          14-16: 自營商(避險) 買進/賣出/買賣超
-          17-19: 自營商合計 買進/賣出/買賣超
-          20-22: 三大法人合計 買進/賣出/買賣超
-          23: (reserved)
-          24: 三大法人買賣超股數合計
+          8-10: 外資合計 買進/賣出/買賣超   ← v2 added; was 投信 in v1
+          11-13: 投信 買進/賣出/買賣超      ← shifted from 8-10 in v1
+          14-16: 自營商(自行) 買進/賣出/買賣超  ← shifted from 11-13
+          17-19: 自營商(避險) 買進/賣出/買賣超  ← shifted from 14-16
+          20-22: 自營商合計 買進/賣出/買賣超    ← shifted from 17-19
+          23: 三大法人買賣超股數合計
+
+        v1 legacy (25 cols, aaData wrapper — response was data[col]):
+          8-10: 投信;  11-13: 自行;  14-16: 避險;  17-19: 自營合計;  20-22: 三大法人合計
         """
         # 1. Date-level memory cache — fastest path
         if trade_date in self._tpex_t86_date_cache:
@@ -410,7 +420,15 @@ class ChipProxyFetcher:
                 self._tpex_t86_date_cache[trade_date] = {}
                 return None, None, None
 
-            data = body.get("aaData") or body.get("data") or []
+            # TPEx changed response format: v1 had root-level "aaData",
+            # v2 (2026+) wraps rows in body["tables"][0]["data"]
+            tables = body.get("tables") or []
+            data = (
+                body.get("aaData")
+                or body.get("data")
+                or (tables[0].get("data") if tables else [])
+                or []
+            )
             if not data:
                 self._tpex_t86_date_cache[trade_date] = {}
                 return None, None, None
@@ -422,15 +440,22 @@ class ChipProxyFetcher:
                 except ValueError:
                     return None
 
-            # Parse ALL rows into date-level cache + write per-ticker parquets
+            # Parse ALL rows into date-level cache + write per-ticker parquets.
+            # Detect format version by row length:
+            #   v2 (24 cols, tables wrapper): trust=[13], dealer_total=[22]
+            #   v1 (25 cols, aaData root):    trust=[10], dealer_hedge=[16]
+            is_v2 = any(len(r) == 24 for r in data[:5] if r)
+            trust_idx = 13 if is_v2 else 10
+            dealer_idx = 22 if is_v2 else 16
+
             date_map: dict[str, tuple[int | None, int | None, int | None]] = {}
             for row in data:
                 if len(row) < 17:
                     continue
                 code = str(row[0]).strip()
                 foreign_val = _parse_shares(str(row[4]))
-                trust_val = _parse_shares(str(row[10])) if len(row) > 10 else None
-                dealer_val = _parse_shares(str(row[16])) if len(row) > 16 else None
+                trust_val = _parse_shares(str(row[trust_idx])) if len(row) > trust_idx else None
+                dealer_val = _parse_shares(str(row[dealer_idx])) if len(row) > dealer_idx else None
                 date_map[code] = (foreign_val, trust_val, dealer_val)
 
                 # Write per-ticker parquet for future runs
@@ -614,24 +639,25 @@ class ChipProxyFetcher:
 
     def _fetch_institution_consecutive_days(
         self, ticker: str, trade_date: date, flags: list[str]
-    ) -> tuple[int, int, int, bool]:
-        """Count consecutive calendar-adjusted buy days for all three institutions.
+    ) -> tuple[int, int, int, bool, int, int, float, float]:
+        """Count consecutive buy days + compute 20-day cumulative flow metrics.
 
-        Returns (foreign_count, trust_count, dealer_count, buy_2_of_3).
+        Returns:
+            (foreign_consec, trust_consec, dealer_consec, buy_2_of_3,
+             cumul_foreign_20d, cumul_trust_20d, inst_buy_days_ratio, inst_flow_accel)
 
-        Lookback up to 21 calendar days (~7 trading days) using T86 data.
+        Lookback up to 60 calendar days to collect 20 trading days of T86 data.
         buy_2_of_3: True if (Foreign OR Trust) net buy on >= 2 of last 3 trading days.
+        inst_flow_accel: (近5日速率) / (近20日速率); >1 = 加速買進, <1 = 減速.
         """
         foreign_vals: list[int] = []
         trust_vals: list[int] = []
         dealer_vals: list[int] = []
 
-        for offset in range(21):  # scan up to 21 calendar days to collect 7 trading days
+        for offset in range(60):  # scan up to 60 calendar days to collect 20 trading days
             check_date = trade_date - timedelta(days=offset)
-            # Skip weekends — TWSE returns empty body for non-trading days
             if check_date.weekday() >= 5:
                 continue
-            # Use throwaway flags so lookback days don't pollute the main flags
             _silent: list[str] = []
             foreign_val, trust_val, dealer_val = self._fetch_t86_data(ticker, check_date, _silent)
             if foreign_val is not None:
@@ -640,9 +666,7 @@ class ChipProxyFetcher:
                 trust_vals.append(trust_val)
             if dealer_val is not None:
                 dealer_vals.append(dealer_val)
-            # Stop once we have 7 trading days of foreign data (same budget as original).
-            # Trust/dealer may have fewer entries if their columns are absent on some dates.
-            if len(foreign_vals) >= 7:
+            if len(foreign_vals) >= 20:
                 break
 
         def _count_consec(vals: list[int]) -> int:
@@ -654,24 +678,52 @@ class ChipProxyFetcher:
                     break
             return count
 
-        # Calculate buy_2_of_3: Foreign or Trust net buy on >= 2 of last 3 trading days.
+        # buy_2_of_3: Foreign or Trust net buy on >= 2 of last 3 trading days.
         buy_2_of_3 = False
         if len(foreign_vals) >= 3:
-            # We assume foreign_vals and trust_vals are aligned by trading days.
-            # T86 table usually has both if available for that market date.
-            buys = 0
-            for i in range(3):
-                f_buy = foreign_vals[i] > 0 if i < len(foreign_vals) else False
-                t_buy = trust_vals[i] > 0 if i < len(trust_vals) else False
-                if f_buy or t_buy:
-                    buys += 1
+            buys = sum(
+                1 for i in range(3)
+                if (foreign_vals[i] > 0 if i < len(foreign_vals) else False)
+                or (trust_vals[i] > 0 if i < len(trust_vals) else False)
+            )
             buy_2_of_3 = (buys >= 2)
+
+        # 20-day cumulative metrics
+        n = len(foreign_vals)
+        cumul_foreign = sum(foreign_vals)
+        cumul_trust = sum(trust_vals[:n])
+
+        buy_days_ratio = 0.0
+        if n > 0:
+            buy_days = sum(
+                1 for i in range(n)
+                if foreign_vals[i] > 0 or (i < len(trust_vals) and trust_vals[i] > 0)
+            )
+            buy_days_ratio = buy_days / n
+
+        # Flow acceleration: compare recent-5d avg vs full-20d avg (foreign + trust combined)
+        flow_accel = 0.0
+        if n >= 5:
+            combined = [
+                foreign_vals[i] + (trust_vals[i] if i < len(trust_vals) else 0)
+                for i in range(n)
+            ]
+            avg5  = sum(combined[:5]) / 5
+            avg20 = sum(combined) / n
+            if avg20 > 0:
+                flow_accel = avg5 / avg20
+            elif avg20 <= 0 and avg5 > 0:
+                flow_accel = 2.0  # 從賣轉買，強勢反轉
 
         return (
             _count_consec(foreign_vals),
             _count_consec(trust_vals),
             _count_consec(dealer_vals),
             buy_2_of_3,
+            cumul_foreign,
+            cumul_trust,
+            buy_days_ratio,
+            flow_accel,
         )
 
     def _fetch_foreign_consecutive_days(
@@ -682,7 +734,7 @@ class ChipProxyFetcher:
         Prefer _fetch_institution_consecutive_days() for new call sites — it
         returns all three institutions in one pass.
         """
-        foreign_count, _, _, _ = self._fetch_institution_consecutive_days(ticker, trade_date, flags)
+        foreign_count, *_ = self._fetch_institution_consecutive_days(ticker, trade_date, flags)
         return foreign_count
 
     def _fetch_sbl_data(

@@ -624,6 +624,8 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "entry_bid": signal.execution_plan.entry_bid_limit,
             "stop_loss": signal.execution_plan.stop_loss,
             "target": signal.execution_plan.target,
+            "verdict": signal.reasoning.verdict if signal.reasoning else "",
+            "position": signal.reasoning.position if signal.reasoning else "",
             "momentum": signal.reasoning.momentum if signal.reasoning else "",
             "chip": signal.reasoning.chip_analysis if signal.reasoning else "",
             "risk": signal.reasoning.risk_factors if signal.reasoning else "",
@@ -645,6 +647,8 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "entry_bid": 0.0,
             "stop_loss": 0.0,
             "target": 0.0,
+            "verdict": "",
+            "position": "",
             "momentum": "",
             "chip": "",
             "risk": "",
@@ -815,8 +819,12 @@ def _print_table(
 
     # LLM details
     for r in valid:
-        if r["momentum"] or r["chip"] or r["risk"]:
+        if r.get("verdict") or r["momentum"] or r["chip"] or r["risk"]:
             _console.print(f"\n[bold white]{r['ticker']}[/bold white] LLM 分析")
+            if r.get("verdict"):
+                _console.print(f"  [bold green]判決[/bold green] {r['verdict']}")
+            if r.get("position"):
+                _console.print(f"  [bold cyan]倉位[/bold cyan] {r['position']}")
             if r["momentum"]:
                 _console.print(f"  [cyan]動能[/cyan] {r['momentum']}")
             if r["chip"]:
@@ -830,7 +838,7 @@ def _print_table(
         tickers_str = ", ".join(r["ticker"] for r in halted)
         _console.print(f"\n  [dim]略過 {len(halted)} 檔 (HALT/ERROR): {tickers_str}[/dim]")
 
-    llm_count = sum(1 for r in results if r.get("momentum") or r.get("chip") or r.get("risk"))
+    llm_count = sum(1 for r in results if r.get("verdict") or r.get("momentum") or r.get("chip") or r.get("risk"))
     llm_note = f"，LLM 補充 {llm_count} 檔" if llm_count else ""
     _console.print(Panel(
         f"[bold green]掃描完成[/bold green]  {len(results)} 檔  •  有效訊號 [bold]{len(valid)}[/bold] 檔{llm_note}",

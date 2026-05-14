@@ -54,6 +54,10 @@
     "chip_retail_surge_penalty": -5,
     "retail_leverage_trap_penalty": -5,
     "daytrade_high_penalty": -3,
-    "daytrade_extreme_penalty": -5
+    "daytrade_extreme_penalty": -5,
+    "cumul_flow_hot": 8,
+    "cumul_flow_warm": 4,
+    "flow_accel_bonus": 3,
+    "quiet_accum": 6
   }
 }

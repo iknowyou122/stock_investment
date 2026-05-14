@@ -709,6 +709,34 @@ def _buy_verdict(r: dict, scan_date: str = "") -> dict:
     return {"verdict": verdict, "vcls": vcls, "summary": summary, "pros": pros, "cons": cons}
 
 
+def _parse_llm_verdict(llm_text: str) -> dict | None:
+    """Parse 5-line structured LLM output into fields. Returns None if unstructured."""
+    if not llm_text:
+        return None
+    fields: dict[str, str] = {}
+    for line in llm_text.split("\n"):
+        line = line.strip()
+        for key, name in [
+            ("【判決】", "verdict"), ("【進場】", "entry"),
+            ("【止損】", "stop"),   ("【倉位】", "position"), ("【風險】", "risk"),
+        ]:
+            if line.startswith(key):
+                fields[name] = line[len(key):].strip()
+                break
+    if "verdict" not in fields:
+        return None
+    v = fields["verdict"]
+    if "買進" in v:
+        vcls, badge = "vyes", "買進"
+    elif "不建議" in v or "不買" in v:
+        vcls, badge = "vno", "不買"
+    else:
+        vcls, badge = "vwatch", "待觀察"
+    fields["vcls"] = vcls
+    fields["badge"] = badge
+    return fields
+
+
 def _generate_html_report(
     results: list[dict],
     scan_date: str,
@@ -772,10 +800,41 @@ def _generate_html_report(
         ind_s    = f"{ind_pct:.0f}%" if ind_pct is not None else "--"
         delay    = f"{i * 0.05:.2f}"
 
-        vd = _buy_verdict(r, scan_date=scan_date)
-        pros_html = "".join(f'<li class="pro">{_esc(p)}</li>' for p in vd["pros"])
-        cons_html = "".join(f'<li class="con">{_esc(c)}</li>' for c in vd["cons"])
-        verdict_html = f"""
+        llm_text   = r.get("llm_analysis", "")
+        llm_parsed = _parse_llm_verdict(llm_text)
+
+        if llm_parsed:
+            # ── AI-driven verdict ─────────────────────────────────────────
+            trade_rows = ""
+            for label, key, color in [
+                ("進場", "entry",    "#58a6ff"),
+                ("止損", "stop",     "#ffa198"),
+                ("倉位", "position", "#e3b341"),
+                ("風險", "risk",     "#8b949e"),
+            ]:
+                val = llm_parsed.get(key, "")
+                if val:
+                    trade_rows += (
+                        f'<div class="aip-row">'
+                        f'<span class="aip-label" style="color:{color}">{label}</span>'
+                        f'<span class="aip-val">{_esc(val)}</span>'
+                        f'</div>'
+                    )
+            verdict_html = f"""
+      <div class="verdict {_esc(llm_parsed['vcls'])}">
+        <div class="verdict-hd">
+          <span class="vbadge">{_esc(llm_parsed['badge'])}</span>
+          <span class="vsummary">{_esc(llm_parsed['verdict'])}</span>
+        </div>
+        <div class="ai-plan">{trade_rows}</div>
+      </div>"""
+            llm_html = ""
+        else:
+            # ── Deterministic fallback ────────────────────────────────────
+            vd = _buy_verdict(r, scan_date=scan_date)
+            pros_html = "".join(f'<li class="pro">{_esc(p)}</li>' for p in vd["pros"])
+            cons_html = "".join(f'<li class="con">{_esc(c)}</li>' for c in vd["cons"])
+            verdict_html = f"""
       <div class="verdict {_esc(vd['vcls'])}">
         <div class="verdict-hd">
           <span class="vbadge">{_esc(vd['verdict'])}</span>
@@ -783,13 +842,7 @@ def _generate_html_report(
         </div>
         <ul class="vlist">{pros_html}{cons_html}</ul>
       </div>"""
-
-        llm_text = r.get("llm_analysis", "")
-        llm_html = f"""
-      <div class="ai-box">
-        <div class="ai-label">🤖 AI 評估</div>
-        <div class="ai-text">{_esc(llm_text)}</div>
-      </div>""" if llm_text else ""
+            llm_html = ""
 
         cards.append(f"""
     <div class="card" style="animation-delay:{delay}s">
@@ -873,9 +926,10 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .vlist li::before{{content:"";position:absolute;left:2px;top:6px;width:6px;height:6px;border-radius:50%}}
 .pro{{color:#7ee787}}.pro::before{{background:#3fb950}}
 .con{{color:#ffa198}}.con::before{{background:#f85149}}
-.ai-box{{padding:10px 16px 14px;border-top:1px solid #21262d;background:rgba(56,139,248,.04)}}
-.ai-label{{font-size:10px;color:#58a6ff;font-weight:700;letter-spacing:.5px;margin-bottom:5px}}
-.ai-text{{font-size:12px;color:#c9d1d9;line-height:1.65}}
+.ai-plan{{display:flex;flex-direction:column;gap:5px;margin-top:6px}}
+.aip-row{{display:flex;gap:8px;font-size:11px;line-height:1.55}}
+.aip-label{{font-weight:700;min-width:26px;flex-shrink:0}}
+.aip-val{{color:#c9d1d9}}
 </style>
 </head>
 <body>
@@ -1036,32 +1090,64 @@ def _run_llm_analysis(results: list[dict], llm_provider, scan_date: str = "") ->
         flags   = "|".join(raw) if isinstance(raw, list) else (raw or "")
         fset    = set(flags.split("|"))
 
-        is_day2  = "SURGE_DAY2" in fset
-        day      = "DAY2（連續第二天）" if is_day2 else "DAY1（首次噴發）"
+        is_day2  = "SURGE_DAY2" in flags
+        day      = f"DAY{r.get('surge_day', 2) if is_day2 else 1}（{'連續第'+str(r.get('surge_day',2))+'天' if is_day2 else '首次噴發'}）"
         entry    = _entry_day_str(scan_date, is_day2) if scan_date else "T+2"
-        rsi_m    = _re2.search(r'RSI_(\w+):([\d.]+)', flags)
-        rsi_desc = f"RSI {rsi_m.group(2)}（{rsi_m.group(1)}）" if rsi_m else ""
-        margin   = next((f for f in ["MARGIN_HOT", "MARGIN_WARM", "MARGIN_COOL"] if f in fset), "")
-        ind_m    = _re2.search(r'IND_(HOT|WARM|COLD):(\d+)', flags)
-        ind_desc = f"產業熱度 {ind_m.group(1)}:{ind_m.group(2)}" if ind_m else ""
+
+        # ── 從 flags 抽出關鍵數值 ───────────────────────────────────────────
+        rsi_m       = _re2.search(r'RSI_(\w+):([\d.]+)', flags)
+        rsi_val     = rsi_m.group(2) if rsi_m else "--"
+        rsi_state   = rsi_m.group(1) if rsi_m else ""
+        bk_m        = _re2.search(r'BREAKOUT_20D:([\d.]+)>([\d.]+)', flags)
+        breakout_lvl = bk_m.group(2) if bk_m else None   # 20日高點（突破位）
+        rs_m        = _re2.search(r'RS:([+-][\d.]+%)', flags)
+        rs_str      = rs_m.group(1) if rs_m else "--"
+        gap_m       = _re2.search(r'GAP_(?:PARTIAL|FULL):([\d.]+%)', flags)
+        gap_str     = gap_m.group(1) if gap_m else "0%"
+        heat_m      = _re2.search(r'IND_HEAT_(HOT|WARM|COLD):(\d+)', flags)
+        ind_desc    = f"產業熱度 {heat_m.group(1)}:{heat_m.group(2)}" if heat_m else ""
+        margin      = ("MARGIN_HOT" if "MARGIN_HOT" in flags
+                       else "MARGIN_WARM" if "MARGIN_WARM" in flags
+                       else "MARGIN_COOL" if "MARGIN_COOL" in flags else "")
+
+        close        = float(r.get("close_price") or 0)
+        close_str    = f"{close:.1f}" if close else "未知"
+        score        = r.get("score", 0)
+        grade        = r.get("grade", "")
+        inst_days    = r.get("inst_consec_days", 0)
+        ind_rank     = r.get("industry_rank_pct")
+        ind_rank_str = f"{ind_rank:.0f}%" if ind_rank is not None else "--"
 
         extras = []
-        if "BB_SQUEEZE_BREAK" in fset: extras.append("BB 壓縮突破（高品質型態）")
-        if "INTL_TAIL"        in fset: extras.append("美股半導體昨夜強，國際順風")
-        if "MA5_BREAK"        in fset: extras.append("⚠️ MA5 均線結構破壞")
-        if "RSI_BREAKOUT"     in fset: extras.append("⚠️ RSI 已過熱")
-        if "MARGIN_HOT"       in fset: extras.append("⚠️ 融資水位過高，強制賣壓風險")
+        if "BB_SQUEEZE_BREAK" in flags: extras.append("BB 壓縮突破（高品質）")
+        if "INTL_TAIL"        in flags: extras.append("美股半導體昨夜強，國際順風")
+        if "POCKET_PIVOT"     in flags: extras.append("Pocket Pivot 量型")
+        if "MA5_BREAK"        in flags: extras.append("⚠ MA5 結構破壞")
+        if "RSI_BREAKOUT"     in flags: extras.append("⚠ RSI 過熱（>70）")
+        if "MARGIN_HOT"       in flags: extras.append("⚠ 融資過高，追價賣壓風險")
+        if "VOL_SURGE"        in flags: extras.append("⚠ 爆量 >5x，留意高峰賣壓")
+        if "MARGIN_DECLINING" in flags: extras.append("融資減少（籌碼清洗正面）")
+
+        stop_hint = (
+            f"（突破位 {breakout_lvl} 為強支撐參考）" if breakout_lvl else ""
+        )
 
         return (
             f"你是台灣短線交易員，策略是噴發信號出現後 T+2 日（{entry}）進場。\n"
-            "請根據以下資料，用繁體中文寫 2-3 句操作建議：明確說買或不買、"
-            "指出最值得注意的一個風險或優勢、語氣像交易員告訴同事，不要廢話。\n\n"
-            f"代號: {ticker} {name} | 產業: {r.get('industry','')}\n"
-            f"今日: 漲 {r.get('day_chg_pct',0):.1f}%，量比 {r.get('vol_ratio',0):.1f}x，"
-            f"收盤強度 {r.get('close_strength',0):.2f}\n"
-            f"信號: {day} | {rsi_desc} | {margin} | {ind_desc}\n"
-            f"特徵: {', '.join(extras) if extras else '無特殊加分/扣分項'}\n\n"
-            "操作建議:"
+            "根據以下數據，給出明確的交易判斷。不要模稜兩可，不要廢話。\n\n"
+            f"代號: {ticker} {name} | 產業: {r.get('industry','')} | 信號評分: {score}分（{grade}）\n"
+            f"今日收盤: {close_str} | 漲幅: {r.get('day_chg_pct',0):.1f}% | 跳空: {gap_str}\n"
+            f"量比: {r.get('vol_ratio',0):.1f}x | 收強: {r.get('close_strength',0):.2f} | "
+            f"RSI: {rsi_val}（{rsi_state}）\n"
+            f"相對強弱: {rs_str} vs 大盤 | 法人連買: {inst_days}天 | 產業排名: {ind_rank_str}\n"
+            f"信號: {day} | {margin} | {ind_desc}\n"
+            f"突破位: {breakout_lvl or '--'} | 特徵: {', '.join(extras) if extras else '無特殊項'}\n\n"
+            "請嚴格按以下格式輸出 5 行，不要其他文字：\n"
+            f"【判決】明天買進 / 待觀察 / 不建議（選一，括號補充最關鍵理由）\n"
+            f"【進場】{entry} 開盤後站穩 XXX~XXX（根據收盤 {close_str} 估算具體數字）\n"
+            f"【止損】跌破 XXX 收盤停損{stop_hint}\n"
+            "【倉位】全倉 / 半倉 / 輕倉（選一，括號說明原因）\n"
+            "【風險】最主要一個風險（一句話）\n"
         )
 
     if not results:
@@ -1074,7 +1160,7 @@ def _run_llm_analysis(results: list[dict], llm_provider, scan_date: str = "") ->
     first_ticker = first.get("ticker", "")
     _console.print(f"  [dim]🤖 LLM 分析（先測 {first_ticker}）…[/dim]")
     try:
-        text = llm_provider.complete(_build_prompt(first), max_tokens=120).strip()
+        text = llm_provider.complete(_build_prompt(first), max_tokens=250).strip()
         ticker_map[first_ticker]["llm_analysis"] = text
         _console.print(f"  [dim]  ✓ 1/{len(results)}[/dim]")
     except Exception as e:
@@ -1090,7 +1176,7 @@ def _run_llm_analysis(results: list[dict], llm_provider, scan_date: str = "") ->
     def _one(r: dict) -> tuple[str, str]:
         ticker = r.get("ticker", "")
         try:
-            return ticker, llm_provider.complete(_build_prompt(r), max_tokens=120).strip()
+            return ticker, llm_provider.complete(_build_prompt(r), max_tokens=250).strip()
         except Exception as e:
             return ticker, f"（LLM 分析失敗: {e}）"
 

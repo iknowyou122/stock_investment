@@ -453,6 +453,55 @@ class SurgeRadar:
             return f.get("margin_declining", 3), ["MARGIN_DECLINING"]
         return 0, []
 
+    def _score_inst_cumulative_flow(
+        self, proxy: TWSEChipProxy | None
+    ) -> tuple[int, list[str]]:
+        """20日累計法人淨買超 — 靜默蓄積型態偵測。
+
+        連買天數遇到任一賣超日就歸零，無法捕捉「買多賣少、整體持續增持」型機構。
+        20日累計指標能偵測這類靜默累積（如 2026-04 元太蓄積型態）。
+
+        Factor layers:
+          1. cumul_ratio = (外資+投信 20日累計淨買) / 日均量
+             >= 0.5x → CUMUL_FLOW_HOT  +8
+             >= 0.2x → CUMUL_FLOW_WARM +4
+          2. inst_flow_accel >= 1.5 + 累計為正 → FLOW_ACCEL +3 (爆量日加速確認)
+          3. inst_buy_days_ratio >= 55% + 累計正 + 未減速 → QUIET_ACCUM +6
+        """
+        if proxy is None or not proxy.is_available:
+            return 0, []
+
+        f = self._params.get("factors", {})
+        pts = 0
+        flags: list[str] = []
+
+        cumul_net = proxy.cumul_foreign_20d + proxy.cumul_trust_20d
+        avg_vol = proxy.avg_20d_volume  # shares (same unit as cumul_* raw T86 values)
+
+        # 1. Cumulative intensity
+        if avg_vol > 0 and cumul_net > 0:
+            cumul_ratio = cumul_net / avg_vol
+            if cumul_ratio >= 0.5:
+                pts += f.get("cumul_flow_hot", 8)
+                flags.append(f"CUMUL_FLOW_HOT:{cumul_ratio:.1f}x")
+            elif cumul_ratio >= 0.2:
+                pts += f.get("cumul_flow_warm", 4)
+                flags.append(f"CUMUL_FLOW_WARM:{cumul_ratio:.1f}x")
+
+        # 2. Acceleration on surge day (near-5d avg >> 20d avg)
+        if proxy.inst_flow_accel >= 1.5 and cumul_net > 0:
+            pts += f.get("flow_accel_bonus", 3)
+            flags.append(f"FLOW_ACCEL:{proxy.inst_flow_accel:.1f}x")
+
+        # 3. Quiet accumulation pattern: consistent buying across the window
+        if (proxy.inst_buy_days_ratio >= 0.55
+                and cumul_net > 0
+                and proxy.inst_flow_accel >= 0.8):
+            pts += f.get("quiet_accum", 6)
+            flags.append(f"QUIET_ACCUM:{proxy.inst_buy_days_ratio:.0%}")
+
+        return pts, flags
+
     def _score_ownership_concentration(
         self, proxy: TWSEChipProxy | None
     ) -> tuple[int, list[str]]:
@@ -658,6 +707,7 @@ class SurgeRadar:
             ("margin_not_hot", self._score_margin_not_hot(proxy)),
             ("inst_synergy", self._score_inst_synergy(proxy)),
             ("margin_declining", self._score_margin_declining(proxy)),
+            ("inst_cumulative_flow", self._score_inst_cumulative_flow(proxy)),
             ("ownership_concentration", self._score_ownership_concentration(proxy)),
             ("daytrade_penalty", self._score_daytrade_penalty(proxy)),
             ("bb_squeeze", self._score_bb_squeeze_breakout(ohlcv, history)),

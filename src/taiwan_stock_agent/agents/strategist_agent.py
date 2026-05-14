@@ -422,12 +422,14 @@ class StrategistAgent:
 停損參考: {signal.execution_plan.stop_loss} (T+0 收盤價，非盤中即時)
 目標價: {signal.execution_plan.target}
 
-請分別用1-2句話填寫以下欄位:
-1. momentum (動能分析): 描述量價狀況
-2. chip_analysis (籌碼分析): 描述籌碼集中度與主力行為
-3. risk_factors (風險因素): 列出主要風險
+請填寫以下欄位（每項1-2句，verdict 和 position 需明確，不可模稜兩可）:
+1. verdict（判決）: 明天買進 / 待觀察 / 不建議，括號說明最關鍵理由
+2. position（倉位）: 全倉 / 半倉 / 輕倉，括號說明原因
+3. momentum (動能分析): 描述量價狀況
+4. chip_analysis (籌碼分析): 描述籌碼集中度與主力行為
+5. risk_factors (風險因素): 列出主要風險
 
-回傳 JSON 格式，欄位: momentum, chip_analysis, risk_factors"""
+回傳 JSON 格式，欄位: verdict, position, momentum, chip_analysis, risk_factors"""
 
         try:
             raw = self._llm_provider.complete(prompt, max_tokens=2000)
@@ -448,6 +450,8 @@ class StrategistAgent:
                 raw = raw.split("```")[1].split("```")[0].strip()
             data = json.loads(raw)
             return Reasoning(
+                verdict=data.get("verdict", ""),
+                position=data.get("position", ""),
                 momentum=data.get("momentum", ""),
                 chip_analysis=data.get("chip_analysis", ""),
                 risk_factors=data.get("risk_factors", ""),

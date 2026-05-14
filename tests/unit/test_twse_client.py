@@ -327,9 +327,9 @@ class TestChipProxyFetcherCache:
                 Path(tmpdir) / f"twse_margin_row_{ticker}_{trade_date}.parquet", index=False
             )
 
-            # T86 lookback caches (offsets 1-14) — weekends get a "no_data" sentinel
-            # that causes the cache to return (None, None, None) without HTTP call.
-            for offset in range(1, 15):
+            # T86 lookback caches (offsets 1-61) — covers 60 calendar days needed for
+            # the 20-trading-day lookback; weekends get a "no_data" sentinel.
+            for offset in range(1, 62):
                 d = trade_date - timedelta(days=offset)
                 path = Path(tmpdir) / f"twse_t86_{ticker}_{d}.parquet"
                 if d.weekday() >= 5:  # Sat / Sun
@@ -369,7 +369,7 @@ class TestChipProxyFetcherCache:
         assert proxy.trust_net_buy == 50_000
         assert proxy.dealer_net_buy == 30_000
         assert proxy.margin_balance_change == -2_000          # 8_000 - 10_000
-        assert proxy.foreign_consecutive_buy_days == 7        # today + 6 prior trading days
+        assert proxy.foreign_consecutive_buy_days == 20        # capped at 20-day lookback, all positive
         assert proxy.short_balance_increased is True          # 5_000 > 4_000 * 1.20 = 4_800
         assert proxy.short_margin_ratio == pytest.approx(5_000 / 8_000)  # today_short / today_margin
 
@@ -454,8 +454,8 @@ class TestForeignConsecutiveDays:
 
         assert proxy.foreign_consecutive_buy_days == 0
 
-    def test_caps_at_seven_trading_days(self):
-        """Lookback stops collecting after 7 trading days; count is capped at 7."""
+    def test_caps_at_twenty_trading_days(self):
+        """Lookback stops collecting after 20 trading days; count is capped at 20."""
         ticker = "2330"
         trade_date = date(2026, 3, 26)  # Wednesday
 
@@ -471,7 +471,7 @@ class TestForeignConsecutiveDays:
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get", side_effect=_side_effect):
                 proxy = fetcher.fetch(ticker, trade_date)
 
-        assert proxy.foreign_consecutive_buy_days == 7
+        assert proxy.foreign_consecutive_buy_days == 20
 
 
 # ------------------------------------------------------------------
@@ -595,7 +595,7 @@ class TestInstitutionConsecutiveDays:
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
                        side_effect=_side_effect):
                 flags: list = []
-                foreign_count, trust_count, dealer_count, _ = (
+                foreign_count, trust_count, dealer_count, *_ = (
                     fetcher._fetch_institution_consecutive_days(ticker, trade_date, flags)
                 )
 
@@ -633,7 +633,7 @@ class TestInstitutionConsecutiveDays:
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
                        side_effect=_side_effect):
                 flags: list = []
-                _, trust_count, _, _ = fetcher._fetch_institution_consecutive_days(
+                _, trust_count, *_ = fetcher._fetch_institution_consecutive_days(
                     ticker, trade_date, flags
                 )
 
@@ -662,7 +662,7 @@ class TestInstitutionConsecutiveDays:
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get",
                        side_effect=_side_effect):
                 flags: list = []
-                foreign_count, trust_count, dealer_count, _ = (
+                foreign_count, trust_count, dealer_count, *_ = (
                     fetcher._fetch_institution_consecutive_days(ticker, trade_date, flags)
                 )
 

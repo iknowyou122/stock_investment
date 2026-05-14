@@ -88,6 +88,11 @@ class TWSEChipProxy(BaseModel):
     foreign_and_trust_both_buy: bool = False  # 外資+投信同日雙買 (土洋合作)
     large_holder_chg_pct: float | None = None  # 集保 400張+大戶持股比例週變化 (+= 增加); None if unavailable
     retail_holder_chg_pct: float | None = None # 集保 100張以下散戶持股比例週變化 (-= 退出); None if unavailable
+    # 20日累計法人流向 (Phase 4.30)
+    cumul_foreign_20d: int = 0          # 外資20日累計淨買超（張數）; 正=持續買進
+    cumul_trust_20d: int = 0            # 投信20日累計淨買超（張數）; 正=持續買進
+    inst_buy_days_ratio: float = 0.0    # 過去20日法人買超天數佔比 (0~1); 0.6 = 12/20天
+    inst_flow_accel: float = 0.0        # 近5日速率 / 近20日速率; >1=加速, <1=減速
     is_available: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
 
@@ -123,6 +128,8 @@ class ExecutionPlan(BaseModel):
 
 
 class Reasoning(BaseModel):
+    verdict: str = ""
+    position: str = ""
     momentum: str = ""
     chip_analysis: str = ""
     risk_factors: str = ""

@@ -225,7 +225,7 @@ class _ScoreBreakdown:
     daytrade_filter_pts: int = 0      # 0/7
     foreign_broker_pts: int = 0       # 0/3/5
 
-    # --- Pillar 2B: Chip free (max _PILLAR2_FREE_MAX = 40) ---
+    # --- Pillar 2B: Chip free (max _PILLAR2_FREE_MAX = 54) ---
     foreign_strength_pts: int = 0         # 0/4/8/12
     trust_strength_pts: int = 0           # 0/3/6/8
     dealer_strength_pts: int = 0          # 0/2/4
@@ -234,6 +234,8 @@ class _ScoreBreakdown:
     margin_structure_pts: int = 0         # -4 to +8
     margin_utilization_pts: int = 0       # -4/0/+4
     sbl_pressure_pts: int = 0             # 0/-4/-8
+    cumul_flow_pts: int = 0               # 0/4/8 — 20日累計法人淨買超強度
+    consistent_accum_pts: int = 0         # 0/6 — 持續買進天數佔比+流向加速
 
     # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 40) ---
     proximity_pts: int = 0            # 0/6/12 — close distance to 20d_high
@@ -298,6 +300,8 @@ class _ScoreBreakdown:
             + self.margin_structure_pts      # can be negative
             + self.margin_utilization_pts    # can be negative
             + self.sbl_pressure_pts          # can be negative (0/-4/-8)
+            + self.cumul_flow_pts
+            + self.consistent_accum_pts
             # Pillar 3
             + self.proximity_pts
             + self.bb_compression_pts
@@ -347,6 +351,8 @@ class _ScoreBreakdown:
             + self.margin_structure_pts
             + self.margin_utilization_pts
             + self.sbl_pressure_pts
+            + self.cumul_flow_pts
+            + self.consistent_accum_pts
         )
 
     @property
@@ -1044,6 +1050,27 @@ class TripleConfirmationEngine:
             elif proxy.sbl_ratio > 0.05:
                 bd.sbl_pressure_pts = -4
                 bd.flags.append(f"SBL_MODERATE: {proxy.sbl_ratio:.1%}")
+
+        # 9. 20日累計法人淨買超強度
+        cumul_net = proxy.cumul_foreign_20d + proxy.cumul_trust_20d
+        if avg_vol > 0 and cumul_net > 0:
+            cumul_ratio = cumul_net / avg_vol
+            if cumul_ratio >= 0.5:
+                bd.cumul_flow_pts = 8
+                bd.flags.append(f"CUMUL_FLOW_HOT:{cumul_ratio:.1f}x")
+            elif cumul_ratio >= 0.2:
+                bd.cumul_flow_pts = 4
+                bd.flags.append(f"CUMUL_FLOW_WARM:{cumul_ratio:.1f}x")
+
+        # 10. 持續蓄積：買超天數佔比高 + 近期加速
+        if (proxy.inst_buy_days_ratio >= 0.55          # 超過半數日子法人買
+                and proxy.inst_flow_accel >= 0.8        # 近5日不明顯減速
+                and cumul_net > 0):                     # 整體方向向上
+            bd.consistent_accum_pts = 6
+            bd.flags.append(
+                f"CONSISTENT_ACCUM:{proxy.inst_buy_days_ratio:.0%}"
+                f"@{proxy.inst_flow_accel:.1f}x"
+            )
 
         for flag in proxy.data_quality_flags:
             bd.flags.append(f"TWSE:{flag}")
