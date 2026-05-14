@@ -1194,6 +1194,290 @@ def run_batch(
     if csv_path:
         _save_csv(results, analysis_date, csv_path, sort_by=sort_by)
 
+    html_path = (csv_path or Path("data/scans") / f"scan_{analysis_date}.csv").with_suffix(".html")
+    _generate_plan_html(results, str(analysis_date), html_path,
+                        name_map=name_map or {}, industry_map=industry_map or {},
+                        market_map=market_map or {})
+    _console.print(f"  [dim cyan]📄 HTML: file://{html_path.resolve()}[/dim cyan]")
+
+
+# ── Plan HTML generator ──────────────────────────────────────────────────────
+
+_WATCH_FLAGS_CONSOLIDATING = frozenset(["TREND_CONT", "CHIP_LOADING", "NO_CATALYST"])
+
+
+def _fetch_plan_chart(ticker: str, market: str) -> dict:
+    """Fetch 5-month daily OHLCV + Bollinger Bands (20,2) via yfinance."""
+    suffix = ".TW" if market == "TSE" else ".TWO"
+    empty: dict = {"candles": [], "bb_upper": [], "bb_mid": [], "bb_lower": []}
+    try:
+        import pandas as pd
+        import yfinance as yf
+        period = 20
+        hist = yf.Ticker(f"{ticker}{suffix}").history(period="5mo", interval="1d", auto_adjust=True)
+        rows = []
+        for idx, row in hist.iterrows():
+            try:
+                o, h, l, c = float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"])
+                if any(pd.isna(v) for v in [o, h, l, c]):
+                    continue
+                rows.append({"time": str(idx.date()), "open": round(o, 2),
+                             "high": round(h, 2), "low": round(l, 2), "close": round(c, 2)})
+            except Exception:
+                continue
+        if len(rows) < period:
+            return empty
+        closes = [r["close"] for r in rows]
+        bb_upper, bb_mid, bb_lower = [], [], []
+        for i in range(period - 1, len(rows)):
+            window = closes[i - period + 1: i + 1]
+            mean = sum(window) / period
+            std = (sum((x - mean) ** 2 for x in window) / period) ** 0.5
+            t = rows[i]["time"]
+            bb_upper.append({"time": t, "value": round(mean + 2 * std, 2)})
+            bb_mid.append({"time": t, "value": round(mean, 2)})
+            bb_lower.append({"time": t, "value": round(mean - 2 * std, 2)})
+        display_rows = rows[period - 1:]
+        return {"candles": display_rows, "bb_upper": bb_upper, "bb_mid": bb_mid, "bb_lower": bb_lower}
+    except Exception:
+        return empty
+
+
+def _generate_plan_html(
+    results: list[dict],
+    scan_date: str,
+    html_path: Path,
+    name_map: dict[str, str],
+    industry_map: dict[str, str],
+    market_map: dict[str, str],
+) -> None:
+    """Dark-themed HTML report for plan scan results (LONG + actionable WATCH only)."""
+    import json as _json
+    from html import escape as _esc
+
+    # Filter: LONG stocks + WATCH stocks that are NOT in consolidation
+    def _is_consolidating(r: dict) -> bool:
+        flags = set(r.get("flags") or [])
+        return bool(flags & _WATCH_FLAGS_CONSOLIDATING)
+
+    filtered = [
+        r for r in results
+        if not r.get("halt") and r.get("error") is None
+        and r.get("action") in ("LONG", "WATCH")
+        and not (r.get("action") == "WATCH" and _is_consolidating(r))
+    ]
+    filtered.sort(key=lambda r: (r.get("confidence", 0), r.get("trend_score", 0)), reverse=True)
+
+    if not filtered:
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        html_path.write_text(
+            f'<!DOCTYPE html><html><body style="background:#0d1117;color:#e6edf3;'
+            f'font-family:sans-serif;padding:40px"><h2>預突破掃描 {scan_date}</h2>'
+            f'<p>今日無符合條件的個股。</p></body></html>',
+            encoding="utf-8",
+        )
+        return
+
+    n_long = sum(1 for r in filtered if r["action"] == "LONG")
+    n_watch = sum(1 for r in filtered if r["action"] == "WATCH")
+
+    # Fetch chart data
+    _console.print("  [dim]抓取線圖資料（plan HTML）…[/dim]")
+    chart_data: dict[str, dict] = {}
+    pairs = [(r["ticker"], market_map.get(r["ticker"], "TSE")) for r in filtered]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futs = {pool.submit(_fetch_plan_chart, t, m): t for t, m in pairs}
+        for fut in as_completed(futs):
+            chart_data[futs[fut]] = fut.result()
+
+    cards: list[str] = []
+    for i, r in enumerate(filtered):
+        ticker = r["ticker"]
+        name = _esc(name_map.get(ticker, ticker))
+        industry = _esc(industry_map.get(ticker, ""))
+        action = r["action"]
+        conf = r.get("confidence", 0)
+        entry = r.get("entry_bid") or 0.0
+        target = r.get("target") or 0.0
+        stop = r.get("stop_loss") or 0.0
+        trend = r.get("trend_score", 0)
+        flags = r.get("flags") or []
+        market = market_map.get(ticker, "TSE")
+        exchange = "TWSE" if market == "TSE" else "TPEX"
+        tv_url = f"https://www.tradingview.com/chart/?symbol={exchange}%3A{ticker}"
+        gi_url = f"https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID={ticker}"
+
+        upside_pct = ((target - entry) / entry * 100) if entry > 0 and target > entry else 0.0
+        delay = f"{i * 0.05:.2f}"
+
+        if action == "LONG":
+            badge_zh = "突破進場"
+            gcls = "alpha"
+        else:
+            badge_zh = "等待確認"
+            gcls = "beta"
+
+        # Key flags to surface
+        key_flags = [f for f in flags if any(k in f for k in (
+            "MOMENTUM_TRACK", "COILING", "NEAR_HIGH_COIL", "RISING", "STABLE",
+            "SECTOR_RANK", "MA5_WALK", "BB_UPPER_COIL", "MOMENTUM_WALK",
+        ))]
+        flags_html = "".join(
+            f'<span class="flag">{_esc(f)}</span>' for f in key_flags[:5]
+        )
+
+        verdict = _esc(r.get("verdict") or "")
+        momentum_txt = _esc(r.get("momentum") or "")
+
+        entry_s = f"{entry:.2f}" if entry else "--"
+        target_s = f"{target:.2f}" if target else "--"
+        stop_s = f"{stop:.2f}" if stop else "--"
+        upside_s = f"+{upside_pct:.1f}%" if upside_pct > 0 else "--"
+        conf_cls = "pos" if action == "LONG" else "conf-watch"
+
+        cards.append(f"""
+    <div class="card" style="animation-delay:{delay}s">
+      <div class="card-header">
+        <div class="rank">{i+1}</div>
+        <div class="info">
+          <div class="ticker">{_esc(ticker)} <span class="tname">{name}</span></div>
+          <div class="cname">{industry}</div>
+        </div>
+        <div class="badge g-{gcls}">{badge_zh}</div>
+      </div>
+      <div class="metrics">
+        <div class="m"><div class="mv {conf_cls}">{conf}</div><div class="ml">信心分</div></div>
+        <div class="m"><div class="mv">{entry_s}</div><div class="ml">進場價</div></div>
+        <div class="m"><div class="mv pos">{upside_s}</div><div class="ml">目標空間</div></div>
+        <div class="m"><div class="mv neg">{stop_s}</div><div class="ml">止損</div></div>
+        <div class="m"><div class="mv">{trend}</div><div class="ml">動能分</div></div>
+      </div>
+      <div class="chart" data-ticker="{_esc(ticker)}"></div>
+      <div class="verdict vwatch">
+        <div class="verdict-hd">
+          <span class="vbadge">{_esc(target_s)}</span>
+          <span class="vsummary">{verdict}</span>
+        </div>
+        {f'<div class="vdetail">{momentum_txt}</div>' if momentum_txt else ""}
+        {f'<div class="flags">{flags_html}</div>' if flags_html else ""}
+      </div>
+      <div class="links">
+        <a class="link-btn tv" href="{tv_url}" target="_blank" rel="noopener">TradingView</a>
+        <a class="link-btn gi" href="{gi_url}" target="_blank" rel="noopener">Goodinfo</a>
+      </div>
+    </div>""")
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>預突破掃描 {_esc(scan_date)}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}}
+.header{{background:linear-gradient(135deg,#1a1a2e,#0d2137,#0a2744);padding:32px;border-bottom:1px solid #21262d}}
+.header h1{{font-size:30px;font-weight:800;color:#58a6ff;letter-spacing:-0.5px}}
+.subtitle{{color:#8b949e;margin-top:6px;font-size:14px}}
+.stats{{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap}}
+.stat{{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:12px 20px}}
+.sv{{font-size:24px;font-weight:700}}.sl{{font-size:11px;color:#8b949e;margin-top:2px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:16px;padding:24px}}
+.card{{background:#161b22;border:1px solid #21262d;border-radius:12px;overflow:hidden;
+  transition:border-color .2s,transform .2s;animation:fadeIn .5s ease forwards;opacity:0}}
+.card:hover{{border-color:#388bfd;transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,0,.4)}}
+@keyframes fadeIn{{to{{opacity:1}}}}
+.card-header{{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid #21262d}}
+.rank{{background:#21262d;border-radius:8px;width:34px;height:34px;display:flex;align-items:center;
+  justify-content:center;font-weight:700;font-size:13px;color:#8b949e;flex-shrink:0}}
+.info{{flex:1;min-width:0}}
+.ticker{{font-size:16px;font-weight:700;letter-spacing:1px;display:flex;align-items:baseline;gap:6px}}
+.tname{{font-size:15px;font-weight:600;color:#e6edf3}}
+.cname{{font-size:11px;color:#8b949e;margin-top:2px}}
+.badge{{padding:5px 12px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;flex-shrink:0}}
+.g-alpha{{background:rgba(248,81,73,.15);color:#ff6b6b;border:1px solid rgba(248,81,73,.3)}}
+.g-beta{{background:rgba(88,166,255,.15);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}}
+.metrics{{display:flex;border-bottom:1px solid #21262d}}
+.m{{flex:1;padding:10px 6px;text-align:center;border-right:1px solid #21262d}}
+.m:last-child{{border-right:none}}
+.mv{{font-size:13px;font-weight:600}}.ml{{font-size:10px;color:#8b949e;margin-top:2px}}
+.pos{{color:#3fb950}}.neg{{color:#f85149}}.conf-watch{{color:#58a6ff}}
+.chart{{height:240px;background:#0d1117;position:relative}}
+.links{{display:flex;gap:8px;padding:10px 16px;background:#0d1117;border-top:1px solid #21262d}}
+.link-btn{{flex:1;display:block;text-align:center;padding:8px;border-radius:6px;font-size:12px;font-weight:600;
+  text-decoration:none;transition:opacity .15s}}
+.link-btn:hover{{opacity:.8}}
+.tv{{background:#1565c0;color:#fff}}
+.gi{{background:#1b4332;color:#3fb950;border:1px solid #236840}}
+.footer{{text-align:center;padding:32px;color:#484f58;font-size:12px}}
+.verdict{{padding:12px 16px;border-top:1px solid #21262d}}
+.verdict-hd{{display:flex;align-items:center;gap:10px;margin-bottom:6px}}
+.vbadge{{font-size:12px;font-weight:700;padding:3px 10px;border-radius:12px;flex-shrink:0;
+  background:rgba(88,166,255,.15);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}}
+.g-alpha .vbadge{{background:rgba(248,81,73,.15);color:#ff6b6b;border:1px solid rgba(248,81,73,.3)}}
+.vsummary{{font-size:11px;color:#8b949e;line-height:1.4}}
+.vdetail{{font-size:11px;color:#c9d1d9;line-height:1.5;margin-top:4px}}
+.flags{{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}}
+.flag{{font-size:10px;padding:2px 8px;border-radius:10px;background:#21262d;color:#8b949e;border:1px solid #30363d}}
+.vwatch .vbadge{{background:rgba(88,166,255,.15);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>📈 預突破掃描</h1>
+  <div class="subtitle">{_esc(scan_date)} &nbsp;·&nbsp; 收盤掃描 &nbsp;·&nbsp; 共 {len(filtered)} 支</div>
+  <div class="stats">
+    <div class="stat"><div class="sv" style="color:#ff6b6b">{n_long}</div><div class="sl">突破進場</div></div>
+    <div class="stat"><div class="sv" style="color:#58a6ff">{n_watch}</div><div class="sl">等待確認</div></div>
+  </div>
+</div>
+<div class="grid">
+{"".join(cards)}
+</div>
+<div class="footer">預突破掃描自動生成 · {_esc(scan_date)}</div>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+const CHART_DATA = {_json.dumps(chart_data, ensure_ascii=False)};
+const _obs = new IntersectionObserver(function(entries) {{
+  entries.forEach(function(e) {{
+    if (!e.isIntersecting || e.target.dataset.init) return;
+    e.target.dataset.init = "1";
+    _obs.unobserve(e.target);
+    const ticker = e.target.dataset.ticker;
+    const data = CHART_DATA[ticker];
+    if (!data || !data.candles || data.candles.length === 0) {{
+      e.target.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#484f58;font-size:12px">暫無資料</div>';
+      return;
+    }}
+    const chart = LightweightCharts.createChart(e.target, {{
+      autoSize: true, height: 240,
+      layout: {{ background: {{ type: "solid", color: "#0d1117" }}, textColor: "#8b949e" }},
+      grid: {{ vertLines: {{ color: "#21262d" }}, horzLines: {{ color: "#21262d" }} }},
+      rightPriceScale: {{ borderColor: "#30363d" }},
+      timeScale: {{ borderColor: "#30363d", timeVisible: false }},
+      crosshair: {{ mode: 1 }},
+    }});
+    const cs = chart.addCandlestickSeries({{
+      upColor: "#ef5350", downColor: "#26a69a",
+      borderUpColor: "#ef5350", borderDownColor: "#26a69a",
+      wickUpColor: "#ef5350", wickDownColor: "#26a69a",
+    }});
+    cs.setData(data.candles);
+    const lo = {{ lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }};
+    chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#58a6ff" }})).setData(data.bb_mid);
+    chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#e3b341" }})).setData(data.bb_upper);
+    chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#a371f7" }})).setData(data.bb_lower);
+    chart.timeScale().fitContent();
+  }});
+}}, {{ rootMargin: "100px" }});
+document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.observe(el); }});
+</script>
+</body>
+</html>"""
+
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+    html_path.write_text(html, encoding="utf-8")
+
 
 def main() -> None:
     # 大批次掃描（728 檔）會消耗大量 socket fd；macOS 預設只有 256。
