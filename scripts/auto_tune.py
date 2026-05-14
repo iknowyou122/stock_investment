@@ -202,6 +202,14 @@ def _run_auto_apply(dry_run: bool) -> None:
         for v in violations:
             _console.print(f"    {v}")
         _save_pending(best, violations, dry_run)
+
+        # Safe params are applied immediately even when some violate the limit
+        violating_keys = {v.split(":")[0].strip() for v in violations}
+        safe_params = {k: v for k, v in best["params"].items() if k not in violating_keys}
+        if safe_params:
+            reason = f"auto_tune {date.today()} lift={lift:+.3f} (partial-safe)"
+            _console.print(f"  [green]安全範圍內的參數立即套用: {safe_params}[/green]")
+            _apply_params(safe_params, old_params, reason, lift, dry_run)
     else:
         reason = f"auto_tune {date.today()} lift={lift:+.3f}"
         _apply_params(best["params"], old_params, reason, lift, dry_run)
