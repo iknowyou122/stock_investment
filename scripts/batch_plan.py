@@ -1157,6 +1157,13 @@ def run_batch(
     if n_near_high:
         _console.print(f"  [dim]↑ 近高蓄積首日補償: {n_near_high} 檔 (NEAR_HIGH_COIL +4)[/dim]")
 
+    # Re-evaluate action after post-processing bonuses may have crossed a threshold.
+    # A CAUTION that reaches ≥ 45 after bonuses becomes WATCH.
+    _WATCH_MIN_PP = 45
+    for r in results:
+        if r.get("action") == "CAUTION" and r.get("confidence", 0) >= _WATCH_MIN_PP:
+            r["action"] = "WATCH"
+
     # --- Optional: record to DB (source=live) for factor analysis ---
     if save_db:
         n_recorded = _record_results(results, analysis_date)

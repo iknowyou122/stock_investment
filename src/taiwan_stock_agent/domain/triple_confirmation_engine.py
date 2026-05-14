@@ -1910,7 +1910,7 @@ class TripleConfirmationEngine:
           - G2 is the ONLY gate failure (G1, G3, G4, G5 all passed/skipped)
           - Proximity ≥ 92% (near the 20D high, not just approaching it)
           - Volume ≥ 1.5× 20D average (momentum confirmed by above-avg volume)
-          - Close strength ≥ 0.5 (closed above midpoint of day's range)
+          - Close strength ≥ 0.4 (closed in upper 60% of day's range)
         """
         failures = [f for f in gate_flags if f.startswith("GATE_FAIL:")]
         if len(failures) != 1 or not failures[0].startswith("GATE_FAIL:G2"):
@@ -1926,7 +1926,7 @@ class TripleConfirmationEngine:
             return False
 
         day_range = ohlcv.high - ohlcv.low
-        if day_range > 0 and (ohlcv.close - ohlcv.low) / day_range < 0.5:
+        if day_range > 0 and (ohlcv.close - ohlcv.low) / day_range < 0.4:
             return False
 
         return True

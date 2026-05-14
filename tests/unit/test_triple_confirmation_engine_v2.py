@@ -2095,9 +2095,9 @@ class TestMomentumBreakoutTrack:
         gate_flags = ["GATE_FAIL:G2_BB_WIDE_PCT:62.0p"]
         assert not TripleConfirmationEngine._is_momentum_breakout(ohlcv, history, vp, gate_flags)
 
-    def test_returns_false_when_close_strength_below_0_5(self):
+    def test_returns_false_when_close_strength_below_0_4(self):
         history = _make_volatile_history(65, base_vol=10_000)
-        # close=91 at bottom of range (low=90, high=100) → strength=0.1
+        # close=91 at bottom of range (low=90, high=100) → strength=0.1 < 0.4
         ohlcv = _make_ohlcv(close=91.0, high=100.0, low=90.0, volume=18_000)
         vp = _make_volume_profile(twenty_day_high=100.0)
         gate_flags = ["GATE_FAIL:G2_BB_WIDE_PCT:62.0p"]
