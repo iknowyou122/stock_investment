@@ -236,6 +236,9 @@ class _ScoreBreakdown:
     sbl_pressure_pts: int = 0             # 0/-4/-8
     cumul_flow_pts: int = 0               # 0/4/8 — 20日累計法人淨買超強度
     consistent_accum_pts: int = 0         # 0/6 — 持續買進天數佔比+流向加速
+    inst_synergy_pts: int = 0             # 0/5/11 — 土洋合作 + 法人買超佔比
+    margin_declining_pts: int = 0         # 0/3 — 融資餘額今日下降（浮額洗盤）
+    ownership_concentration_pts: int = 0  # -10/0/8 — 集保大戶增/散戶退
 
     # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 40) ---
     proximity_pts: int = 0            # 0/6/12 — close distance to 20d_high
@@ -302,6 +305,9 @@ class _ScoreBreakdown:
             + self.sbl_pressure_pts          # can be negative (0/-4/-8)
             + self.cumul_flow_pts
             + self.consistent_accum_pts
+            + self.inst_synergy_pts
+            + self.margin_declining_pts
+            + self.ownership_concentration_pts  # can be negative
             # Pillar 3
             + self.proximity_pts
             + self.bb_compression_pts
@@ -353,6 +359,9 @@ class _ScoreBreakdown:
             + self.sbl_pressure_pts
             + self.cumul_flow_pts
             + self.consistent_accum_pts
+            + self.inst_synergy_pts
+            + self.margin_declining_pts
+            + self.ownership_concentration_pts
         )
 
     @property
@@ -1085,6 +1094,45 @@ class TripleConfirmationEngine:
                 f"CONSISTENT_ACCUM:{proxy.inst_buy_days_ratio:.0%}"
                 f"@{proxy.inst_flow_accel:.1f}x"
             )
+
+        # 11. 土洋合作 + 法人買超佔比
+        if proxy.foreign_and_trust_both_buy:
+            bd.inst_synergy_pts += 5
+            bd.flags.append("INST_SYNERGY")
+        if proxy.inst_buy_pct is not None and proxy.inst_buy_pct > 0:
+            if proxy.inst_buy_pct >= 0.15:
+                bd.inst_synergy_pts += 6
+                bd.flags.append(f"INST_PCT_HIGH:{proxy.inst_buy_pct*100:.1f}%")
+            elif proxy.inst_buy_pct >= 0.10:
+                bd.inst_synergy_pts += 4
+                bd.flags.append(f"INST_PCT_MID:{proxy.inst_buy_pct*100:.1f}%")
+            elif proxy.inst_buy_pct >= 0.05:
+                bd.inst_synergy_pts += 2
+                bd.flags.append(f"INST_PCT_LOW:{proxy.inst_buy_pct*100:.1f}%")
+
+        # 12. 融資餘額今日下降
+        if proxy.margin_balance_change < 0:
+            bd.margin_declining_pts = 3
+            bd.flags.append("MARGIN_DECLINING")
+
+        # 13. 集保大戶增持 / 散戶退出（週級籌碼集中度）
+        large = proxy.large_holder_chg_pct
+        retail = proxy.retail_holder_chg_pct
+        if large is not None and large > 0:
+            bd.ownership_concentration_pts += 5
+            bd.flags.append(f"CHIP_LARGE_UP:{large:+.2f}%")
+        if retail is not None and retail < 0:
+            bd.ownership_concentration_pts += 3
+            bd.flags.append(f"CHIP_RETAIL_OUT:{retail:+.2f}%")
+        if retail is not None and retail > 0:
+            penalty = -5 if retail > 0.5 else -3
+            bd.ownership_concentration_pts += penalty
+            bd.flags.append(f"CHIP_RETAIL_IN:{retail:+.2f}%")
+        if (retail is not None and retail > 0
+                and proxy.margin_utilization_rate is not None
+                and proxy.margin_utilization_rate > 0.20):
+            bd.ownership_concentration_pts += -5
+            bd.flags.append(f"RETAIL_LEVERAGE_TRAP:{proxy.margin_utilization_rate*100:.1f}%")
 
         for flag in proxy.data_quality_flags:
             bd.flags.append(f"TWSE:{flag}")
