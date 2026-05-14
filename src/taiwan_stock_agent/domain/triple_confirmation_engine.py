@@ -37,6 +37,9 @@ Score breakdown (max 100 pts before risk deductions):
     margin_structure_pts:    -4 to +8   — price×margin direction matrix
     margin_utilization_pts:  -4/0/+4    — <20% → +4, >80% → -4
     sbl_pressure_pts:         0/-4/-8   — sbl_ratio 5–10% → -4, >10% → -8
+    obv_accumulation_pts:    0/2/3/5   — OBV 20d 斜率向上（橫盤吸籌）; +5=PRIME(橫盤+強斜率)
+    vol_asymmetry_pts:       0/2/4     — 上漲日均量 ÷ 下跌日均量 ≥1.2→2, ≥1.5→4
+    dual_inst_flow_pts:      0/3/5     — 外資+投信雙向 20D 累積確認（兩者同為正值）
 
   Pillar 3: Structure/Space (max 38 pts)
     breakout_20d_pts:     0/8    — close ≥ twenty_day_high × 0.99 (only when > 0) → +8
@@ -239,6 +242,9 @@ class _ScoreBreakdown:
     inst_synergy_pts: int = 0             # 0/5/11 — 土洋合作 + 法人買超佔比
     margin_declining_pts: int = 0         # 0/3 — 融資餘額今日下降（浮額洗盤）
     ownership_concentration_pts: int = 0  # -10/0/8 — 集保大戶增/散戶退
+    obv_accumulation_pts: int = 0         # 0/2/3/5 — OBV 20d 斜率向上（暗吸）
+    vol_asymmetry_pts: int = 0            # 0/2/4 — 上漲日均量 > 下跌日均量
+    dual_inst_flow_pts: int = 0           # 0/3/5 — 外資+投信雙向 20D 累積
 
     # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 40) ---
     proximity_pts: int = 0            # 0/6/12 — close distance to 20d_high
@@ -308,6 +314,9 @@ class _ScoreBreakdown:
             + self.inst_synergy_pts
             + self.margin_declining_pts
             + self.ownership_concentration_pts  # can be negative
+            + self.obv_accumulation_pts
+            + self.vol_asymmetry_pts
+            + self.dual_inst_flow_pts
             # Pillar 3
             + self.proximity_pts
             + self.bb_compression_pts
@@ -362,6 +371,9 @@ class _ScoreBreakdown:
             + self.inst_synergy_pts
             + self.margin_declining_pts
             + self.ownership_concentration_pts
+            + self.obv_accumulation_pts
+            + self.vol_asymmetry_pts
+            + self.dual_inst_flow_pts
         )
 
     @property
@@ -675,6 +687,17 @@ class TripleConfirmationEngine:
         else:
             bd.flags.append("NO_CHIP_DATA")
 
+        # --- Stealth Accumulation (OHLCV-derived, always available) ---
+        obv_pts, obv_flag = self._obv_accumulation_score(ohlcv, ohlcv_history)
+        bd.obv_accumulation_pts = obv_pts
+        if obv_flag:
+            bd.flags.append(obv_flag)
+
+        va_pts, va_flag = self._vol_asymmetry_score(ohlcv, ohlcv_history)
+        bd.vol_asymmetry_pts = va_pts
+        if va_flag:
+            bd.flags.append(va_flag)
+
         # --- Pillar 3: Compression Structure ---
         bd.proximity_pts = self._proximity_score(ohlcv.close, volume_profile.twenty_day_high)
         if bd.proximity_pts == 12:
@@ -815,6 +838,94 @@ class TripleConfirmationEngine:
         if ratio < 0.80:
             return 4
         return 0
+
+    @staticmethod
+    def _obv_accumulation_score(
+        ohlcv: DailyOHLCV, history: list[DailyOHLCV]
+    ) -> tuple[int, str | None]:
+        """OBV 20d 斜率向上 = 橫盤中大戶暗吸。
+        OBV 上升 + 股價橫盤 → 籌碼正在被吸收。
+        Scores: PRIME（橫盤+強斜率）→ +5, 斜率正 → +3/+2.
+        """
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        bars = sorted_h[-20:] if len(sorted_h) >= 20 else sorted_h
+        if len(bars) < 10:
+            return 0, None
+
+        obv = 0
+        obv_series: list[float] = [0.0]
+        for i in range(1, len(bars)):
+            curr, prev = bars[i], bars[i - 1]
+            if curr.close > prev.close:
+                obv += curr.volume
+            elif curr.close < prev.close:
+                obv -= curr.volume
+            obv_series.append(float(obv))
+
+        # Append today's bar
+        if ohlcv.close > bars[-1].close:
+            obv += ohlcv.volume
+        elif ohlcv.close < bars[-1].close:
+            obv -= ohlcv.volume
+        obv_series.append(float(obv))
+
+        n = len(obv_series)
+        all_bars = bars + [ohlcv]
+        avg_vol = sum(b.volume for b in all_bars) / len(all_bars)
+        if avg_vol <= 0:
+            return 0, None
+
+        normalized_slope = (obv_series[-1] - obv_series[0]) / (n * avg_vol)
+
+        # Detect consolidation: price range < 10% over window
+        closes = [b.close for b in all_bars]
+        lo = min(closes)
+        price_range_pct = (max(closes) - lo) / lo if lo > 0 else 1.0
+        in_consolidation = price_range_pct < 0.10
+
+        if normalized_slope > 0.05:
+            return (5, "OBV_ACCUM_PRIME") if in_consolidation else (3, "OBV_ACCUM")
+        if normalized_slope > 0.02:
+            return 2, "OBV_ACCUM"
+        return 0, None
+
+    @staticmethod
+    def _vol_asymmetry_score(
+        ohlcv: DailyOHLCV, history: list[DailyOHLCV]
+    ) -> tuple[int, str | None]:
+        """上漲日均量 vs 下跌日均量。
+        上漲日平均量 ÷ 下跌日平均量 ≥ 1.5 → +4 ; ≥ 1.2 → +2.
+        大戶在下跌日吸貨（量大）、上漲日讓股價輕鬆漲（量小）時比值 < 1（反向），
+        此處偵測的是「買盤強於賣壓」型的正向不對稱。
+        """
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        bars = (sorted_h[-20:] if len(sorted_h) >= 20 else sorted_h) + [ohlcv]
+        if len(bars) < 8:
+            return 0, None
+
+        up_vols: list[int] = []
+        down_vols: list[int] = []
+        for i in range(1, len(bars)):
+            curr, prev = bars[i], bars[i - 1]
+            if curr.close > prev.close:
+                up_vols.append(curr.volume)
+            elif curr.close < prev.close:
+                down_vols.append(curr.volume)
+
+        if len(up_vols) < 3 or len(down_vols) < 3:
+            return 0, None
+
+        avg_up = sum(up_vols) / len(up_vols)
+        avg_down = sum(down_vols) / len(down_vols)
+        if avg_down <= 0:
+            return 0, None
+
+        ratio = avg_up / avg_down
+        if ratio >= 1.5:
+            return 4, f"VOL_ASYM:{ratio:.1f}x"
+        if ratio >= 1.2:
+            return 2, f"VOL_ASYM:{ratio:.1f}x"
+        return 0, None
 
     @staticmethod
     def _volume_climax_score(history: list[DailyOHLCV]) -> int:
@@ -1133,6 +1244,22 @@ class TripleConfirmationEngine:
                 and proxy.margin_utilization_rate > 0.20):
             bd.ownership_concentration_pts += -5
             bd.flags.append(f"RETAIL_LEVERAGE_TRAP:{proxy.margin_utilization_rate*100:.1f}%")
+
+        # 14. 外資+投信雙向 20D 累積確認（兩者獨立正值 = 外資投信同步吸籌）
+        if proxy.cumul_foreign_20d > 0 and proxy.cumul_trust_20d > 0:
+            if avg_vol > 0 and (
+                proxy.cumul_foreign_20d / avg_vol >= 0.05
+                and proxy.cumul_trust_20d / avg_vol >= 0.05
+            ):
+                bd.dual_inst_flow_pts = 5
+                bd.flags.append(
+                    f"DUAL_FLOW_STRONG:"
+                    f"F+{proxy.cumul_foreign_20d//1000}K"
+                    f"/T+{proxy.cumul_trust_20d//1000}K"
+                )
+            else:
+                bd.dual_inst_flow_pts = 3
+                bd.flags.append("DUAL_FLOW")
 
         for flag in proxy.data_quality_flags:
             bd.flags.append(f"TWSE:{flag}")
