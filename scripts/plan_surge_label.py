@@ -26,6 +26,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from taiwan_stock_agent.infrastructure.db import get_connection, init_pool
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")

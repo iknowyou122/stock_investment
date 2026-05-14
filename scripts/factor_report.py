@@ -171,7 +171,11 @@ def _walk_forward_windows(rows: list[dict], train_months: int = 6, test_months: 
 
 def _grid_search(rows: list[dict], n_random: int = 500) -> list[dict]:
     """Random search over _PARAM_GRID. Returns top 5 candidates validated on walk-forward."""
-    windows = _walk_forward_windows(rows)
+    # Grid search only needs LONG/WATCH signals — CAUTION signals can't become LONG
+    # without a threshold change so large the safety check would block it.
+    # Filtering here reduces 312K → ~10K rows, making the search 30x faster.
+    scored_rows = [r for r in rows if r.get("action") in ("LONG", "WATCH")]
+    windows = _walk_forward_windows(scored_rows)
     if len(windows) < 2:
         return []
 

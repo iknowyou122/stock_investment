@@ -28,6 +28,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -137,14 +140,14 @@ def _run_label(lookback: int, dry_run: bool) -> dict[str, int]:
 # Step 2: Grid search via factor_report
 # ---------------------------------------------------------------------------
 
-def _run_factor_report() -> bool:
+def _run_factor_report(days: int = 365) -> bool:
     _console.print("[bold cyan][Step 2][/bold cyan] 執行 factor_report grid search…")
     result = subprocess.run(
-        [sys.executable, "scripts/factor_report.py"],
-        capture_output=True, text=True,
+        [sys.executable, "scripts/factor_report.py", "--days", str(days)],
+        # 不 capture 輸出，讓 Rich 報告直接顯示在 terminal
     )
     if result.returncode != 0:
-        _console.print(f"  [red]factor_report 失敗:[/red]\n{result.stderr[-800:]}")
+        _console.print("  [red]factor_report 失敗[/red]")
         return False
     _console.print("  [green]Grid search 完成[/green]")
     return True
@@ -226,7 +229,7 @@ def main() -> None:
     if not args.skip_label:
         _run_label(args.lookback, args.dry_run)
 
-    ok = _run_factor_report()
+    ok = _run_factor_report(days=365)
     if not ok:
         sys.exit(1)
 
