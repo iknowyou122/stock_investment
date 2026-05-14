@@ -1199,6 +1199,9 @@ def run_batch(
                         name_map=name_map or {}, industry_map=industry_map or {},
                         market_map=market_map or {})
     _console.print(f"  [dim cyan]📄 HTML: file://{html_path.resolve()}[/dim cyan]")
+    import subprocess, sys as _sys
+    if _sys.platform == "darwin":
+        subprocess.Popen(["open", str(html_path)])
 
 
 # ── Plan HTML generator ──────────────────────────────────────────────────────
@@ -1271,8 +1274,9 @@ def _generate_plan_html(
     if not filtered:
         html_path.parent.mkdir(parents=True, exist_ok=True)
         html_path.write_text(
-            f'<!DOCTYPE html><html><body style="background:#0d1117;color:#e6edf3;'
-            f'font-family:sans-serif;padding:40px"><h2>預突破掃描 {scan_date}</h2>'
+            f'<!DOCTYPE html><html lang="zh-TW"><head><meta charset="utf-8"></head>'
+            f'<body style="background:#0d1117;color:#e6edf3;font-family:sans-serif;padding:40px">'
+            f'<h2>預突破掃描 {scan_date}</h2>'
             f'<p>今日無符合條件的個股。</p></body></html>',
             encoding="utf-8",
         )

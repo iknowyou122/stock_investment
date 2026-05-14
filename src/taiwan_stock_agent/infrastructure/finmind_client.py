@@ -128,7 +128,8 @@ class FinMindClient:
             # HTTP 422 = plan restriction (paid feature); return empty so caller
             # can activate free_tier_mode gracefully.
             err_str = str(exc)
-            if "422" in err_str or "Unprocessable Entity" in err_str:
+            if ("422" in err_str or "Unprocessable Entity" in err_str
+                    or "403" in err_str or "Forbidden" in err_str):
                 self._broker_trades_unavailable = True
                 logger.info(
                     "[權限限制] 券商分點明細為付費功能 — 後續所有 ticker 自動跳過（免費模式）"
