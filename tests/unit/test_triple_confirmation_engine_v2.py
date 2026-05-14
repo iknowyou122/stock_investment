@@ -2025,3 +2025,139 @@ class TestBbUpperWalkScore:
             volume_profile=vp,
         )
         assert bd.bb_upper_walk_pts == 0
+
+
+# ---------------------------------------------------------------------------
+# Momentum Breakout Track tests
+# ---------------------------------------------------------------------------
+
+def _make_volatile_history(n: int = 65, base_close: float = 80.0, base_vol: int = 10_000) -> list[DailyOHLCV]:
+    """Generate history with wide daily swings so BB percentile is high (>35p)."""
+    result = []
+    for i in range(n):
+        close = base_close + (5 if i % 2 == 0 else -5)
+        result.append(DailyOHLCV(
+            ticker="TEST",
+            trade_date=date(2025, 1, 2) + timedelta(days=i),
+            open=close - 3.0,
+            high=close + 8.0,
+            low=close - 8.0,
+            close=close,
+            volume=base_vol,
+        ))
+    return result
+
+
+class TestMomentumBreakoutTrack:
+    """_is_momentum_breakout() + full-engine MOMENTUM_TRACK integration."""
+
+    def _make_engine_with_uptrend_taiex(self) -> TripleConfirmationEngine:
+        engine = TripleConfirmationEngine()
+        engine._taiex_history = _make_history(30, base_close=17000.0, flat=False)
+        return engine
+
+    # --- unit tests for _is_momentum_breakout ---
+
+    def test_returns_true_when_only_g2_fails_and_conditions_met(self):
+        history = _make_volatile_history(65, base_close=80.0, base_vol=10_000)
+        ohlcv = _make_ohlcv(close=95.0, high=97.0, low=90.0, volume=18_000)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=108.0, sixty_day_sessions=60)
+        gate_flags = [
+            "GATE_PASS:G1_ZONE:95.0%",
+            "GATE_FAIL:G2_BB_WIDE_PCT:62.0p",
+            "GATE_PASS:G3_LIQ:500.0M",
+            "GATE_PASS:G4_REGIME:uptrend",
+            "GATE_PASS:G5_NO_OVERHEAD:92.6%",
+        ]
+        assert TripleConfirmationEngine._is_momentum_breakout(ohlcv, history, vp, gate_flags)
+
+    def test_returns_false_when_two_gates_fail(self):
+        history = _make_volatile_history(65)
+        ohlcv = _make_ohlcv(close=95.0, high=97.0, low=90.0, volume=18_000)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=200.0, sixty_day_sessions=60)
+        gate_flags = [
+            "GATE_FAIL:G2_BB_WIDE_PCT:62.0p",
+            "GATE_FAIL:G5_OVERHEAD:50.0%",
+        ]
+        assert not TripleConfirmationEngine._is_momentum_breakout(ohlcv, history, vp, gate_flags)
+
+    def test_returns_false_when_proximity_below_92pct(self):
+        history = _make_volatile_history(65, base_vol=10_000)
+        ohlcv = _make_ohlcv(close=87.0, high=89.0, low=82.0, volume=18_000)
+        vp = _make_volume_profile(twenty_day_high=100.0)
+        gate_flags = ["GATE_FAIL:G2_BB_WIDE_PCT:62.0p"]
+        assert not TripleConfirmationEngine._is_momentum_breakout(ohlcv, history, vp, gate_flags)
+
+    def test_returns_false_when_volume_below_1_5x(self):
+        history = _make_volatile_history(65, base_vol=10_000)
+        ohlcv = _make_ohlcv(close=95.0, high=97.0, low=90.0, volume=12_000)
+        vp = _make_volume_profile(twenty_day_high=100.0)
+        gate_flags = ["GATE_FAIL:G2_BB_WIDE_PCT:62.0p"]
+        assert not TripleConfirmationEngine._is_momentum_breakout(ohlcv, history, vp, gate_flags)
+
+    def test_returns_false_when_close_strength_below_0_5(self):
+        history = _make_volatile_history(65, base_vol=10_000)
+        # close=91 at bottom of range (low=90, high=100) → strength=0.1
+        ohlcv = _make_ohlcv(close=91.0, high=100.0, low=90.0, volume=18_000)
+        vp = _make_volume_profile(twenty_day_high=100.0)
+        gate_flags = ["GATE_FAIL:G2_BB_WIDE_PCT:62.0p"]
+        assert not TripleConfirmationEngine._is_momentum_breakout(ohlcv, history, vp, gate_flags)
+
+    def test_returns_false_when_wrong_gate_fails(self):
+        history = _make_volatile_history(65, base_vol=10_000)
+        ohlcv = _make_ohlcv(close=95.0, high=97.0, low=90.0, volume=18_000)
+        vp = _make_volume_profile(twenty_day_high=100.0)
+        gate_flags = ["GATE_FAIL:G1_TOO_FAR_BELOW:70.0%"]
+        assert not TripleConfirmationEngine._is_momentum_breakout(ohlcv, history, vp, gate_flags)
+
+    # --- integration: full engine ---
+
+    def test_momentum_track_gives_watch_not_caution(self):
+        # base_vol=600_000 → avg turnover 600k×80=48M > 40M TSE threshold (G3 passes)
+        history = _make_volatile_history(65, base_close=80.0, base_vol=600_000)
+        ohlcv = _make_ohlcv(close=95.0, high=97.0, low=90.0, volume=1_000_000)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=108.0, sixty_day_sessions=60)
+        chip = _make_chip_report(net_buyer_diff=3, active_branches=10)
+
+        engine = self._make_engine_with_uptrend_taiex()
+        signal, _, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history[:-1],
+            chip_report=chip,
+            volume_profile=vp,
+        )
+        assert signal.action != "CAUTION", f"Expected WATCH/LONG, got CAUTION (conf={signal.confidence})"
+        assert "MOMENTUM_TRACK" in signal.data_quality_flags
+
+    def test_momentum_track_flag_and_gate_flags_in_output(self):
+        history = _make_volatile_history(65, base_close=80.0, base_vol=600_000)
+        ohlcv = _make_ohlcv(close=95.0, high=97.0, low=90.0, volume=1_000_000)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=108.0, sixty_day_sessions=60)
+        chip = _make_chip_report()
+
+        engine = self._make_engine_with_uptrend_taiex()
+        signal, _, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history[:-1],
+            chip_report=chip,
+            volume_profile=vp,
+        )
+        assert "MOMENTUM_TRACK" in signal.data_quality_flags
+        assert any("GATE_FAIL:G2" in f for f in signal.data_quality_flags)
+
+    def test_still_caution_when_proximity_too_low(self):
+        history = _make_volatile_history(65, base_close=80.0, base_vol=600_000)
+        ohlcv = _make_ohlcv(close=87.0, high=89.0, low=82.0, volume=1_000_000)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=108.0, sixty_day_sessions=60)
+        chip = _make_chip_report()
+
+        engine = self._make_engine_with_uptrend_taiex()
+        signal, _, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history[:-1],
+            chip_report=chip,
+            volume_profile=vp,
+        )
+        assert signal.action == "CAUTION"
+        assert "MOMENTUM_TRACK" not in signal.data_quality_flags
+        assert "NO_SETUP" in signal.data_quality_flags

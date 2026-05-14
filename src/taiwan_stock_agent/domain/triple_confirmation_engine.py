@@ -587,8 +587,12 @@ class TripleConfirmationEngine:
         bd.flags.extend(gate_detail_flags)
 
         if not gate_passes:
-            bd.flags.append("NO_SETUP")
-            return bd
+            if self._is_momentum_breakout(ohlcv, ohlcv_history, volume_profile, gate_detail_flags):
+                bd.flags.append("MOMENTUM_TRACK")
+                # proceed to full pillar scoring below
+            else:
+                bd.flags.append("NO_SETUP")
+                return bd
 
         # --- v2.2b COILING Detector (now auxiliary to new gate) ---
         regime_for_coiling = self._compute_taiex_regime(getattr(self, "_taiex_history", []))
@@ -1716,9 +1720,16 @@ class TripleConfirmationEngine:
         data_quality_flags.append("scoring_version:v2")
 
         # v2.2b: propagate COILING / COILING_PRIME flags (set in _compute)
-        for tag in ("COILING_PRIME", "COILING"):
+        for tag in ("COILING_PRIME", "COILING", "MOMENTUM_TRACK"):
             if tag in breakdown.flags and tag not in data_quality_flags:
                 data_quality_flags.append(tag)
+
+        # For MOMENTUM_TRACK: also surface gate pass/fail flags so UI shows context
+        if "MOMENTUM_TRACK" in breakdown.flags:
+            for f in breakdown.flags:
+                if any(f.startswith(p) for p in ("GATE_PASS:", "GATE_FAIL:", "GATE_SKIP:")):
+                    if f not in data_quality_flags:
+                        data_quality_flags.append(f)
 
         # EMERGING_SETUP: WATCH stocks with pre-breakout characteristics
         # MA aligned + MA20 slope up + institutional buying + in accumulation zone
@@ -1853,6 +1864,44 @@ class TripleConfirmationEngine:
         if total_vol == 0:
             return None
         return sum(d.close * d.volume for d in recent) / total_vol
+
+    @staticmethod
+    def _is_momentum_breakout(
+        ohlcv: "DailyOHLCV",
+        ohlcv_history: "list[DailyOHLCV]",
+        volume_profile: "VolumeProfile",
+        gate_flags: list[str],
+    ) -> bool:
+        """Momentum Breakout Track: bypass G2 when stock is already in early breakout.
+
+        TCE normally requires BB compression (G2 ≤35p) to detect coiling bases.
+        But stocks recovering from a deep correction and accelerating upward have
+        WIDE BB (expanding, not compressing) — G2 always fails for them.
+
+        Activates when ALL of:
+          - G2 is the ONLY gate failure (G1, G3, G4, G5 all passed/skipped)
+          - Proximity ≥ 92% (near the 20D high, not just approaching it)
+          - Volume ≥ 1.5× 20D average (momentum confirmed by above-avg volume)
+          - Close strength ≥ 0.5 (closed above midpoint of day's range)
+        """
+        failures = [f for f in gate_flags if f.startswith("GATE_FAIL:")]
+        if len(failures) != 1 or not failures[0].startswith("GATE_FAIL:G2"):
+            return False
+
+        if volume_profile.twenty_day_high <= 0:
+            return False
+        if ohlcv.close / volume_profile.twenty_day_high < 0.92:
+            return False
+
+        vol_20ma = TripleConfirmationEngine._volume_20ma(ohlcv_history)
+        if vol_20ma is None or vol_20ma == 0 or ohlcv.volume < vol_20ma * 1.5:
+            return False
+
+        day_range = ohlcv.high - ohlcv.low
+        if day_range > 0 and (ohlcv.close - ohlcv.low) / day_range < 0.5:
+            return False
+
+        return True
 
     @staticmethod
     def _volume_20ma(history: list[DailyOHLCV]) -> float | None:
