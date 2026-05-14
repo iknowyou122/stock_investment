@@ -100,6 +100,12 @@ optimize:
 		$(if $(SKIP_SETTLE),--skip-settle) \
 		$(if $(DAYS),--days $(DAYS))
 
+label:
+	$(PYTHON) scripts/plan_surge_label.py $(if $(DRY_RUN),--dry-run) $(if $(DAYS),--lookback $(DAYS))
+
+auto-tune:
+	$(PYTHON) scripts/auto_tune.py $(if $(DRY_RUN),--dry-run) $(if $(DAYS),--lookback $(DAYS))
+
 # ── 測試 ─────────────────────────────────────────────────────────────────────
 test:
 	.venv/bin/pytest tests/unit/ -q
