@@ -594,6 +594,12 @@ class TripleConfirmationEngine:
                 bd.flags.append("CHIP_LOADING")
                 bd.flags.extend(gate_detail_flags)
                 return bd
+            elif self._is_trend_continuation(
+                ohlcv, ohlcv_history, volume_profile, gate_detail_flags, twse_proxy
+            ):
+                bd.flags.append("TREND_CONT")
+                bd.flags.extend(gate_detail_flags)
+                return bd
             else:
                 bd.flags.append("NO_SETUP")
                 return bd
@@ -1738,6 +1744,30 @@ class TripleConfirmationEngine:
                 free_tier_mode=True if self._free_tier_mode else None,
             )
 
+        # Trend Continuation Track: market-driven pullback in an uptrending stock
+        if "TREND_CONT" in breakdown.flags:
+            plan = self._make_execution_plan(ohlcv, volume_profile)
+            data_quality_flags = list(ohlcv.data_quality_flags)
+            data_quality_flags.extend(chip_report.data_quality_flags)
+            data_quality_flags.extend(volume_profile.data_quality_flags)
+            for f in breakdown.flags:
+                if any(f.startswith(p) for p in ("GATE_PASS:", "GATE_FAIL:", "GATE_SKIP:")):
+                    if f not in data_quality_flags:
+                        data_quality_flags.append(f)
+            data_quality_flags.append("TREND_CONT")
+            data_quality_flags.append("scoring_version:v2")
+            return SignalOutput(
+                ticker=ohlcv.ticker,
+                date=ohlcv.trade_date,
+                action="WATCH",
+                confidence=0,
+                reasoning=Reasoning(),
+                execution_plan=plan,
+                halt_flag=False,
+                data_quality_flags=data_quality_flags,
+                free_tier_mode=True if self._free_tier_mode else None,
+            )
+
         confidence = breakdown.total
         action = self._map_action(confidence, breakdown, breakdown.chip_pts)
         plan = self._make_execution_plan(ohlcv, volume_profile)
@@ -1892,6 +1922,52 @@ class TripleConfirmationEngine:
         if total_vol == 0:
             return None
         return sum(d.close * d.volume for d in recent) / total_vol
+
+    @staticmethod
+    def _is_trend_continuation(
+        ohlcv: "DailyOHLCV",
+        ohlcv_history: "list[DailyOHLCV]",
+        volume_profile: "VolumeProfile",
+        gate_flags: list[str],
+        twse_proxy: "TWSEChipProxy | None",
+    ) -> bool:
+        """Trend Continuation Track: market-driven pullback in an uptrending stock.
+
+        Targets stocks that made 60D highs recently but pulled back due to broad
+        market weakness — NOT a structural breakdown. Pattern: 3036-type situation
+        where the stock hit highs in March, TAIEX corrected in April, and the stock
+        is coiling 10-20% below its recent high waiting to resume.
+
+        Activates when ALL of:
+          - G1 fails with TOO_FAR_BELOW (pulled back > 15% from 20D high)
+          - G5 passes (20D_high / 60D_high ≥ 85% — recently at highs, not deep base)
+          - G4 NOT in uptrend (market regime neutral/downtrend = external pressure)
+          - close / 60D_high ≥ 75% (limited pullback, not a structural breakdown)
+          - Institutions not fleeing: cumul_20d_net ≥ 0 (foreign + trust)
+        """
+        # G1 must be failing with TOO_FAR_BELOW
+        g1_fails = [f for f in gate_flags if f.startswith("GATE_FAIL:G1")]
+        if not g1_fails:
+            return False
+        if not any("TOO_FAR_BELOW" in f for f in g1_fails):
+            return False
+
+        # G5 must NOT be failing (recently at highs = uptrending stock)
+        if any(f.startswith("GATE_FAIL:G5") for f in gate_flags):
+            return False
+
+        # Pullback limit: close must be within 25% of 60D high
+        if volume_profile.sixty_day_high <= 0:
+            return False
+        if ohlcv.close / volume_profile.sixty_day_high < 0.75:
+            return False
+
+        # Institutions not fleeing
+        if twse_proxy is not None and twse_proxy.is_available:
+            if twse_proxy.cumul_foreign_20d + twse_proxy.cumul_trust_20d < 0:
+                return False
+
+        return True
 
     @staticmethod
     def _is_momentum_breakout(

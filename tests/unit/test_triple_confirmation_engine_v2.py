@@ -2324,3 +2324,217 @@ class TestChipLoadingTrack:
         assert signal.action == "CAUTION"
         assert "CHIP_LOADING" not in signal.data_quality_flags
         assert "NO_SETUP" in signal.data_quality_flags
+
+
+class TestTrendContinuationTrack:
+    """_is_trend_continuation() + full-engine TREND_CONT integration.
+
+    TREND_CONT fires when a stock was recently at highs (G5 passes) but pulled
+    back below G1's zone (TOO_FAR_BELOW) due to market weakness, and institutions
+    are not fleeing.
+    """
+
+    def _gate_flags_trend_cont(
+        self,
+        g1_ratio: float = 82.0,
+        g4_regime: str = "downtrend",
+    ) -> list[str]:
+        """Gate flags that trigger TREND_CONT: G1 fails TOO_FAR_BELOW, G5 passes."""
+        return [
+            f"GATE_FAIL:G1_TOO_FAR_BELOW:{g1_ratio}%",
+            "GATE_FAIL:G2_BB_WIDE_PCT:60.0p",
+            "GATE_FAIL:G3_LIQ:10.0M",
+            f"GATE_FAIL:G4_REGIME:{g4_regime}",
+            "GATE_PASS:G5_NO_OVERHEAD:92.0%",
+        ]
+
+    def _make_proxy_neutral(self, cumul_foreign: int = 2_000, cumul_trust: int = 500) -> TWSEChipProxy:
+        return TWSEChipProxy(
+            ticker="TEST",
+            trade_date=date(2025, 2, 1),
+            foreign_consecutive_buy_days=1,
+            trust_consecutive_buy_days=0,
+            cumul_foreign_20d=cumul_foreign,
+            cumul_trust_20d=cumul_trust,
+            is_available=True,
+        )
+
+    # --- unit tests for _is_trend_continuation ---
+
+    def test_returns_true_when_g1_too_far_below_and_g5_passes(self):
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=105.0, sixty_day_sessions=60)
+        ohlcv = _make_ohlcv(close=82.0)
+        flags = self._gate_flags_trend_cont(g1_ratio=82.0)
+        assert TripleConfirmationEngine._is_trend_continuation(
+            ohlcv, [], vp, flags, self._make_proxy_neutral()
+        )
+
+    def test_returns_false_when_g1_not_failing(self):
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=105.0, sixty_day_sessions=60)
+        ohlcv = _make_ohlcv(close=95.0)
+        flags = [
+            "GATE_PASS:G1_ZONE:95.0%",
+            "GATE_FAIL:G2_BB_WIDE_PCT:60.0p",
+            "GATE_PASS:G5_NO_OVERHEAD:92.0%",
+        ]
+        assert not TripleConfirmationEngine._is_trend_continuation(
+            ohlcv, [], vp, flags, self._make_proxy_neutral()
+        )
+
+    def test_returns_false_when_g1_fails_already_broke_out(self):
+        """G1 fails ALREADY_BROKE_OUT (above 99%) — not a pullback scenario."""
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=105.0, sixty_day_sessions=60)
+        ohlcv = _make_ohlcv(close=102.0)
+        flags = [
+            "GATE_FAIL:G1_ALREADY_BROKE_OUT:102.0%",
+            "GATE_PASS:G5_NO_OVERHEAD:95.0%",
+        ]
+        assert not TripleConfirmationEngine._is_trend_continuation(
+            ohlcv, [], vp, flags, self._make_proxy_neutral()
+        )
+
+    def test_returns_false_when_g5_failing(self):
+        """G5 failing means deep base (CHIP_LOADING territory), not trend continuation."""
+        vp = _make_volume_profile(twenty_day_high=85.0, sixty_day_high=110.0, sixty_day_sessions=60)
+        ohlcv = _make_ohlcv(close=80.0)
+        flags = [
+            "GATE_FAIL:G1_TOO_FAR_BELOW:80.0%",
+            "GATE_FAIL:G5_OVERHEAD:77.3%",
+        ]
+        assert not TripleConfirmationEngine._is_trend_continuation(
+            ohlcv, [], vp, flags, self._make_proxy_neutral()
+        )
+
+    def test_returns_false_when_pullback_too_deep(self):
+        """close/60D_high < 75% means structural breakdown, not pullback."""
+        vp = _make_volume_profile(twenty_day_high=75.0, sixty_day_high=110.0, sixty_day_sessions=60)
+        ohlcv = _make_ohlcv(close=75.0)  # 75/110 = 68.2% < 75%
+        flags = [
+            "GATE_FAIL:G1_TOO_FAR_BELOW:75.0%",
+            "GATE_PASS:G5_NO_OVERHEAD:95.0%",
+        ]
+        assert not TripleConfirmationEngine._is_trend_continuation(
+            ohlcv, [], vp, flags, self._make_proxy_neutral()
+        )
+
+    def test_returns_true_when_pullback_at_boundary(self):
+        """close/60D_high = 75.0% exactly — just passes."""
+        vp = _make_volume_profile(twenty_day_high=75.0, sixty_day_high=100.0, sixty_day_sessions=60)
+        ohlcv = _make_ohlcv(close=75.0)  # 75/100 = 75.0%
+        flags = [
+            "GATE_FAIL:G1_TOO_FAR_BELOW:75.0%",
+            "GATE_PASS:G5_NO_OVERHEAD:92.0%",
+        ]
+        assert TripleConfirmationEngine._is_trend_continuation(
+            ohlcv, [], vp, flags, self._make_proxy_neutral()
+        )
+
+    def test_returns_false_when_institutions_fleeing(self):
+        """Cumul net negative = institutions are selling, not a healthy pullback."""
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=105.0, sixty_day_sessions=60)
+        ohlcv = _make_ohlcv(close=82.0)
+        flags = self._gate_flags_trend_cont()
+        proxy = TWSEChipProxy(
+            ticker="TEST",
+            trade_date=date(2025, 2, 1),
+            cumul_foreign_20d=-3_000,
+            cumul_trust_20d=-500,
+            is_available=True,
+        )
+        assert not TripleConfirmationEngine._is_trend_continuation(
+            ohlcv, [], vp, flags, proxy
+        )
+
+    def test_returns_true_when_no_proxy(self):
+        """Without proxy data we can't confirm institutions fleeing, so allow it."""
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=105.0, sixty_day_sessions=60)
+        ohlcv = _make_ohlcv(close=82.0)
+        flags = self._gate_flags_trend_cont()
+        assert TripleConfirmationEngine._is_trend_continuation(
+            ohlcv, [], vp, flags, None
+        )
+
+    def test_returns_true_when_sixty_day_high_zero(self):
+        """sixty_day_high=0 means no data — returns False (can't check pullback depth)."""
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=0.0)
+        ohlcv = _make_ohlcv(close=82.0)
+        flags = self._gate_flags_trend_cont()
+        assert not TripleConfirmationEngine._is_trend_continuation(
+            ohlcv, [], vp, flags, None
+        )
+
+    # --- integration: full engine ---
+
+    def test_trend_cont_gives_watch_not_caution(self):
+        """Stock in uptrend pulled back below G1 zone, market downtrend, G5 still passes."""
+        # Use flat history so BB=0 → G2 passes, but we need G1 to fail TOO_FAR_BELOW
+        # twenty_day_high = 100, close = 82 → ratio = 82% < 85% → GATE_FAIL:G1_TOO_FAR_BELOW
+        # sixty_day_high = 102 → twenty/sixty = 98% ≥ 85% → G5 passes
+        history = _make_history(70, base_close=100.0, flat=True)
+        ohlcv = _make_ohlcv(close=82.0, high=84.0, low=80.0, volume=600_000)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=102.0, sixty_day_sessions=62)
+
+        engine = TripleConfirmationEngine()
+        # Set TAIEX to downtrend so G4 fails (market-driven correction)
+        engine._taiex_history = _make_history(80, base_close=17000.0, flat=False)
+        # Reverse to make MA20 declining (downtrend)
+        engine._taiex_history = list(reversed(engine._taiex_history))
+
+        chip = _make_chip_report()
+        proxy = self._make_proxy_neutral()
+
+        signal, _, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history[:-1],
+            chip_report=chip,
+            volume_profile=vp,
+            twse_proxy=proxy,
+        )
+        assert signal.action == "WATCH", (
+            f"Expected WATCH, got {signal.action} flags={signal.data_quality_flags}"
+        )
+        assert "TREND_CONT" in signal.data_quality_flags
+
+    def test_trend_cont_surfaces_gate_flags(self):
+        """TREND_CONT output should include GATE_FAIL:G1 and GATE_PASS:G5 flags."""
+        history = _make_history(70, base_close=100.0, flat=True)
+        ohlcv = _make_ohlcv(close=82.0, high=84.0, low=80.0, volume=600_000)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=102.0, sixty_day_sessions=62)
+
+        engine = TripleConfirmationEngine()
+        engine._taiex_history = list(reversed(_make_history(80, base_close=17000.0, flat=False)))
+
+        chip = _make_chip_report()
+        proxy = self._make_proxy_neutral()
+
+        signal, _, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history[:-1],
+            chip_report=chip,
+            volume_profile=vp,
+            twse_proxy=proxy,
+        )
+        assert "TREND_CONT" in signal.data_quality_flags
+        assert any("GATE_FAIL:G1" in f for f in signal.data_quality_flags)
+        assert any("GATE_PASS:G5" in f for f in signal.data_quality_flags)
+
+    def test_no_trend_cont_when_g5_fails_goes_to_chip_loading_or_no_setup(self):
+        """When G5 also fails (deep base), TREND_CONT should NOT fire."""
+        history = _make_history(70, base_close=100.0, flat=True)
+        ohlcv = _make_ohlcv(close=82.0, high=84.0, low=80.0, volume=600_000)
+        # sixty_day_high much higher → G5 fails too
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=125.0, sixty_day_sessions=62)
+
+        engine = TripleConfirmationEngine()
+        engine._taiex_history = list(reversed(_make_history(80, base_close=17000.0, flat=False)))
+
+        chip = _make_chip_report()
+
+        signal, _, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history[:-1],
+            chip_report=chip,
+            volume_profile=vp,
+            twse_proxy=None,
+        )
+        assert "TREND_CONT" not in signal.data_quality_flags
