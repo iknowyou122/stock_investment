@@ -40,6 +40,7 @@ Score breakdown (max 100 pts before risk deductions):
     obv_accumulation_pts:    0/2/3/5   — OBV 20d 斜率向上（橫盤吸籌）; +5=PRIME(橫盤+強斜率)
     vol_asymmetry_pts:       0/2/4     — 上漲日均量 ÷ 下跌日均量 ≥1.2→2, ≥1.5→4
     dual_inst_flow_pts:      0/3/5     — 外資+投信雙向 20D 累積確認（兩者同為正值）
+    chip_cleanliness_pts:    0/4/7/10  — 籌碼乾淨度 K-of-6（融資低/融資降/當沖低/借券低/大戶增/散戶減）
 
   Pillar 3: Structure/Space (max 38 pts)
     breakout_20d_pts:     0/8    — close ≥ twenty_day_high × 0.99 (only when > 0) → +8
@@ -247,6 +248,7 @@ class _ScoreBreakdown:
     obv_accumulation_pts: int = 0         # 0/2/3/5 — OBV 20d 斜率向上（暗吸）
     vol_asymmetry_pts: int = 0            # 0/2/4 — 上漲日均量 > 下跌日均量
     dual_inst_flow_pts: int = 0           # 0/3/5 — 外資+投信雙向 20D 累積
+    chip_cleanliness_pts: int = 0         # 0/4/7/10 — 籌碼乾淨度 K-of-6 複合分
 
     # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 40) ---
     proximity_pts: int = 0            # 0/6/12 — close distance to 20d_high
@@ -321,6 +323,7 @@ class _ScoreBreakdown:
             + self.obv_accumulation_pts
             + self.vol_asymmetry_pts
             + self.dual_inst_flow_pts
+            + self.chip_cleanliness_pts
             # Pillar 3
             + self.proximity_pts
             + self.bb_compression_pts
@@ -380,6 +383,7 @@ class _ScoreBreakdown:
             + self.obv_accumulation_pts
             + self.vol_asymmetry_pts
             + self.dual_inst_flow_pts
+            + self.chip_cleanliness_pts
         )
 
     @property
@@ -744,6 +748,12 @@ class TripleConfirmationEngine:
         bd.vol_asymmetry_pts = va_pts
         if va_flag:
             bd.flags.append(va_flag)
+
+        if twse_proxy is not None and twse_proxy.is_available:
+            cl_pts, cl_flag = self._chip_cleanliness_score(twse_proxy)
+            bd.chip_cleanliness_pts = cl_pts
+            if cl_flag:
+                bd.flags.append(cl_flag)
 
         # --- Pillar 3: Compression Structure ---
         bd.proximity_pts = self._proximity_score(ohlcv.close, volume_profile.twenty_day_high)
@@ -1676,6 +1686,49 @@ class TripleConfirmationEngine:
             return 5, f"NEAR_HIST_HIGH:{n}d"
         if ratio >= 0.90:
             return 3, f"WITHIN_HIST_HIGH_10PCT:{n}d"
+        return 0, None
+
+    @staticmethod
+    def _chip_cleanliness_score(proxy: TWSEChipProxy) -> tuple[int, str | None]:
+        """K-of-6 composite chip cleanliness score.
+
+        Counts how many of 6 structural cleanliness signals are present.
+        Skips signals whose data is unavailable (None) rather than penalising.
+
+        Signals:
+          1. margin_utilization_rate < 0.20  (融資使用率低)
+          2. margin_balance_change < 0       (融資餘額下降)
+          3. daytrade_ratio < 0.15           (當沖比低)
+          4. sbl_ratio < 0.03               (借券賣出比低)
+          5. large_holder_chg_pct > 0        (大戶週增持)
+          6. retail_holder_chg_pct < 0       (散戶週出清)
+
+        Scoring (by count met):
+          ≥ 5 → +10  CHIP_ULTRA_CLEAN
+          ≥ 4 → +7   CHIP_CLEAN
+          ≥ 3 → +4   CHIP_FAIR
+          < 3 → 0
+        """
+        count = 0
+        if proxy.margin_utilization_rate is not None and proxy.margin_utilization_rate < 0.20:
+            count += 1
+        if proxy.margin_balance_change < 0:
+            count += 1
+        if proxy.daytrade_ratio is not None and proxy.daytrade_ratio < 0.15:
+            count += 1
+        if proxy.sbl_ratio < 0.03:
+            count += 1
+        if proxy.large_holder_chg_pct is not None and proxy.large_holder_chg_pct > 0:
+            count += 1
+        if proxy.retail_holder_chg_pct is not None and proxy.retail_holder_chg_pct < 0:
+            count += 1
+
+        if count >= 5:
+            return 10, f"CHIP_ULTRA_CLEAN:{count}/6"
+        if count >= 4:
+            return 7, f"CHIP_CLEAN:{count}/6"
+        if count >= 3:
+            return 4, f"CHIP_FAIR:{count}/6"
         return 0, None
 
     def _dmi_initiation_score(
