@@ -1294,6 +1294,56 @@ def _generate_plan_html(
         for fut in as_completed(futs):
             chart_data[futs[fut]] = fut.result()
 
+    def _rule_rec(r: dict) -> str:
+        """Plain-Chinese fallback recommendation when LLM verdict is absent."""
+        flag_set = set(r.get("flags") or [])
+        action = r["action"]
+        conf = r.get("confidence", 0)
+        parts: list[str] = []
+
+        if "ACCUM_MODE" in flag_set:
+            parts.append("大盤處於修正期，法人籌碼出現逆勢買進跡象")
+
+        if any("RISING" in f for f in flag_set):
+            parts.append("訊號持續走強")
+        elif any("STABLE" in f for f in flag_set):
+            parts.append("訊號保持穩定")
+
+        if "COILING_PRIME" in flag_set:
+            parts.append("呈現強力蓄積型態")
+        elif "COILING" in flag_set:
+            parts.append("已有蓄積跡象")
+        if "NEAR_HIGH_COIL" in flag_set:
+            parts.append("貼近近期高點蓄勢待發")
+        if "BB_UPPER_COIL" in flag_set:
+            parts.append("布林帶上軌蓄力")
+        if "MA5_WALK" in flag_set:
+            parts.append("均線多頭向上排列")
+        if "MOMENTUM_WALK" in flag_set:
+            parts.append("突破後動能延續")
+
+        if any("DUAL_FLOW_STRONG" in f for f in flag_set):
+            parts.append("外資與投信同步大力買進")
+        elif any("DUAL_FLOW" in f for f in flag_set):
+            parts.append("外資與投信同步買進")
+        if any("OBV_ACCUM_PRIME" in f for f in flag_set):
+            parts.append("成交量顯示法人暗中大量吸籌")
+        elif any("OBV_ACCUM" in f for f in flag_set):
+            parts.append("成交量顯示法人持續積累")
+        if any("VOL_ASYMMETRY" in f for f in flag_set):
+            parts.append("上漲日成交量明顯大於下跌日")
+        if any("SECTOR_RANK" in f for f in flag_set):
+            parts.append("產業排名靠前")
+
+        if action == "LONG":
+            conclusion = "整體條件成熟，建議積極布局。" if conf >= 70 else "條件符合突破要求，可考慮進場。"
+        else:
+            conclusion = "尚待突破確認，建議列入觀察。"
+
+        if parts:
+            return "、".join(parts[:4]) + "。" + conclusion
+        return conclusion
+
     cards: list[str] = []
     for i, r in enumerate(filtered):
         ticker = r["ticker"]
@@ -1305,7 +1355,6 @@ def _generate_plan_html(
         target = r.get("target") or 0.0
         stop = r.get("stop_loss") or 0.0
         trend = r.get("trend_score", 0)
-        flags = r.get("flags") or []
         market = market_map.get(ticker, "TSE")
         exchange = "TWSE" if market == "TSE" else "TPEX"
         tv_url = f"https://www.tradingview.com/chart/?symbol={exchange}%3A{ticker}"
@@ -1314,24 +1363,23 @@ def _generate_plan_html(
         upside_pct = ((target - entry) / entry * 100) if entry > 0 and target > entry else 0.0
         delay = f"{i * 0.05:.2f}"
 
+        flag_set = set(r.get("flags") or [])
+        is_accum = "ACCUM_MODE" in flag_set
         if action == "LONG":
-            badge_zh = "突破進場"
+            badge_zh = "底部買進" if is_accum else "突破進場"
             gcls = "alpha"
+            rec_label = "建議買進"
+            rec_cls = "buy"
         else:
-            badge_zh = "等待確認"
-            gcls = "beta"
+            badge_zh = "底部吸籌" if is_accum else "等待確認"
+            gcls = "accum" if is_accum else "beta"
+            rec_label = "底部布局" if is_accum else "持續觀察"
+            rec_cls = "accum" if is_accum else "watch"
 
-        # Key flags to surface
-        key_flags = [f for f in flags if any(k in f for k in (
-            "MOMENTUM_TRACK", "COILING", "NEAR_HIGH_COIL", "RISING", "STABLE",
-            "SECTOR_RANK", "MA5_WALK", "BB_UPPER_COIL", "MOMENTUM_WALK",
-        ))]
-        flags_html = "".join(
-            f'<span class="flag">{_esc(f)}</span>' for f in key_flags[:5]
-        )
-
-        verdict = _esc(r.get("verdict") or "")
-        momentum_txt = _esc(r.get("momentum") or "")
+        llm_verdict = r.get("verdict") or ""
+        llm_chip = r.get("chip") or ""
+        rec_text = _esc(llm_verdict if llm_verdict else _rule_rec(r))
+        chip_txt = _esc(llm_chip)
 
         entry_s = f"{entry:.2f}" if entry else "--"
         target_s = f"{target:.2f}" if target else "--"
@@ -1354,16 +1402,13 @@ def _generate_plan_html(
         <div class="m"><div class="mv">{entry_s}</div><div class="ml">進場價</div></div>
         <div class="m"><div class="mv pos">{upside_s}</div><div class="ml">目標空間</div></div>
         <div class="m"><div class="mv neg">{stop_s}</div><div class="ml">止損</div></div>
-        <div class="m"><div class="mv">{trend}</div><div class="ml">動能分</div></div>
+        <div class="m"><div class="mv">{target_s}</div><div class="ml">目標價</div></div>
       </div>
       <div class="chart" data-ticker="{_esc(ticker)}"></div>
-      <div class="verdict vwatch">
-        <div class="verdict-hd">
-          <span class="vbadge">{_esc(target_s)}</span>
-          <span class="vsummary">{verdict}</span>
-        </div>
-        {f'<div class="vdetail">{momentum_txt}</div>' if momentum_txt else ""}
-        {f'<div class="flags">{flags_html}</div>' if flags_html else ""}
+      <div class="rec">
+        <span class="rec-badge rec-{rec_cls}">{rec_label}</span>
+        <div class="rec-text">{rec_text}</div>
+        {f'<div class="rec-chip">{chip_txt}</div>' if chip_txt else ""}
       </div>
       <div class="links">
         <a class="link-btn tv" href="{tv_url}" target="_blank" rel="noopener">TradingView</a>
@@ -1401,6 +1446,7 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .badge{{padding:5px 12px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;flex-shrink:0}}
 .g-alpha{{background:rgba(248,81,73,.15);color:#ff6b6b;border:1px solid rgba(248,81,73,.3)}}
 .g-beta{{background:rgba(88,166,255,.15);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}}
+.g-accum{{background:rgba(210,153,34,.15);color:#e3a008;border:1px solid rgba(210,153,34,.3)}}
 .metrics{{display:flex;border-bottom:1px solid #21262d}}
 .m{{flex:1;padding:10px 6px;text-align:center;border-right:1px solid #21262d}}
 .m:last-child{{border-right:none}}
@@ -1414,16 +1460,13 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .tv{{background:#1565c0;color:#fff}}
 .gi{{background:#1b4332;color:#3fb950;border:1px solid #236840}}
 .footer{{text-align:center;padding:32px;color:#484f58;font-size:12px}}
-.verdict{{padding:12px 16px;border-top:1px solid #21262d}}
-.verdict-hd{{display:flex;align-items:center;gap:10px;margin-bottom:6px}}
-.vbadge{{font-size:12px;font-weight:700;padding:3px 10px;border-radius:12px;flex-shrink:0;
-  background:rgba(88,166,255,.15);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}}
-.g-alpha .vbadge{{background:rgba(248,81,73,.15);color:#ff6b6b;border:1px solid rgba(248,81,73,.3)}}
-.vsummary{{font-size:11px;color:#8b949e;line-height:1.4}}
-.vdetail{{font-size:11px;color:#c9d1d9;line-height:1.5;margin-top:4px}}
-.flags{{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}}
-.flag{{font-size:10px;padding:2px 8px;border-radius:10px;background:#21262d;color:#8b949e;border:1px solid #30363d}}
-.vwatch .vbadge{{background:rgba(88,166,255,.15);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}}
+.rec{{padding:14px 16px;border-top:1px solid #21262d;display:flex;flex-direction:column;gap:8px}}
+.rec-badge{{display:inline-block;font-size:12px;font-weight:700;padding:4px 12px;border-radius:14px;align-self:flex-start}}
+.rec-buy{{background:rgba(63,185,80,.18);color:#3fb950;border:1px solid rgba(63,185,80,.35)}}
+.rec-watch{{background:rgba(88,166,255,.15);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}}
+.rec-accum{{background:rgba(210,153,34,.18);color:#e3a008;border:1px solid rgba(210,153,34,.35)}}
+.rec-text{{font-size:12px;color:#c9d1d9;line-height:1.6}}
+.rec-chip{{font-size:11px;color:#8b949e;line-height:1.5;margin-top:2px}}
 </style>
 </head>
 <body>

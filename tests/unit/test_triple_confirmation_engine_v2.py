@@ -1630,7 +1630,8 @@ class TestCoilingDetector:
             taiex_history=taiex_down,
             market="TSE",
         )
-        assert any(f.startswith("GATE_FAIL:G4_REGIME") for f in bd.flags)
+        # In downtrend, G4 is replaced by G_CHIP; no twse_proxy → chip fails
+        assert any(f.startswith("GATE_FAIL:G_CHIP") for f in bd.flags)
         assert "COILING" not in bd.flags
         assert "COILING_PRIME" not in bd.flags
 

@@ -49,6 +49,8 @@ Score breakdown (max 100 pts before risk deductions):
     ma_alignment_pts:     0/5    — MA5 > MA10 > MA20 → +5 (≥20 sessions)
     ma20_slope_pts:       0/5    — MA20 rising vs 5d ago → +5 (≥25 sessions)
     relative_strength_pts:0/3/5  — stock 5d return vs TAIEX; 0–20% outperform → 3, >20% → 5
+    longterm_rs_pts:      0/3/5/8 — 60d+120d 加權超額報酬 vs TAIEX; ≥3%→3, ≥10%→5, ≥20%→8 (RS_LEADER)
+    near_highhist_pts:    0/3/5  — 距 N 日歷史高點; ≥90%→3, ≥95%→5 (NEAR_HIST_HIGH)
     upside_space_pts:     0/2/5  — distance to 120d/52w high: 3–8% → 2, >8% → 5
     bb_squeeze_breakout_pts: 0/2/3/5 — BB squeeze: setup 2, breakout 3, +vol confirm 5
 
@@ -256,6 +258,8 @@ class _ScoreBreakdown:
     ma_alignment_pts: int = 0         # 0/5
     ma20_slope_pts: int = 0           # 0/5
     relative_strength_pts: int = 0    # 0/3/5
+    longterm_rs_pts: int = 0          # 0/3/5/8 — 60d+120d 加權超額報酬 vs TAIEX（強勢股長期領先）
+    near_highhist_pts: int = 0        # 0/3/5 — 距歷史高點（N日）接近度（近 ≥90%→3, ≥95%→5）
     bb_squeeze_breakout_pts: int = 0  # 0/2/3/5 — (deprecated for compression)
     bb_upper_walk_pts: int = 0        # 0/3 — proximity=12, 3/5 days near BB upper and rising
 
@@ -327,6 +331,8 @@ class _ScoreBreakdown:
             + self.ma_alignment_pts
             + self.ma20_slope_pts
             + self.relative_strength_pts
+            + self.longterm_rs_pts
+            + self.near_highhist_pts
             + self.bb_squeeze_breakout_pts
             + self.bb_upper_walk_pts
             # Pillar 4
@@ -406,6 +412,8 @@ class _ScoreBreakdown:
             + self.ma_alignment_pts
             + self.ma20_slope_pts
             + self.relative_strength_pts
+            + self.longterm_rs_pts
+            + self.near_highhist_pts
             + self.bb_squeeze_breakout_pts
             + self.bb_upper_walk_pts
         )
@@ -507,25 +515,39 @@ class TripleConfirmationEngine:
         volume_profile: VolumeProfile,
         twse_proxy: TWSEChipProxy | None = None,
     ) -> tuple[bool, int, int, list[str]]:
-        """Evaluate the 4 hard gate conditions for pre-breakout detection.
+        """Evaluate hard gate conditions (regime-adaptive).
 
-        Returns (passes, conditions_available, conditions_met, detail_flags).
-        Conditions:
-        G1: Price Zone (85% <= close / 20d_high < 99%)
-        G2: BB Compression (≤35th pct of 60d history; fallback: absolute ≤15%)
-        G3: Liquidity (Turnover 20MA > Threshold)
-        G4: Market Regime (TAIEX not downtrend)
+        Normal regime (uptrend/neutral): G1(85%)+G2+G3+G4[+G5]
+          G1: Price Zone 85–99% of 20d high
+          G2: BB Compression ≤35th pct of 60d history
+          G3: Liquidity
+          G4: TAIEX not downtrend
+          G5: No significant overhead (optional, when 60d data available)
+
+        Downtrend regime → Accumulation-Bottom mode: G1(70%)+G2+G3+G_CHIP
+          G1: relaxed to 70% — allows stocks far from recent highs
+          G2: BB Compression (same)
+          G3: Liquidity (same)
+          G_CHIP: ≥2 of 4 chip accumulation signals required (replaces G4+G5)
+            - 外資 20d cumulative net buy > 0
+            - 投信 20d cumulative net buy > 0
+            - OBV 20d slope rising (obv_accumulation_score ≥ 2)
+            - 大戶 400張+ 持股比例週增加
+          Adds ACCUM_MODE flag; full pillar scoring proceeds normally.
         """
-        required = 4  # G1–G4 all mandatory; G5 added when 60d data is present
-        conditions_met = 0
         detail_flags: list[str] = []
+        conditions_met = 0
 
-        # G1: Price Zone
+        regime = self._compute_taiex_regime(getattr(self, "_taiex_history", []))
+        is_downtrend = regime == "downtrend"
+
+        # --- G1: Price Zone (threshold relaxed in downtrend) ---
+        g1_low = 0.70 if is_downtrend else 0.85
         if volume_profile.twenty_day_high > 0:
             ratio = ohlcv.close / volume_profile.twenty_day_high
             if ratio >= 0.99:
                 detail_flags.append(f"GATE_FAIL:G1_ALREADY_BROKE_OUT:{ratio*100:.1f}%")
-            elif ratio < 0.85:
+            elif ratio < g1_low:
                 detail_flags.append(f"GATE_FAIL:G1_TOO_FAR_BELOW:{ratio*100:.1f}%")
             else:
                 conditions_met += 1
@@ -533,7 +555,7 @@ class TripleConfirmationEngine:
         else:
             detail_flags.append("GATE_SKIP:G1_NO_HIGH")
 
-        # G2: BB Compression (dynamic: ≤35th percentile of 60d history; fallback: absolute ≤15%)
+        # --- G2: BB Compression ---
         _, _, bb_w, bb_width_pct = self._calculate_bb(ohlcv_history)
         if bb_w is not None:
             if bb_width_pct is not None:
@@ -550,7 +572,7 @@ class TripleConfirmationEngine:
         else:
             detail_flags.append("GATE_SKIP:G2_NO_BB")
 
-        # G3: Liquidity
+        # --- G3: Liquidity ---
         turnover_20ma = self._turnover_20ma(ohlcv_history)
         l_threshold = _LIQUIDITY_THRESHOLDS.get(self._market, _LIQUIDITY_THRESHOLDS[_DEFAULT_MARKET])
         if turnover_20ma is not None:
@@ -562,27 +584,52 @@ class TripleConfirmationEngine:
         else:
             detail_flags.append("GATE_SKIP:G3_NO_DATA")
 
-        # G4: Market Regime
-        regime = self._compute_taiex_regime(getattr(self, "_taiex_history", []))
-        if regime != "downtrend":
-            conditions_met += 1
-            detail_flags.append(f"GATE_PASS:G4_REGIME:{regime}")
-        else:
-            detail_flags.append("GATE_FAIL:G4_REGIME:DOWNTREND")
+        if is_downtrend:
+            # --- G_CHIP: Chip Accumulation Gate (replaces G4+G5 in downtrend) ---
+            # At least 2-of-4 chip accumulation signals required.
+            chip_signals = 0
+            chip_reasons: list[str] = []
+            if twse_proxy and twse_proxy.cumul_foreign_20d > 0:
+                chip_signals += 1
+                chip_reasons.append("外資20D")
+            if twse_proxy and twse_proxy.cumul_trust_20d > 0:
+                chip_signals += 1
+                chip_reasons.append("投信20D")
+            obv_pts, _ = self._obv_accumulation_score(ohlcv, ohlcv_history)
+            if obv_pts >= 2:
+                chip_signals += 1
+                chip_reasons.append("OBV↑")
+            if (twse_proxy and twse_proxy.large_holder_chg_pct is not None
+                    and twse_proxy.large_holder_chg_pct > 0):
+                chip_signals += 1
+                chip_reasons.append("大戶增持")
 
-        # G5: No significant overhead (requires 60d data).
-        # Compares the consolidation ceiling (20d high) to the 60d high.
-        # If 20d_high is far below 60d_high, sellers from 2 months ago sit overhead.
-        if volume_profile.sixty_day_sessions >= 40 and volume_profile.sixty_day_high > 0:
-            required += 1
-            ratio_60d = volume_profile.twenty_day_high / volume_profile.sixty_day_high
-            if ratio_60d >= 0.85:
+            required = 4  # G1 + G2 + G3 + G_CHIP
+            if chip_signals >= 2:
                 conditions_met += 1
-                detail_flags.append(f"GATE_PASS:G5_NO_OVERHEAD:{ratio_60d*100:.1f}%")
+                detail_flags.append(
+                    f"GATE_PASS:G_CHIP:{chip_signals}/4({','.join(chip_reasons)})"
+                )
+                detail_flags.append("ACCUM_MODE")
             else:
-                detail_flags.append(f"GATE_FAIL:G5_OVERHEAD:{ratio_60d*100:.1f}%")
+                detail_flags.append(f"GATE_FAIL:G_CHIP:{chip_signals}/4")
         else:
-            detail_flags.append("GATE_SKIP:G5_NO_60D_DATA")
+            # --- G4: Market Regime (normal path) ---
+            required = 4
+            conditions_met += 1  # regime is not downtrend by definition here
+            detail_flags.append(f"GATE_PASS:G4_REGIME:{regime}")
+
+            # --- G5: No significant overhead (normal path, optional) ---
+            if volume_profile.sixty_day_sessions >= 40 and volume_profile.sixty_day_high > 0:
+                required += 1
+                ratio_60d = volume_profile.twenty_day_high / volume_profile.sixty_day_high
+                if ratio_60d >= 0.85:
+                    conditions_met += 1
+                    detail_flags.append(f"GATE_PASS:G5_NO_OVERHEAD:{ratio_60d*100:.1f}%")
+                else:
+                    detail_flags.append(f"GATE_FAIL:G5_OVERHEAD:{ratio_60d*100:.1f}%")
+            else:
+                detail_flags.append("GATE_SKIP:G5_NO_60D_DATA")
 
         passes = conditions_met == required
         return passes, required, conditions_met, detail_flags
@@ -727,6 +774,16 @@ class TripleConfirmationEngine:
             bd.relative_strength_pts = rs_pts
             if rs_flag:
                 bd.flags.append(rs_flag)
+
+            lrs_pts, lrs_flag = self._longterm_rs_score(ohlcv, ohlcv_history, taiex)
+            bd.longterm_rs_pts = lrs_pts
+            if lrs_flag:
+                bd.flags.append(lrs_flag)
+
+        nh_pts, nh_flag = self._near_highhist_score(ohlcv, ohlcv_history)
+        bd.near_highhist_pts = nh_pts
+        if nh_flag:
+            bd.flags.append(nh_flag)
 
         # --- Pillar 4: Accumulation Detection ---
         self._accumulation_score(bd, ohlcv, ohlcv_history, volume_profile, twse_proxy)
@@ -1542,6 +1599,83 @@ class TripleConfirmationEngine:
             return 5, None
         if outperform > 0:
             return 3, None
+        return 0, None
+
+    @staticmethod
+    def _longterm_rs_score(
+        ohlcv: DailyOHLCV,
+        history: list[DailyOHLCV],
+        taiex_history: list[DailyOHLCV],
+    ) -> tuple[int, str | None]:
+        """Long-term relative strength: 60d + 120d weighted excess return vs TAIEX.
+
+        Weighted excess = 0.4 * excess_60d + 0.6 * excess_120d
+        (120d weight higher; longer lead = stronger signal)
+
+        ≥ +20%  → +8  RS_LEADER
+        ≥ +10%  → +5  RS_STRONG
+        ≥ +3%   → +3  RS_POSITIVE
+        < +3%   → 0
+        """
+        stock_bars = sorted(history, key=lambda x: x.trade_date)
+        taiex_bars = sorted(taiex_history, key=lambda x: x.trade_date)
+
+        def _excess(n: int) -> float | None:
+            if len(stock_bars) < n or len(taiex_bars) < n:
+                return None
+            s_base = stock_bars[-n].close
+            t_base = taiex_bars[-n].close
+            if s_base <= 0 or t_base <= 0:
+                return None
+            s_ret = (ohlcv.close - s_base) / s_base
+            t_ret = (taiex_bars[-1].close - t_base) / t_base
+            return s_ret - t_ret
+
+        ex60 = _excess(60)
+        ex120 = _excess(120)
+
+        if ex60 is None and ex120 is None:
+            return 0, "INSUFFICIENT_HISTORY_LRS"
+        if ex120 is None:
+            weighted = ex60  # only 60d available
+        elif ex60 is None:
+            weighted = ex120
+        else:
+            weighted = 0.4 * ex60 + 0.6 * ex120
+
+        if weighted >= 0.20:
+            return 8, "RS_LEADER"
+        if weighted >= 0.10:
+            return 5, "RS_STRONG"
+        if weighted >= 0.03:
+            return 3, "RS_POSITIVE"
+        return 0, None
+
+    @staticmethod
+    def _near_highhist_score(
+        ohlcv: DailyOHLCV,
+        history: list[DailyOHLCV],
+    ) -> tuple[int, str | None]:
+        """Proximity to N-day historical high (all available sessions, up to ~130d).
+
+        Requires ≥ 20 sessions. Uses high-of-day to build the N-day high.
+
+        ≥ 95% of N-day high → +5  NEAR_HIST_HIGH
+        ≥ 90% of N-day high → +3  WITHIN_HIST_HIGH_10PCT
+        < 90%               → 0
+        """
+        bars = sorted(history, key=lambda x: x.trade_date)
+        if len(bars) < 20:
+            return 0, None
+        n_day_high = max((b.high for b in bars if b.high > 0), default=0.0)
+        if n_day_high <= 0:
+            return 0, None
+        ratio = ohlcv.close / n_day_high
+        n = len(bars)
+        if ratio >= 0.95:
+            return 5, f"NEAR_HIST_HIGH:{n}d"
+        if ratio >= 0.90:
+            return 3, f"WITHIN_HIST_HIGH_10PCT:{n}d"
         return 0, None
 
     def _dmi_initiation_score(
