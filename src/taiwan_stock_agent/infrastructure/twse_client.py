@@ -90,20 +90,28 @@ class ChipProxyFetcher:
         # TDCC 集保股權分散表 — weekly, cache by ISO week string "YYYY-WW"
         # {week_key: {ticker: (large_holder_pct, retail_holder_pct)}}
         self._tdcc_week_cache: dict[str, dict[str, tuple[float, float]]] = {}
+        # 流通股數表 {ticker: shares (in shares, not lots)}; populated externally by caller
+        self.shares_map: dict[str, int] = {}
 
     def fetch(
         self,
         ticker: str,
         trade_date: date,
         today_volume: int = 0,
+        total_shares: int = 0,
     ) -> TWSEChipProxy:
         """Fetch chip proxy data for ticker on trade_date.
 
         today_volume: today's actual traded volume in shares, used to compute
         inst_buy_pct. Pass 0 to skip pct calculation.
+        total_shares: total shares outstanding (in shares, not lots); used for 換手率.
+        If 0, falls back to self.shares_map.get(ticker, 0).
 
         Returns TWSEChipProxy(is_available=False) on any failure — never raises.
         """
+        if total_shares <= 0:
+            total_shares = self.shares_map.get(ticker, 0)
+
         flags: list[str] = []
 
         foreign_net, trust_net, dealer_net = self._fetch_t86_data(ticker, trade_date, flags)
@@ -163,6 +171,7 @@ class ChipProxyFetcher:
             cumul_trust_20d=cumul_trust_20d,
             inst_buy_days_ratio=inst_buy_days_ratio,
             inst_flow_accel=inst_flow_accel,
+            total_shares=total_shares,
             is_available=is_available,
             data_quality_flags=flags,
         )

@@ -977,6 +977,7 @@ def _run_phase(
     # 建立共用客戶端 — 所有 worker 共享快取
     shared_finmind = FinMindClient()
     shared_chip = ChipProxyFetcher()
+    shared_chip.shares_map = _load_shares_map()
     shared_agent = _make_agent(
         llm_provider=llm_provider,
         no_llm=no_llm,
@@ -1197,7 +1198,8 @@ def run_batch(
     html_path = (csv_path or Path("data/scans") / f"scan_{analysis_date}.csv").with_suffix(".html")
     _generate_plan_html(results, str(analysis_date), html_path,
                         name_map=name_map or {}, industry_map=industry_map or {},
-                        market_map=market_map or {})
+                        market_map=market_map or {},
+                        heat_summary=_load_heat_summary())
     _console.print(f"  [dim cyan]📄 HTML: file://{html_path.resolve()}[/dim cyan]")
     import subprocess, sys as _sys
     if _sys.platform == "darwin":
@@ -1207,6 +1209,129 @@ def run_batch(
 # ── Plan HTML generator ──────────────────────────────────────────────────────
 
 _WATCH_FLAGS_CONSOLIDATING = frozenset(["TREND_CONT", "CHIP_LOADING", "NO_CATALYST"])
+
+_ROOT_PATH = Path(__file__).resolve().parents[1]
+_HEAT_DIR = _ROOT_PATH / "data" / "market_heat"
+
+
+def _load_heat_summary() -> dict:
+    """Load latest market heat + concept snapshots for HTML rotation radar.
+
+    Returns {} if no snapshots are available.
+    """
+    if not _HEAT_DIR.exists():
+        return {}
+    try:
+        import json as _json
+
+        result: dict = {}
+
+        heat_files = sorted(_HEAT_DIR.glob("heat_*.json"))
+        if heat_files:
+            with open(heat_files[-1], encoding="utf-8") as f:
+                hd = _json.load(f)
+            result["date"] = hd.get("snapshot_date", "")
+            result["hot_industries"] = hd.get("hot_industries", [])[:5]
+            result["accelerating"] = [
+                x for x in hd.get("accelerating", [])
+                if x not in hd.get("hot_industries", [])
+            ][:4]
+            result["rotating_up"] = hd.get("rotating_up", [])[:3]
+            result["market_state"] = hd.get("market_state", "")
+
+        concept_files = sorted(_HEAT_DIR.glob("concept_heat_*.json"))
+        ticker_concepts: dict[str, list[str]] = {}
+        if concept_files:
+            with open(concept_files[-1], encoding="utf-8") as f:
+                cd = _json.load(f)
+            concepts = cd.get("concepts", {})
+            hot = [
+                {"key": k, "name_zh": v.get("name_zh", k),
+                 "ret_5d_pct": v.get("ret_5d_pct", 0), "rank_pct": v.get("rank_pct", 0)}
+                for k, v in concepts.items()
+                if v.get("rank_pct", 0) >= 60
+            ]
+            hot.sort(key=lambda x: -x["rank_pct"])
+            result["hot_concepts"] = hot[:6]
+
+            concepts_path = _ROOT_PATH / "config" / "concepts.json"
+            if concepts_path.exists():
+                with open(concepts_path, encoding="utf-8") as f:
+                    cdefs_raw = _json.load(f)
+                # concepts.json may be {"concepts": {...}} or flat {key: {...}}
+                cdefs = cdefs_raw.get("concepts", cdefs_raw)
+                hot_map = {c["key"]: c["name_zh"] for c in hot}
+                for ck, cdef in cdefs.items():
+                    if ck in hot_map:
+                        for t in cdef.get("tickers", []):
+                            ticker_concepts.setdefault(t, []).append(hot_map[ck])
+
+        result["ticker_concepts"] = ticker_concepts
+        return result
+    except Exception:
+        return {}
+
+
+_SHARES_CACHE = _ROOT_PATH / "data" / "_shares_cache.json"
+
+
+def _load_shares_map() -> dict[str, int]:
+    """Load total shares outstanding for all listed/OTC stocks.
+
+    Fetches from TWSE/TPEx bulk opendata endpoints and caches for 7 days.
+    Returns {} on failure so turnover scoring degrades gracefully.
+    """
+    import json as _json
+    from datetime import date as _date
+    try:
+        import requests as _req
+    except ImportError:
+        return {}
+
+    today = _date.today()
+    if _SHARES_CACHE.exists():
+        try:
+            with open(_SHARES_CACHE, encoding="utf-8") as f:
+                cached = _json.load(f)
+            if (_date.today() - _date.fromisoformat(cached.get("date", "2000-01-01"))).days < 7:
+                return cached.get("shares", {})
+        except Exception:
+            pass
+
+    shares: dict[str, int] = {}
+    # TWSE listed stocks
+    try:
+        r = _req.get(
+            "https://openapi.twse.com.tw/v1/opendata/t187ap04_L", timeout=15
+        )
+        if r.ok:
+            for rec in r.json():
+                code = rec.get("公司代號", "").strip()
+                raw = rec.get("上市股數", "0").replace(",", "")
+                if code and raw.isdigit() and int(raw) > 0:
+                    shares[code] = int(raw) * 1000   # 千股 → 股
+    except Exception:
+        pass
+    # TPEx OTC stocks
+    try:
+        r = _req.get(
+            "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap04_O", timeout=15
+        )
+        if r.ok:
+            for rec in r.json():
+                code = rec.get("SecuritiesCompanyCode", "").strip()
+                raw = rec.get("IssuedShares", "0").replace(",", "")
+                if code and raw.isdigit() and int(raw) > 0:
+                    shares[code] = int(raw) * 1000
+    except Exception:
+        pass
+
+    if shares:
+        _SHARES_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SHARES_CACHE, "w", encoding="utf-8") as f:
+            _json.dump({"date": str(today), "shares": shares}, f, ensure_ascii=False)
+
+    return shares
 
 
 def _fetch_plan_chart(ticker: str, market: str) -> dict:
@@ -1253,6 +1378,7 @@ def _generate_plan_html(
     name_map: dict[str, str],
     industry_map: dict[str, str],
     market_map: dict[str, str],
+    heat_summary: dict | None = None,
 ) -> None:
     """Dark-themed HTML report for plan scan results (LONG + actionable WATCH only)."""
     import json as _json
@@ -1344,6 +1470,9 @@ def _generate_plan_html(
             return "、".join(parts[:4]) + "。" + conclusion
         return conclusion
 
+    hs = heat_summary or {}
+    ticker_concepts: dict[str, list[str]] = hs.get("ticker_concepts", {})
+
     cards: list[str] = []
     for i, r in enumerate(filtered):
         ticker = r["ticker"]
@@ -1354,7 +1483,6 @@ def _generate_plan_html(
         entry = r.get("entry_bid") or 0.0
         target = r.get("target") or 0.0
         stop = r.get("stop_loss") or 0.0
-        trend = r.get("trend_score", 0)
         market = market_map.get(ticker, "TSE")
         exchange = "TWSE" if market == "TSE" else "TPEX"
         tv_url = f"https://www.tradingview.com/chart/?symbol={exchange}%3A{ticker}"
@@ -1378,7 +1506,12 @@ def _generate_plan_html(
 
         llm_verdict = r.get("verdict") or ""
         llm_chip = r.get("chip") or ""
-        rec_text = _esc(llm_verdict if llm_verdict else _rule_rec(r))
+        if llm_verdict:
+            rec_text = _esc(llm_verdict)
+            rec_source_html = '<span class="rec-source src-ai">AI 分析</span>'
+        else:
+            rec_text = _esc(_rule_rec(r))
+            rec_source_html = '<span class="rec-source src-rule">規則評估</span>'
         chip_txt = _esc(llm_chip)
 
         entry_s = f"{entry:.2f}" if entry else "--"
@@ -1386,6 +1519,13 @@ def _generate_plan_html(
         stop_s = f"{stop:.2f}" if stop else "--"
         upside_s = f"+{upside_pct:.1f}%" if upside_pct > 0 else "--"
         conf_cls = "pos" if action == "LONG" else "conf-watch"
+
+        ctags = ticker_concepts.get(ticker, [])
+        concept_html = (
+            '<div class="ctag-row">' +
+            "".join(f'<span class="ctag">{_esc(c)}</span>' for c in ctags[:3]) +
+            "</div>"
+        ) if ctags else ""
 
         cards.append(f"""
     <div class="card" style="animation-delay:{delay}s">
@@ -1397,6 +1537,7 @@ def _generate_plan_html(
         </div>
         <div class="badge g-{gcls}">{badge_zh}</div>
       </div>
+      {concept_html}
       <div class="metrics">
         <div class="m"><div class="mv {conf_cls}">{conf}</div><div class="ml">信心分</div></div>
         <div class="m"><div class="mv">{entry_s}</div><div class="ml">進場價</div></div>
@@ -1406,7 +1547,10 @@ def _generate_plan_html(
       </div>
       <div class="chart" data-ticker="{_esc(ticker)}"></div>
       <div class="rec">
-        <span class="rec-badge rec-{rec_cls}">{rec_label}</span>
+        <div class="rec-header">
+          <span class="rec-badge rec-{rec_cls}">{rec_label}</span>
+          {rec_source_html}
+        </div>
         <div class="rec-text">{rec_text}</div>
         {f'<div class="rec-chip">{chip_txt}</div>' if chip_txt else ""}
       </div>
@@ -1415,6 +1559,32 @@ def _generate_plan_html(
         <a class="link-btn gi" href="{gi_url}" target="_blank" rel="noopener">Goodinfo</a>
       </div>
     </div>""")
+
+    # Build rotation radar HTML for header
+    def _heat_badge(label: str, cls: str) -> str:
+        return f'<span class="hbadge {cls}">{_esc(label)}</span>'
+
+    radar_rows: list[str] = []
+    hot_inds = hs.get("hot_industries", [])
+    accel_inds = hs.get("accelerating", [])
+    hot_concepts = hs.get("hot_concepts", [])
+    if hot_inds:
+        badges = "".join(_heat_badge(n, "hb-hot") for n in hot_inds)
+        radar_rows.append(f'<div class="radar-row"><span class="radar-label">🔥 熱門產業</span>{badges}</div>')
+    if accel_inds:
+        badges = "".join(_heat_badge(n, "hb-warm") for n in accel_inds)
+        radar_rows.append(f'<div class="radar-row"><span class="radar-label">📈 升溫中</span>{badges}</div>')
+    if hot_concepts:
+        def _fmt_concept(c: dict) -> str:
+            ret = c.get("ret_5d_pct", 0)
+            sign = "+" if ret >= 0 else ""
+            return f'{_esc(c["name_zh"])} {sign}{ret:.1f}%'
+        badges = "".join(_heat_badge(_fmt_concept(c), "hb-concept") for c in hot_concepts)
+        radar_rows.append(f'<div class="radar-row"><span class="radar-label">💡 熱門題材</span>{badges}</div>')
+    radar_html = (
+        f'<div class="radar">{"".join(radar_rows)}</div>'
+        if radar_rows else ""
+    )
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-TW">
@@ -1431,6 +1601,14 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .stats{{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap}}
 .stat{{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:12px 20px}}
 .sv{{font-size:24px;font-weight:700}}.sl{{font-size:11px;color:#8b949e;margin-top:2px}}
+.radar{{margin-top:20px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);
+  border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}}
+.radar-row{{display:flex;align-items:center;flex-wrap:wrap;gap:6px}}
+.radar-label{{font-size:11px;color:#8b949e;min-width:80px;flex-shrink:0}}
+.hbadge{{display:inline-block;font-size:11px;font-weight:600;padding:3px 10px;border-radius:12px;white-space:nowrap}}
+.hb-hot{{background:rgba(248,81,73,.12);color:#ff7b7b;border:1px solid rgba(248,81,73,.25)}}
+.hb-warm{{background:rgba(63,185,80,.10);color:#52c261;border:1px solid rgba(63,185,80,.25)}}
+.hb-concept{{background:rgba(163,113,247,.12);color:#a78bfa;border:1px solid rgba(163,113,247,.25)}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:16px;padding:24px}}
 .card{{background:#161b22;border:1px solid #21262d;border-radius:12px;overflow:hidden;
   transition:border-color .2s,transform .2s;animation:fadeIn .5s ease forwards;opacity:0}}
@@ -1447,6 +1625,9 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .g-alpha{{background:rgba(248,81,73,.15);color:#ff6b6b;border:1px solid rgba(248,81,73,.3)}}
 .g-beta{{background:rgba(88,166,255,.15);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}}
 .g-accum{{background:rgba(210,153,34,.15);color:#e3a008;border:1px solid rgba(210,153,34,.3)}}
+.ctag-row{{padding:6px 16px;border-bottom:1px solid #21262d;display:flex;gap:5px;flex-wrap:wrap}}
+.ctag{{font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;
+  background:rgba(163,113,247,.12);color:#a78bfa;border:1px solid rgba(163,113,247,.2)}}
 .metrics{{display:flex;border-bottom:1px solid #21262d}}
 .m{{flex:1;padding:10px 6px;text-align:center;border-right:1px solid #21262d}}
 .m:last-child{{border-right:none}}
@@ -1461,10 +1642,14 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .gi{{background:#1b4332;color:#3fb950;border:1px solid #236840}}
 .footer{{text-align:center;padding:32px;color:#484f58;font-size:12px}}
 .rec{{padding:14px 16px;border-top:1px solid #21262d;display:flex;flex-direction:column;gap:8px}}
-.rec-badge{{display:inline-block;font-size:12px;font-weight:700;padding:4px 12px;border-radius:14px;align-self:flex-start}}
+.rec-header{{display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
+.rec-badge{{display:inline-block;font-size:12px;font-weight:700;padding:4px 12px;border-radius:14px}}
 .rec-buy{{background:rgba(63,185,80,.18);color:#3fb950;border:1px solid rgba(63,185,80,.35)}}
 .rec-watch{{background:rgba(88,166,255,.15);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}}
 .rec-accum{{background:rgba(210,153,34,.18);color:#e3a008;border:1px solid rgba(210,153,34,.35)}}
+.rec-source{{font-size:10px;font-weight:600;padding:3px 8px;border-radius:10px}}
+.src-ai{{background:rgba(163,113,247,.15);color:#a78bfa;border:1px solid rgba(163,113,247,.3)}}
+.src-rule{{background:rgba(139,148,158,.1);color:#8b949e;border:1px solid rgba(139,148,158,.2)}}
 .rec-text{{font-size:12px;color:#c9d1d9;line-height:1.6}}
 .rec-chip{{font-size:11px;color:#8b949e;line-height:1.5;margin-top:2px}}
 </style>
@@ -1477,6 +1662,7 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
     <div class="stat"><div class="sv" style="color:#ff6b6b">{n_long}</div><div class="sl">突破進場</div></div>
     <div class="stat"><div class="sv" style="color:#58a6ff">{n_watch}</div><div class="sl">等待確認</div></div>
   </div>
+  {radar_html}
 </div>
 <div class="grid">
 {"".join(cards)}

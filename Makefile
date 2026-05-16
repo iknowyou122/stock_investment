@@ -8,6 +8,8 @@ _TODAY := $(shell date +%Y-%m-%d)
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
 
+_HEAT_TODAY := data/market_heat/heat_$(_TODAY).json
+
 # ── 安裝依賴 ─────────────────────────────────────────────────────────────────
 install:
 	$(PYTHON) -m pip install -e ".[llm-gemini,llm-openai]"
@@ -25,6 +27,7 @@ NOTIFY  ?= 1
 
 plan:
 ifeq ($(DATE),$(_TODAY))
+	@test -f "$(_HEAT_TODAY)" || { echo "  [熱度快照] 今日尚無資料，自動更新…"; $(PYTHON) scripts/update_market_heat.py --quiet || echo "  [熱度快照] 更新失敗（略過）"; }
 	$(PYTHON) scripts/batch_plan.py --save-csv --save-db --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
 else
 	$(PYTHON) scripts/batch_plan.py --save-csv --save-db --date $(DATE) --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
@@ -189,6 +192,7 @@ bot:
 #       SURGE_DATE=2026-05-06 make surge    # 指定日期
 SURGE_DATE ?=
 surge:
+	@test -f "$(_HEAT_TODAY)" || { echo "  [熱度快照] 今日尚無資料，自動更新…"; $(PYTHON) scripts/update_market_heat.py --quiet || echo "  [熱度快照] 更新失敗（略過）"; }
 	$(PYTHON) scripts/surge_scan.py --save-csv --llm $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(SURGE_DATE),--date $(SURGE_DATE))
 
 surge-live:

@@ -249,6 +249,7 @@ class _ScoreBreakdown:
     vol_asymmetry_pts: int = 0            # 0/2/4 — 上漲日均量 > 下跌日均量
     dual_inst_flow_pts: int = 0           # 0/3/5 — 外資+投信雙向 20D 累積
     chip_cleanliness_pts: int = 0         # 0/4/7/10 — 籌碼乾淨度 K-of-6 複合分
+    turnover_pts: int = 0             # -3 to +4 — 換手率（籌碼鎖定/突破確認/出貨警告）
 
     # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 40) ---
     proximity_pts: int = 0            # 0/6/12 — close distance to 20d_high
@@ -324,6 +325,7 @@ class _ScoreBreakdown:
             + self.vol_asymmetry_pts
             + self.dual_inst_flow_pts
             + self.chip_cleanliness_pts
+            + self.turnover_pts
             # Pillar 3
             + self.proximity_pts
             + self.bb_compression_pts
@@ -384,6 +386,7 @@ class _ScoreBreakdown:
             + self.vol_asymmetry_pts
             + self.dual_inst_flow_pts
             + self.chip_cleanliness_pts
+            + self.turnover_pts
         )
 
     @property
@@ -754,6 +757,12 @@ class TripleConfirmationEngine:
             bd.chip_cleanliness_pts = cl_pts
             if cl_flag:
                 bd.flags.append(cl_flag)
+
+        if twse_proxy is not None and twse_proxy.total_shares > 0:
+            to_pts, to_flag = self._turnover_score(ohlcv, ohlcv_history, twse_proxy.total_shares)
+            bd.turnover_pts = to_pts
+            if to_flag:
+                bd.flags.append(to_flag)
 
         # --- Pillar 3: Compression Structure ---
         bd.proximity_pts = self._proximity_score(ohlcv.close, volume_profile.twenty_day_high)
@@ -1729,6 +1738,48 @@ class TripleConfirmationEngine:
             return 7, f"CHIP_CLEAN:{count}/6"
         if count >= 3:
             return 4, f"CHIP_FAIR:{count}/6"
+        return 0, None
+
+    @staticmethod
+    def _turnover_score(
+        ohlcv: DailyOHLCV,
+        ohlcv_history: list[DailyOHLCV],
+        total_shares: int,
+    ) -> tuple[int, str | None]:
+        """換手率因子: 籌碼鎖定 / 突破確認 / 出貨警告.
+
+        turnover_rate = volume / total_shares (both in shares).
+        """
+        if total_shares <= 0 or ohlcv.volume <= 0:
+            return 0, None
+
+        today_rate = ohlcv.volume / total_shares
+
+        # 近5日平均換手率（不含今日，用於判斷盤整期鎖籌狀態）
+        recent = [b for b in ohlcv_history[-5:] if b.volume > 0]
+        avg_recent = (
+            sum(b.volume / total_shares for b in recent) / len(recent)
+            if recent else today_rate
+        )
+
+        # 1. 出貨警告優先（高換手 + 收黑 → 主力倒貨，最高優先級負信號）
+        if today_rate > 0.060:          # > 6%，不論漲跌都是異常換手
+            return -3, "TURNOVER_DIST_WARN"
+        if today_rate > 0.030 and ohlcv.close < ohlcv.open:
+            return -2, "TURNOVER_EXCESS_DOWN"
+
+        # 2. 突破確認（今日換手率高 → 真實買盤，非假突破）
+        if today_rate >= 0.020:         # ≥ 2%
+            return 4, "TURNOVER_BREAKOUT"
+        if today_rate >= 0.010:         # ≥ 1%
+            return 2, "TURNOVER_CONFIRM"
+
+        # 3. 籌碼鎖定（近5日均換手率低 → 浮額稀少、主力鎖股）
+        if avg_recent < 0.003:          # < 0.3%
+            return 4, "TURNOVER_ULTRA_LOCK"
+        if avg_recent < 0.008:          # 0.3–0.8%
+            return 2, "TURNOVER_LOCKED"
+
         return 0, None
 
     def _dmi_initiation_score(

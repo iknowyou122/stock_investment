@@ -58,6 +58,65 @@ except ImportError:
 _console = Console()
 _lock = Lock()
 
+_ROOT_PATH = Path(__file__).resolve().parents[1]
+_SHARES_CACHE = _ROOT_PATH / "data" / "_shares_cache.json"
+
+
+def _load_shares_map() -> dict[str, int]:
+    """Load total shares outstanding for all listed/OTC stocks.
+
+    Fetches from TWSE/TPEx bulk opendata endpoints and caches for 7 days.
+    Returns {} on failure so turnover scoring degrades gracefully.
+    """
+    import json as _json
+    from datetime import date as _date
+
+    today = _date.today()
+    if _SHARES_CACHE.exists():
+        try:
+            with open(_SHARES_CACHE, encoding="utf-8") as f:
+                cached = _json.load(f)
+            if (_date.today() - _date.fromisoformat(cached.get("date", "2000-01-01"))).days < 7:
+                return cached.get("shares", {})
+        except Exception:
+            pass
+
+    shares: dict[str, int] = {}
+    # TWSE listed stocks
+    try:
+        r = requests.get(
+            "https://openapi.twse.com.tw/v1/opendata/t187ap04_L", timeout=15
+        )
+        if r.ok:
+            for rec in r.json():
+                code = rec.get("公司代號", "").strip()
+                raw = rec.get("上市股數", "0").replace(",", "")
+                if code and raw.isdigit() and int(raw) > 0:
+                    shares[code] = int(raw) * 1000   # 千股 → 股
+    except Exception:
+        pass
+    # TPEx OTC stocks
+    try:
+        r = requests.get(
+            "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap04_O", timeout=15
+        )
+        if r.ok:
+            for rec in r.json():
+                code = rec.get("SecuritiesCompanyCode", "").strip()
+                raw = rec.get("IssuedShares", "0").replace(",", "")
+                if code and raw.isdigit() and int(raw) > 0:
+                    shares[code] = int(raw) * 1000
+    except Exception:
+        pass
+
+    if shares:
+        _SHARES_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SHARES_CACHE, "w", encoding="utf-8") as f:
+            _json.dump({"date": str(today), "shares": shares}, f, ensure_ascii=False)
+
+    return shares
+
+
 # ── TWSE MIS real-time quote helpers ─────────────────────────────────────────
 
 _MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
@@ -1214,6 +1273,7 @@ def run_surge_scan(
 
     finmind = FinMindClient()
     chip_fetcher = ChipProxyFetcher()
+    chip_fetcher.shares_map = _load_shares_map()
 
     # Shared TAIEX history
     try:

@@ -56,7 +56,11 @@ def _load_or_refresh_ohlcv(industry_map: dict) -> dict:
     return cached
 
 
-def main() -> int:
+def main(quiet: bool = False) -> int:
+    def _log(msg: str) -> None:
+        if not quiet:
+            print(msg)
+
     industry_map = _load_industry_map()
     if not industry_map:
         print("No industry map — run make scan first", file=sys.stderr)
@@ -91,15 +95,20 @@ def main() -> int:
         llm = create_llm_provider()
         analysis = analyze_themes(latest, heat, concept_snap, intl, llm=llm)
         save_theme_analysis(analysis, _HEAT_DIR)
-        print(f"  Theme: {analysis.narrative[:60]}")
+        _log(f"  Theme: {analysis.narrative[:60]}")
     except Exception as e:
-        print(f"  LLM theme skipped: {e}", file=sys.stderr)
+        if not quiet:
+            print(f"  LLM theme skipped: {e}", file=sys.stderr)
 
     top_inds = sorted(heat.industries.values(), key=lambda x: -x.rank_pct)[:3]
     top_str = " / ".join(i.industry for i in top_inds)
-    print(f"Heat updated: {latest} | Top: {top_str} | {len(heat.industries)} industries")
+    _log(f"Heat updated: {latest} | Top: {top_str} | {len(heat.industries)} industries")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--quiet", action="store_true", help="suppress output")
+    args = ap.parse_args()
+    sys.exit(main(quiet=args.quiet))

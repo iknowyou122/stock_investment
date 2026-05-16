@@ -93,6 +93,7 @@ class TWSEChipProxy(BaseModel):
     cumul_trust_20d: int = 0            # 投信20日累計淨買超（張數）; 正=持續買進
     inst_buy_days_ratio: float = 0.0    # 過去20日法人買超天數佔比 (0~1); 0.6 = 12/20天
     inst_flow_accel: float = 0.0        # 近5日速率 / 近20日速率; >1=加速, <1=減速
+    total_shares: int = 0              # 流通股數（股）; 0 = unavailable; used for 換手率
     is_available: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
 
