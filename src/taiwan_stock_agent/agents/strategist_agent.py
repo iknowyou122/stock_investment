@@ -422,12 +422,14 @@ class StrategistAgent:
 停損參考: {signal.execution_plan.stop_loss} (T+0 收盤價，非盤中即時)
 目標價: {signal.execution_plan.target}
 
-請填寫以下欄位（每項1-2句，verdict 和 position 需明確，不可模稜兩可）:
-1. verdict（判決）: 明天買進 / 待觀察 / 不建議，括號說明最關鍵理由
-2. position（倉位）: 全倉 / 半倉 / 輕倉，括號說明原因
-3. momentum (動能分析): 描述量價狀況
-4. chip_analysis (籌碼分析): 描述籌碼集中度與主力行為
-5. risk_factors (風險因素): 列出主要風險
+請填寫以下欄位，verdict 必須清楚說明買賣理由，不可只寫結論:
+1. verdict（買賣分析）: 2-4句完整說明。第一句明確說明操作結論（建議買進 / 持續觀察 / 不建議進場）。
+   接著解釋支持這個結論的最關鍵1-2個因素（例：量能突破佐證、法人持續買超、籌碼集中等）。
+   最後說明最主要的一個前提或風險（例：需守住某價位、大盤配合、注意出貨跡象等）。
+2. position（倉位建議）: 全倉 / 半倉 / 輕倉，1句說明原因
+3. momentum（動能分析）: 1-2句描述量價結構
+4. chip_analysis（籌碼分析）: 1-2句描述法人籌碼行為
+5. risk_factors（風險提示）: 1-2句列出最主要風險點
 
 回傳 JSON 格式，欄位: verdict, position, momentum, chip_analysis, risk_factors"""
 

@@ -1506,6 +1506,7 @@ def _generate_plan_html(
 
         llm_verdict = r.get("verdict") or ""
         llm_chip = r.get("chip") or ""
+        llm_risk = r.get("risk") or ""
         if llm_verdict:
             rec_text = _esc(llm_verdict)
             rec_source_html = '<span class="rec-source src-ai">AI 分析</span>'
@@ -1513,6 +1514,7 @@ def _generate_plan_html(
             rec_text = _esc(_rule_rec(r))
             rec_source_html = '<span class="rec-source src-rule">規則評估</span>'
         chip_txt = _esc(llm_chip)
+        risk_txt = _esc(llm_risk)
 
         entry_s = f"{entry:.2f}" if entry else "--"
         target_s = f"{target:.2f}" if target else "--"
@@ -1552,7 +1554,8 @@ def _generate_plan_html(
           {rec_source_html}
         </div>
         <div class="rec-text">{rec_text}</div>
-        {f'<div class="rec-chip">{chip_txt}</div>' if chip_txt else ""}
+        {f'<div class="rec-chip"><span class="rec-chip-label">籌碼</span>{chip_txt}</div>' if chip_txt else ""}
+        {f'<div class="rec-risk"><span class="rec-risk-label">風險</span>{risk_txt}</div>' if risk_txt else ""}
       </div>
       <div class="links">
         <a class="link-btn tv" href="{tv_url}" target="_blank" rel="noopener">TradingView</a>
@@ -1650,8 +1653,13 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .rec-source{{font-size:10px;font-weight:600;padding:3px 8px;border-radius:10px}}
 .src-ai{{background:rgba(163,113,247,.15);color:#a78bfa;border:1px solid rgba(163,113,247,.3)}}
 .src-rule{{background:rgba(139,148,158,.1);color:#8b949e;border:1px solid rgba(139,148,158,.2)}}
-.rec-text{{font-size:12px;color:#c9d1d9;line-height:1.6}}
-.rec-chip{{font-size:11px;color:#8b949e;line-height:1.5;margin-top:2px}}
+.rec-text{{font-size:13px;color:#c9d1d9;line-height:1.7}}
+.rec-chip,.rec-risk{{font-size:11px;line-height:1.5;margin-top:4px;display:flex;gap:6px;align-items:baseline}}
+.rec-chip{{color:#8b949e}}
+.rec-risk{{color:#d29922}}
+.rec-chip-label,.rec-risk-label{{font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap;flex-shrink:0}}
+.rec-chip-label{{background:rgba(139,148,158,.15);color:#8b949e}}
+.rec-risk-label{{background:rgba(210,153,34,.15);color:#e3a008}}
 </style>
 </head>
 <body>
