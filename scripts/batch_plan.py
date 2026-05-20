@@ -1267,6 +1267,18 @@ def _load_heat_summary() -> dict:
                             ticker_concepts.setdefault(t, []).append(hot_map[ck])
 
         result["ticker_concepts"] = ticker_concepts
+
+        # Rotation radar — load rotation_signal.json if available
+        rot_path = _HEAT_DIR / "rotation_signal.json"
+        if rot_path.exists():
+            try:
+                with open(rot_path, encoding="utf-8") as f:
+                    rd = _json.load(f)
+                result["rotation_candidates"] = rd.get("rotation_candidates", [])[:6]
+                result["cooling_nodes"] = [n["label"] for n in rd.get("cooling_nodes", [])][:4]
+            except Exception:
+                pass
+
         return result
     except Exception:
         return {}
@@ -1564,19 +1576,25 @@ def _generate_plan_html(
     </div>""")
 
     # Build rotation radar HTML for header
-    def _heat_badge(label: str, cls: str) -> str:
-        return f'<span class="hbadge {cls}">{_esc(label)}</span>'
+    def _heat_badge(label: str, cls: str, title: str = "") -> str:
+        t = f' title="{_esc(title)}"' if title else ""
+        return f'<span class="hbadge {cls}"{t}>{_esc(label)}</span>'
 
     radar_rows: list[str] = []
     hot_inds = hs.get("hot_industries", [])
     accel_inds = hs.get("accelerating", [])
     hot_concepts = hs.get("hot_concepts", [])
+    rotation_candidates = hs.get("rotation_candidates", [])
+    cooling_nodes = hs.get("cooling_nodes", [])
     if hot_inds:
         badges = "".join(_heat_badge(n, "hb-hot") for n in hot_inds)
         radar_rows.append(f'<div class="radar-row"><span class="radar-label">🔥 熱門產業</span>{badges}</div>')
     if accel_inds:
         badges = "".join(_heat_badge(n, "hb-warm") for n in accel_inds)
         radar_rows.append(f'<div class="radar-row"><span class="radar-label">📈 升溫中</span>{badges}</div>')
+    if cooling_nodes:
+        badges = "".join(_heat_badge(n, "hb-cooling") for n in cooling_nodes)
+        radar_rows.append(f'<div class="radar-row"><span class="radar-label">🔻 降溫中</span>{badges}</div>')
     if hot_concepts:
         def _fmt_concept(c: dict) -> str:
             ret = c.get("ret_5d_pct", 0)
@@ -1584,6 +1602,15 @@ def _generate_plan_html(
             return f'{_esc(c["name_zh"])} {sign}{ret:.1f}%'
         badges = "".join(_heat_badge(_fmt_concept(c), "hb-concept") for c in hot_concepts)
         radar_rows.append(f'<div class="radar-row"><span class="radar-label">💡 熱門題材</span>{badges}</div>')
+    if rotation_candidates:
+        def _fmt_cand(c: dict) -> str:
+            state = c.get("state", "")
+            star = "★" if state == "EMERGING" else ""
+            triggers = "、".join(c.get("trigger_labels", [])[:2])
+            tip = f'觸發: {triggers} | 預期{c.get("avg_lag_weeks",2):.0f}週 | {c.get("note","")}'
+            return _heat_badge(f'{star}{c["label"]}', "hb-rotation", tip)
+        badges = "".join(_fmt_cand(c) for c in rotation_candidates)
+        radar_rows.append(f'<div class="radar-row"><span class="radar-label">📡 輪動候選</span>{badges}</div>')
     radar_html = (
         f'<div class="radar">{"".join(radar_rows)}</div>'
         if radar_rows else ""
@@ -1611,7 +1638,9 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .hbadge{{display:inline-block;font-size:11px;font-weight:600;padding:3px 10px;border-radius:12px;white-space:nowrap}}
 .hb-hot{{background:rgba(248,81,73,.12);color:#ff7b7b;border:1px solid rgba(248,81,73,.25)}}
 .hb-warm{{background:rgba(63,185,80,.10);color:#52c261;border:1px solid rgba(63,185,80,.25)}}
+.hb-cooling{{background:rgba(210,153,34,.10);color:#d29922;border:1px solid rgba(210,153,34,.25)}}
 .hb-concept{{background:rgba(163,113,247,.12);color:#a78bfa;border:1px solid rgba(163,113,247,.25)}}
+.hb-rotation{{background:rgba(56,139,253,.12);color:#58a6ff;border:1px solid rgba(56,139,253,.25);cursor:default}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:16px;padding:24px}}
 .card{{background:#161b22;border:1px solid #21262d;border-radius:12px;overflow:hidden;
   transition:border-color .2s,transform .2s;animation:fadeIn .5s ease forwards;opacity:0}}

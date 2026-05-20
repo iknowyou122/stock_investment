@@ -103,6 +103,19 @@ def main(quiet: bool = False) -> int:
     top_inds = sorted(heat.industries.values(), key=lambda x: -x.rank_pct)[:3]
     top_str = " / ".join(i.industry for i in top_inds)
     _log(f"Heat updated: {latest} | Top: {top_str} | {len(heat.industries)} industries")
+
+    # Rotation radar — runs after heat + concept snapshots are saved
+    try:
+        import importlib.util, os
+        _tracker_path = Path(__file__).resolve().parent / "rotation_tracker.py"
+        spec = importlib.util.spec_from_file_location("rotation_tracker", _tracker_path)
+        rt = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rt)
+        rt.run(quiet=quiet)
+    except Exception as e:
+        if not quiet:
+            print(f"  Rotation tracker skipped: {e}", file=sys.stderr)
+
     return 0
 
 
