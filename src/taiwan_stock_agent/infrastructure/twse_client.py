@@ -88,8 +88,8 @@ class ChipProxyFetcher:
         self._t86_consecutive_failures: int = 0
         self._t86_circuit_open: bool = False
         # TDCC 集保股權分散表 — weekly, cache by ISO week string "YYYY-WW"
-        # {week_key: {ticker: (large_holder_pct, retail_holder_pct)}}
-        self._tdcc_week_cache: dict[str, dict[str, tuple[float, float]]] = {}
+        # {week_key: {ticker: (large_pct, retail_pct, super_pct, super_count)}}
+        self._tdcc_week_cache: dict[str, dict[str, tuple[float, float, float, int]]] = {}
         # 流通股數表 {ticker: shares (in shares, not lots)}; populated externally by caller
         self.shares_map: dict[str, int] = {}
 
@@ -123,7 +123,7 @@ class ChipProxyFetcher:
         sbl_ratio = self._fetch_sbl_data(ticker, trade_date, flags)
         margin_util = self._fetch_margin_utilization(ticker, trade_date, flags)
         daytrade_ratio = self._fetch_daytrade_data(ticker, trade_date, flags)
-        large_chg, retail_chg = self._fetch_tdcc_ownership(ticker, trade_date)
+        large_chg, retail_chg, super_pct_chg, super_count_chg = self._fetch_tdcc_ownership(ticker, trade_date)
 
         # ── 派生欄位 ──────────────────────────────────────────────────────────
         fn = foreign_net or 0
@@ -167,6 +167,8 @@ class ChipProxyFetcher:
             foreign_and_trust_both_buy=foreign_and_trust_both_buy,
             large_holder_chg_pct=large_chg,
             retail_holder_chg_pct=retail_chg,
+            super_large_holder_chg_pct=super_pct_chg,
+            super_large_holder_count_chg=super_count_chg,
             cumul_foreign_20d=cumul_foreign_20d,
             cumul_trust_20d=cumul_trust_20d,
             inst_buy_days_ratio=inst_buy_days_ratio,
@@ -976,15 +978,18 @@ class ChipProxyFetcher:
 
     def _fetch_tdcc_ownership(
         self, ticker: str, trade_date: date
-    ) -> tuple[float | None, float | None]:
+    ) -> tuple[float | None, float | None, float | None, int | None]:
         """Fetch 集保股權分散表 via FinMind TaiwanStockShareholding (weekly data).
 
-        Returns (large_holder_chg_pct, retail_holder_chg_pct):
-          - large_holder_chg_pct: 400張+ 持股比例週變化（正 = 大戶增持）
-          - retail_holder_chg_pct: 100張以下持股比例週變化（負 = 散戶退出）
-          Both None if FINMIND_API_KEY missing or request fails.
+        Returns (large_chg_pct, retail_chg_pct, super_large_chg_pct, super_large_count_chg):
+          - large_chg_pct: 400張+ 持股比例週變化
+          - retail_chg_pct: 100張以下持股比例週變化
+          - super_large_chg_pct: 千張+ 持股比例週變化（正 = 大戶加碼）
+          - super_large_count_chg: 千張+ 大戶人數週變化（正 = 新機構進場）
+          All None if FINMIND_API_KEY missing or request fails.
 
         大戶定義: ≥ 400,000 shares (400張)
+        千張大戶: ≥ 1,000,000 shares (1000張，機構/主力等級)
         散戶定義: < 100,000 shares (100張)
         """
         import os as _os
@@ -1026,11 +1031,10 @@ class ChipProxyFetcher:
                 dates = sorted({r["date"] for r in records}, reverse=True)
                 latest = dates[0]
                 rows = [r for r in records if r["date"] == latest]
-                # 計算各持股等級的 Percent 加總
+                # 計算各持股等級的 Percent 與人數加總
                 large_pct = sum(
                     float(r.get("percent", 0))
                     for r in rows
-                    # 400張 = 400,000 shares; FinMind unit 欄位通常也是 shares
                     if self._tdcc_is_large(r)
                 )
                 retail_pct = sum(
@@ -1038,7 +1042,14 @@ class ChipProxyFetcher:
                     for r in rows
                     if self._tdcc_is_retail(r)
                 )
-                result = {ticker: (large_pct, retail_pct)}
+                super_rows = [r for r in rows if self._tdcc_is_super_large(r)]
+                super_pct = sum(float(r.get("percent", 0)) for r in super_rows)
+                # FinMind 欄位: people 或 person_count（人數）
+                super_count = sum(
+                    int(r.get("people", r.get("person_count", 0)) or 0)
+                    for r in super_rows
+                )
+                result = {ticker: (large_pct, retail_pct, super_pct, super_count)}
                 self._tdcc_week_cache[week_key] = result
                 return result
             except Exception as e:
@@ -1052,11 +1063,23 @@ class ChipProxyFetcher:
         this_entry = (this_data or {}).get(ticker)
         prev_entry = (prev_data or {}).get(ticker)
         if not this_entry or not prev_entry:
-            return None, None
+            return None, None, None, None
 
         large_chg = this_entry[0] - prev_entry[0]
         retail_chg = this_entry[1] - prev_entry[1]
-        return large_chg, retail_chg
+        super_pct_chg = this_entry[2] - prev_entry[2]
+        super_count_chg = this_entry[3] - prev_entry[3]
+        return large_chg, retail_chg, super_pct_chg, super_count_chg
+
+    @staticmethod
+    def _tdcc_is_super_large(row: dict) -> bool:
+        """千張 (1,000,000 shares) 以上為千張大戶（機構/主力等級）。"""
+        try:
+            level = str(row.get("HolderCountLevel") or row.get("level", ""))
+            lower = int(level.replace(",", "").split("-")[0].strip())
+            return lower >= 1_000_000
+        except Exception:
+            return False
 
     @staticmethod
     def _tdcc_is_large(row: dict) -> bool:

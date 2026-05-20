@@ -249,6 +249,7 @@ class _ScoreBreakdown:
     vol_asymmetry_pts: int = 0            # 0/2/4 — 上漲日均量 > 下跌日均量
     dual_inst_flow_pts: int = 0           # 0/3/5 — 外資+投信雙向 20D 累積
     chip_cleanliness_pts: int = 0         # 0/4/7/10 — 籌碼乾淨度 K-of-6 複合分
+    super_large_pts: int = 0             # -4/0/+4/+8 — 千張大戶動向（持股比例+人數週變化）
     turnover_pts: int = 0             # -3 to +4 — 換手率（籌碼鎖定/突破確認/出貨警告）
 
     # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 40) ---
@@ -326,6 +327,7 @@ class _ScoreBreakdown:
             + self.dual_inst_flow_pts
             + self.chip_cleanliness_pts
             + self.turnover_pts
+            + self.super_large_pts          # can be negative
             # Pillar 3
             + self.proximity_pts
             + self.bb_compression_pts
@@ -387,6 +389,7 @@ class _ScoreBreakdown:
             + self.dual_inst_flow_pts
             + self.chip_cleanliness_pts
             + self.turnover_pts
+            + self.super_large_pts
         )
 
     @property
@@ -763,6 +766,12 @@ class TripleConfirmationEngine:
             bd.turnover_pts = to_pts
             if to_flag:
                 bd.flags.append(to_flag)
+
+        if twse_proxy is not None and twse_proxy.super_large_holder_chg_pct is not None:
+            sl_pts, sl_flag = self._super_large_score(twse_proxy)
+            bd.super_large_pts = sl_pts
+            if sl_flag:
+                bd.flags.append(sl_flag)
 
         # --- Pillar 3: Compression Structure ---
         bd.proximity_pts = self._proximity_score(ohlcv.close, volume_profile.twenty_day_high)
@@ -1779,6 +1788,37 @@ class TripleConfirmationEngine:
             return 4, "TURNOVER_ULTRA_LOCK"
         if avg_recent < 0.008:          # 0.3–0.8%
             return 2, "TURNOVER_LOCKED"
+
+        return 0, None
+
+    @staticmethod
+    def _super_large_score(proxy: "TWSEChipProxy") -> tuple[int, str | None]:
+        """千張大戶動向因子 (-4/0/+4/+8).
+
+        千張 = 1,000,000 shares (≥1000張)，機構/主力等級持股人。
+        同時追蹤持股比例與人數變化：
+          - 比例增 + 人數增 → 新機構發現並進場，最強訊號
+          - 比例增（人數持平）→ 現有大戶加碼
+          - 比例減 → 大戶出場，負訊號
+        """
+        pct_chg = proxy.super_large_holder_chg_pct
+        count_chg = proxy.super_large_holder_count_chg
+
+        if pct_chg is None:
+            return 0, None
+
+        # 雙重確認：持股比例增 + 人數增（新機構進場）
+        if pct_chg > 0.5 and count_chg is not None and count_chg > 0:
+            return 8, f"SUPER_HOLDER_ACCUM:{pct_chg:+.2f}%,+{count_chg}戶"
+        # 持股比例明顯增加（現有大戶加碼）
+        if pct_chg > 0.5:
+            return 4, f"SUPER_HOLDER_INC:{pct_chg:+.2f}%"
+        # 輕微增持
+        if pct_chg > 0:
+            return 2, f"SUPER_HOLDER_MILD:{pct_chg:+.2f}%"
+        # 大戶明顯減持（出貨）
+        if pct_chg < -1.0:
+            return -4, f"SUPER_HOLDER_EXIT:{pct_chg:+.2f}%"
 
         return 0, None
 

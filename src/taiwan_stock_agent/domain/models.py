@@ -88,6 +88,9 @@ class TWSEChipProxy(BaseModel):
     foreign_and_trust_both_buy: bool = False  # 外資+投信同日雙買 (土洋合作)
     large_holder_chg_pct: float | None = None  # 集保 400張+大戶持股比例週變化 (+= 增加); None if unavailable
     retail_holder_chg_pct: float | None = None # 集保 100張以下散戶持股比例週變化 (-= 退出); None if unavailable
+    # 千張大戶（≥1000張，機構/主力等級）
+    super_large_holder_chg_pct: float | None = None   # 千張+大戶持股比例週變化 (+= 加碼)
+    super_large_holder_count_chg: int | None = None   # 千張+大戶人數週變化（正 = 新大戶進場）
     # 20日累計法人流向 (Phase 4.30)
     cumul_foreign_20d: int = 0          # 外資20日累計淨買超（張數）; 正=持續買進
     cumul_trust_20d: int = 0            # 投信20日累計淨買超（張數）; 正=持續買進
