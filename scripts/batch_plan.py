@@ -1351,10 +1351,20 @@ def _fetch_plan_chart(ticker: str, market: str) -> dict:
     suffix = ".TW" if market == "TSE" else ".TWO"
     empty: dict = {"candles": [], "bb_upper": [], "bb_mid": [], "bb_lower": []}
     try:
+        import logging as _log
+        import warnings as _warn
         import pandas as pd
         import yfinance as yf
         period = 20
-        hist = yf.Ticker(f"{ticker}{suffix}").history(period="5mo", interval="1d", auto_adjust=True)
+        _yfl = _log.getLogger("yfinance")
+        _prev = _yfl.level
+        _yfl.setLevel(_log.CRITICAL)
+        try:
+            with _warn.catch_warnings():
+                _warn.simplefilter("ignore")
+                hist = yf.Ticker(f"{ticker}{suffix}").history(period="5mo", interval="1d", auto_adjust=True)
+        finally:
+            _yfl.setLevel(_prev)
         rows = []
         for idx, row in hist.iterrows():
             try:

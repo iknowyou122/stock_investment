@@ -595,14 +595,24 @@ def _fetch_chart_candles(ticker: str, market: str) -> dict:
     suffix = ".TW" if market == "TSE" else ".TWO"
     empty = {"candles": [], "bb_upper": [], "bb_mid": [], "bb_lower": []}
     try:
+        import logging as _log
+        import warnings as _warn
         import pandas as pd
         import yfinance as yf
         # Use Ticker.history() instead of yf.download() — each call creates an
         # independent session object, safe for concurrent use in ThreadPoolExecutor.
         period = 20
-        hist = yf.Ticker(f"{ticker}{suffix}").history(
-            period="5mo", interval="1d", auto_adjust=True,
-        )
+        _yfl = _log.getLogger("yfinance")
+        _prev = _yfl.level
+        _yfl.setLevel(_log.CRITICAL)
+        try:
+            with _warn.catch_warnings():
+                _warn.simplefilter("ignore")
+                hist = yf.Ticker(f"{ticker}{suffix}").history(
+                    period="5mo", interval="1d", auto_adjust=True,
+                )
+        finally:
+            _yfl.setLevel(_prev)
         rows = []
         for idx, row in hist.iterrows():
             try:
