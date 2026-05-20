@@ -4,7 +4,7 @@
     "SURGE_BETA": 40,
     "SURGE_GAMMA": 40
   },
-  "raw_max_pts": 110,
+  "raw_max_pts": 127,
   "gates": {
     "min_turnover_tse": 20000000,
     "min_turnover_tpex": 8000000,

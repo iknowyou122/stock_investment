@@ -251,6 +251,10 @@ class _ScoreBreakdown:
     chip_cleanliness_pts: int = 0         # 0/4/7/10 — 籌碼乾淨度 K-of-6 複合分
     super_large_pts: int = 0             # -4/0/+4/+8 — 千張大戶動向（持股比例+人數週變化）
     turnover_pts: int = 0             # -3 to +4 — 換手率（籌碼鎖定/突破確認/出貨警告）
+    foreign_trend_pts: int = 0        # -2 to +4 — 外資W1/W2趨勢加速比
+    short_cover_pts: int = 0          # 0 to +4 — 融券回補率（空頭投降）
+    large_2w_trend_pts: int = 0       # -3 to +5 — 400張+大戶兩週持股趨勢
+    inst_accel_3d_pts: int = 0        # -2 to +4 — 法人短窗加速(3d/10d)
 
     # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 40) ---
     proximity_pts: int = 0            # 0/6/12 — close distance to 20d_high
@@ -328,6 +332,10 @@ class _ScoreBreakdown:
             + self.chip_cleanliness_pts
             + self.turnover_pts
             + self.super_large_pts          # can be negative
+            + self.foreign_trend_pts        # can be negative
+            + self.short_cover_pts
+            + self.large_2w_trend_pts       # can be negative
+            + self.inst_accel_3d_pts        # can be negative
             # Pillar 3
             + self.proximity_pts
             + self.bb_compression_pts
@@ -390,6 +398,10 @@ class _ScoreBreakdown:
             + self.chip_cleanliness_pts
             + self.turnover_pts
             + self.super_large_pts
+            + self.foreign_trend_pts
+            + self.short_cover_pts
+            + self.large_2w_trend_pts
+            + self.inst_accel_3d_pts
         )
 
     @property
@@ -473,9 +485,11 @@ class TripleConfirmationEngine:
         twse_proxy: TWSEChipProxy | None = None,
         taiex_history: list[DailyOHLCV] | None = None,
         market: str = _DEFAULT_MARKET,
+        taifex_context: dict | None = None,
     ) -> SignalOutput:
         """Compute deterministic v2 confidence and return a SignalOutput."""
         self._taiex_history = taiex_history or []
+        self._taifex_context = taifex_context or {}
         self._market = market if market in _LIQUIDITY_THRESHOLDS else _DEFAULT_MARKET
         breakdown = self._compute(ohlcv, ohlcv_history, chip_report, volume_profile, twse_proxy)
         return self._build_signal(ohlcv, breakdown, volume_profile, chip_report)
@@ -489,9 +503,11 @@ class TripleConfirmationEngine:
         twse_proxy: TWSEChipProxy | None = None,
         taiex_history: list[DailyOHLCV] | None = None,
         market: str = _DEFAULT_MARKET,
+        taifex_context: dict | None = None,
     ) -> tuple[SignalOutput, _ScoreBreakdown]:
         """Same as score() but also returns the breakdown for LLM prompting."""
         self._taiex_history = taiex_history or []
+        self._taifex_context = taifex_context or {}
         self._market = market if market in _LIQUIDITY_THRESHOLDS else _DEFAULT_MARKET
         breakdown = self._compute(ohlcv, ohlcv_history, chip_report, volume_profile, twse_proxy)
         return self._build_signal(ohlcv, breakdown, volume_profile, chip_report), breakdown
@@ -505,9 +521,11 @@ class TripleConfirmationEngine:
         twse_proxy: TWSEChipProxy | None = None,
         taiex_history: list[DailyOHLCV] | None = None,
         market: str = _DEFAULT_MARKET,
+        taifex_context: dict | None = None,
     ) -> tuple[SignalOutput, _ScoreBreakdown, _AnalysisHints]:
         """Score + breakdown + analysis hints. Use this from StrategistAgent."""
         self._taiex_history = taiex_history or []
+        self._taifex_context = taifex_context or {}
         self._market = market if market in _LIQUIDITY_THRESHOLDS else _DEFAULT_MARKET
         breakdown = self._compute(ohlcv, ohlcv_history, chip_report, volume_profile, twse_proxy)
         hints = self._compute_hints(ohlcv, ohlcv_history, twse_proxy=twse_proxy)
@@ -772,6 +790,28 @@ class TripleConfirmationEngine:
             bd.super_large_pts = sl_pts
             if sl_flag:
                 bd.flags.append(sl_flag)
+
+        if twse_proxy is not None and twse_proxy.is_available:
+            ft_pts, ft_flag = self._foreign_trend_score(twse_proxy)
+            bd.foreign_trend_pts = ft_pts
+            if ft_flag:
+                bd.flags.append(ft_flag)
+
+            sc_pts, sc_flag = self._short_cover_score(twse_proxy)
+            bd.short_cover_pts = sc_pts
+            if sc_flag:
+                bd.flags.append(sc_flag)
+
+            if twse_proxy.large_holder_2w_trend is not None:
+                l2w_pts, l2w_flag = self._large_2w_trend_score(twse_proxy)
+                bd.large_2w_trend_pts = l2w_pts
+                if l2w_flag:
+                    bd.flags.append(l2w_flag)
+
+            ia_pts, ia_flag = self._inst_accel_short_score(twse_proxy)
+            bd.inst_accel_3d_pts = ia_pts
+            if ia_flag:
+                bd.flags.append(ia_flag)
 
         # --- Pillar 3: Compression Structure ---
         bd.proximity_pts = self._proximity_score(ohlcv.close, volume_profile.twenty_day_high)
@@ -1822,6 +1862,74 @@ class TripleConfirmationEngine:
 
         return 0, None
 
+    @staticmethod
+    def _foreign_trend_score(proxy: "TWSEChipProxy") -> tuple[int, str | None]:
+        """外資W1/W2趨勢加速因子 (-2 to +4).
+
+        foreign_trend_accel = W1(近10日) / W2(遠10日) 外資累積比
+        >1 = 加速買進, <1 = 減速
+        """
+        accel = proxy.foreign_trend_accel
+        if accel <= 0:
+            return 0, None
+        if accel >= 2.0:
+            return 4, f"FOREIGN_ACCEL:{accel:.1f}x"
+        if accel >= 1.3:
+            return 2, f"FOREIGN_ACCEL_MILD:{accel:.1f}x"
+        if accel < 0.5 and proxy.cumul_foreign_20d < 0:
+            return -2, "FOREIGN_FADE"
+        return 0, None
+
+    @staticmethod
+    def _short_cover_score(proxy: "TWSEChipProxy") -> tuple[int, str | None]:
+        """融券回補率因子 (空頭投降訊號) (0 to +4).
+
+        short_cover_rate = 融券買進 / 融券前日餘額
+        """
+        rate = proxy.short_cover_rate
+        if rate > 0.20:
+            return 4, f"SHORT_CAPITULATION:{rate:.0%}"
+        if rate > 0.10:
+            return 2, f"SHORT_COVER:{rate:.0%}"
+        return 0, None
+
+    @staticmethod
+    def _large_2w_trend_score(proxy: "TWSEChipProxy") -> tuple[int, str | None]:
+        """400張+大戶兩週持股趨勢因子 (-3 to +5).
+
+        large_holder_2w_trend = this_week_pct - two_weeks_ago_pct
+        """
+        trend = proxy.large_holder_2w_trend
+        if trend is None:
+            return 0, None
+        if trend > 1.5:
+            return 5, f"HOLDER_2W_UPTREND:{trend:+.2f}%"
+        if trend > 0.5:
+            return 3, f"HOLDER_2W_UP:{trend:+.2f}%"
+        if trend > 0:
+            return 1, None
+        if trend < -1.5:
+            return -3, f"HOLDER_2W_DOWNTREND:{trend:+.2f}%"
+        return 0, None
+
+    @staticmethod
+    def _inst_accel_short_score(proxy: "TWSEChipProxy") -> tuple[int, str | None]:
+        """法人短窗加速因子 (3d/10d) (-2 to +4).
+
+        inst_accel_3d_10d = 近3日法人日均 / 近10日法人日均
+        >1 = 加速, <1 = 減速
+        """
+        accel = proxy.inst_accel_3d_10d
+        if accel <= 0:
+            return 0, None
+        if accel >= 2.0:
+            return 4, f"INST_SURGE:{accel:.1f}x"
+        if accel >= 1.3:
+            return 2, f"INST_ACCEL_SHORT:{accel:.1f}x"
+        if accel < 0.5:
+            return -2, "INST_FADE_SHORT"
+        return 0, None
+
     def _dmi_initiation_score(
         self, history: list[DailyOHLCV]
     ) -> tuple[int, str | None]:
@@ -2225,10 +2333,17 @@ class TripleConfirmationEngine:
         action = self._map_action(confidence, breakdown, breakdown.chip_pts)
         plan = self._make_execution_plan(ohlcv, volume_profile)
 
+        # Factor E: 台指期外資淨多單 — 期貨空頭壓力下 LONG→WATCH 降級
+        taifex_ctx = getattr(self, "_taifex_context", {})
+        if taifex_ctx.get("futures_bearish") and action == "LONG":
+            action = "WATCH"
+
         data_quality_flags = list(ohlcv.data_quality_flags)
         data_quality_flags.extend(chip_report.data_quality_flags)
         data_quality_flags.extend(volume_profile.data_quality_flags)
         data_quality_flags.append("scoring_version:v2")
+        if taifex_ctx.get("futures_bearish"):
+            data_quality_flags.append("TAIFEX_FUTURES_BEARISH")
 
         # v2.2b: propagate COILING / COILING_PRIME flags (set in _compute)
         for tag in ("COILING_PRIME", "COILING", "MOMENTUM_TRACK"):

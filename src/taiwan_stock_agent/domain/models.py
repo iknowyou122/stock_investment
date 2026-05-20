@@ -97,6 +97,11 @@ class TWSEChipProxy(BaseModel):
     inst_buy_days_ratio: float = 0.0    # 過去20日法人買超天數佔比 (0~1); 0.6 = 12/20天
     inst_flow_accel: float = 0.0        # 近5日速率 / 近20日速率; >1=加速, <1=減速
     total_shares: int = 0              # 流通股數（股）; 0 = unavailable; used for 換手率
+    # 多因子籌碼面擴充 (Phase 4.31)
+    short_cover_rate: float = 0.0              # 融券買進/融券前日餘額; 回補率 (>0.20=空頭投降)
+    foreign_trend_accel: float = 0.0           # W1(近10日)/W2(遠10日) 外資流向加速比; >1=加速
+    large_holder_2w_trend: float | None = None  # 400張+大戶持股比例兩週趨勢 (this - 2wks_ago)
+    inst_accel_3d_10d: float = 0.0             # 近3日法人日均淨買/近10日日均; >1=短期加速
     is_available: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
 

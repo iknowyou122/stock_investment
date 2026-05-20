@@ -357,8 +357,11 @@ class TestChipProxyFetcherCache:
             this_wk = f"{iso.year}-{iso.week:02d}"
             prev_iso = (trade_date - timedelta(days=7)).isocalendar()
             prev_wk = f"{prev_iso.year}-{prev_iso.week:02d}"
+            two_wks_iso = (trade_date - timedelta(weeks=2)).isocalendar()
+            two_wks_key = f"{two_wks_iso.year}-{two_wks_iso.week:02d}"
             fetcher._tdcc_week_cache[this_wk] = {ticker: (25.0, 40.0, 10.0, 5)}
             fetcher._tdcc_week_cache[prev_wk] = {ticker: (24.0, 41.0, 9.5, 4)}
+            fetcher._tdcc_week_cache[two_wks_key] = {ticker: (23.5, 42.0, 9.0, 3)}
 
             with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get") as mock_get:
                 proxy = fetcher.fetch(ticker, trade_date)

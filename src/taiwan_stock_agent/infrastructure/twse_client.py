@@ -117,13 +117,15 @@ class ChipProxyFetcher:
         foreign_net, trust_net, dealer_net = self._fetch_t86_data(ticker, trade_date, flags)
         margin_change = self._fetch_margin_balance_change(ticker, trade_date, flags)
         (foreign_consec, trust_consec, dealer_consec, buy_2_of_3,
-         cumul_foreign_20d, cumul_trust_20d, inst_buy_days_ratio, inst_flow_accel
+         cumul_foreign_20d, cumul_trust_20d, inst_buy_days_ratio, inst_flow_accel,
+         foreign_trend_accel, inst_accel_3d_10d,
          ) = self._fetch_institution_consecutive_days(ticker, trade_date, flags)
         short_increased, short_margin_ratio = self._fetch_short_data(ticker, trade_date, flags)
         sbl_ratio = self._fetch_sbl_data(ticker, trade_date, flags)
         margin_util = self._fetch_margin_utilization(ticker, trade_date, flags)
         daytrade_ratio = self._fetch_daytrade_data(ticker, trade_date, flags)
-        large_chg, retail_chg, super_pct_chg, super_count_chg = self._fetch_tdcc_ownership(ticker, trade_date)
+        large_chg, retail_chg, super_pct_chg, super_count_chg, large_2w_trend = self._fetch_tdcc_ownership(ticker, trade_date)
+        short_cover_rate = self._fetch_short_cover_rate(ticker, trade_date, flags)
 
         # ── 派生欄位 ──────────────────────────────────────────────────────────
         fn = foreign_net or 0
@@ -174,6 +176,10 @@ class ChipProxyFetcher:
             inst_buy_days_ratio=inst_buy_days_ratio,
             inst_flow_accel=inst_flow_accel,
             total_shares=total_shares,
+            short_cover_rate=short_cover_rate,
+            foreign_trend_accel=foreign_trend_accel,
+            large_holder_2w_trend=large_2w_trend,
+            inst_accel_3d_10d=inst_accel_3d_10d,
             is_available=is_available,
             data_quality_flags=flags,
         )
@@ -521,7 +527,7 @@ class ChipProxyFetcher:
         # 1. Date-level memory cache — fastest path
         if trade_date in self._margin_date_cache:
             return self._margin_date_cache[trade_date].get(
-                ticker, (None, None, None, None, None)
+                ticker, (None, None, None, None, None, None)
             )
 
         # 2. Per-ticker parquet cache (survives across process restarts)
@@ -541,6 +547,7 @@ class ChipProxyFetcher:
                         _col("today_short"),
                         _col("prev_short"),
                         _col("margin_limit"),
+                        _col("short_cover_buy"),
                     )
             except Exception:
                 pass
@@ -558,7 +565,7 @@ class ChipProxyFetcher:
             if not isinstance(rows, list):
                 flags.append("TWSE_MARGN_ERROR:UnexpectedFormat")
                 self._margin_date_cache[trade_date] = {}
-                return (None, None, None, None, None)
+                return (None, None, None, None, None, None)
 
             def _parse_int(val: str) -> int | None:
                 if val is None or val.strip() == "":
@@ -569,7 +576,7 @@ class ChipProxyFetcher:
                     return None
 
             # Parse ALL rows into date-level cache + write per-ticker parquets
-            date_map: dict[str, tuple[int | None, int | None, int | None, int | None, int | None]] = {}
+            date_map: dict[str, tuple[int | None, int | None, int | None, int | None, int | None, int | None]] = {}
             for row in rows:
                 t = row.get("股票代號", "").strip()
                 if not t:
@@ -579,8 +586,9 @@ class ChipProxyFetcher:
                 today_short = _parse_int(row.get("融券今日餘額", ""))
                 prev_short = _parse_int(row.get("融券前日餘額", ""))
                 margin_limit = _parse_int(row.get("融資限額", ""))
+                short_cover_buy = _parse_int(row.get("融券買進", ""))
 
-                date_map[t] = (today_margin, prev_margin, today_short, prev_short, margin_limit)
+                date_map[t] = (today_margin, prev_margin, today_short, prev_short, margin_limit, short_cover_buy)
 
                 # Write per-ticker parquet for future runs
                 t_cache = self._cache_dir / f"twse_margin_row_{t}_{trade_date}.parquet"
@@ -592,12 +600,13 @@ class ChipProxyFetcher:
                             "today_short": today_short,
                             "prev_short": prev_short,
                             "margin_limit": margin_limit,
+                            "short_cover_buy": short_cover_buy,
                         }]).to_parquet(t_cache, index=False)
                     except Exception:
                         pass
 
             self._margin_date_cache[trade_date] = date_map
-            return date_map.get(ticker, (None, None, None, None, None))
+            return date_map.get(ticker, (None, None, None, None, None, None))
 
         except Exception as e:
             logger.warning(
@@ -606,7 +615,7 @@ class ChipProxyFetcher:
             )
             flags.append(f"TWSE_MARGN_ERROR:{type(e).__name__}")
             self._margin_date_cache[trade_date] = {}
-            return (None, None, None, None, None)
+            return (None, None, None, None, None, None)
 
     def _fetch_margin_balance_change(
         self, ticker: str, trade_date: date, flags: list[str]
@@ -616,7 +625,7 @@ class ChipProxyFetcher:
         Returns change in shares (negative = decreasing), or None if unavailable.
         Both today and previous values come from a single openapi response row.
         """
-        today, prev, _, _, _ = self._fetch_margin_row_openapi(ticker, trade_date, flags)
+        today, prev, _, _, _, _ = self._fetch_margin_row_openapi(ticker, trade_date, flags)
         if today is None or prev is None:
             flags.append(f"TWSE_MARGIN_NO_PREV:{trade_date - timedelta(days=1)}")
             return None
@@ -632,7 +641,7 @@ class ChipProxyFetcher:
             short_balance_increased: True if today's 融券餘額 > yesterday's by > 20%.
             short_margin_ratio: 融券餘額 / 融資餘額 (0.0 if unavailable).
         """
-        today_margin, _, today_short, prev_short, _ = self._fetch_margin_row_openapi(
+        today_margin, _, today_short, prev_short, _, _ = self._fetch_margin_row_openapi(
             ticker, trade_date, flags
         )
         if today_short is None:
@@ -648,9 +657,23 @@ class ChipProxyFetcher:
 
         return short_increased, short_margin_ratio
 
+    def _fetch_short_cover_rate(
+        self, ticker: str, trade_date: date, flags: list[str]
+    ) -> float:
+        """融券回補率 = 融券買進 / 融券前日餘額 (Factor B).
+
+        Returns 0.0 if data unavailable or prev_short <= 100 (no meaningful short position).
+        """
+        _, _, _, prev_short, _, short_cover_buy = self._fetch_margin_row_openapi(
+            ticker, trade_date, flags
+        )
+        if prev_short is None or prev_short <= 100 or short_cover_buy is None or short_cover_buy < 0:
+            return 0.0
+        return short_cover_buy / prev_short
+
     def _fetch_institution_consecutive_days(
         self, ticker: str, trade_date: date, flags: list[str]
-    ) -> tuple[int, int, int, bool, int, int, float, float]:
+    ) -> tuple[int, int, int, bool, int, int, float, float, float, float]:
         """Count consecutive buy days + compute 20-day cumulative flow metrics.
 
         Returns:
@@ -726,6 +749,30 @@ class ChipProxyFetcher:
             elif avg20 <= 0 and avg5 > 0:
                 flow_accel = 2.0  # 從賣轉買，強勢反轉
 
+        # Factor A: W1/W2 外資趨勢加速比 (近10日 vs 遠10日外資累積)
+        foreign_trend_accel = 0.0
+        if n >= 10:
+            w1 = sum(foreign_vals[:10])
+            w2 = sum(foreign_vals[10:n]) if n > 10 else 0
+            if w2 > 0:
+                foreign_trend_accel = w1 / w2
+            elif w2 <= 0 and w1 > 0:
+                foreign_trend_accel = 2.0
+
+        # Factor D: 近3日/10日法人加速比 (short window)
+        inst_accel_3d_10d = 0.0
+        if n >= 3:
+            combined_all = [
+                foreign_vals[i] + (trust_vals[i] if i < len(trust_vals) else 0)
+                for i in range(n)
+            ]
+            avg3 = sum(combined_all[:3]) / 3
+            avg10 = sum(combined_all[:min(10, n)]) / min(10, n)
+            if avg10 > 0:
+                inst_accel_3d_10d = avg3 / avg10
+            elif avg10 <= 0 and avg3 > 0:
+                inst_accel_3d_10d = 2.0
+
         return (
             _count_consec(foreign_vals),
             _count_consec(trust_vals),
@@ -735,6 +782,8 @@ class ChipProxyFetcher:
             cumul_trust,
             buy_days_ratio,
             flow_accel,
+            foreign_trend_accel,
+            inst_accel_3d_10d,
         )
 
     def _fetch_foreign_consecutive_days(
@@ -873,7 +922,7 @@ class ChipProxyFetcher:
             except Exception:
                 pass
 
-        today, _, _, _, limit = self._fetch_margin_row_openapi(ticker, trade_date, flags)
+        today, _, _, _, limit, _ = self._fetch_margin_row_openapi(ticker, trade_date, flags)
         if today is None or limit is None or limit <= 0:
             return None
         ratio = today / limit
@@ -978,14 +1027,15 @@ class ChipProxyFetcher:
 
     def _fetch_tdcc_ownership(
         self, ticker: str, trade_date: date
-    ) -> tuple[float | None, float | None, float | None, int | None]:
+    ) -> tuple[float | None, float | None, float | None, int | None, float | None]:
         """Fetch 集保股權分散表 via FinMind TaiwanStockShareholding (weekly data).
 
-        Returns (large_chg_pct, retail_chg_pct, super_large_chg_pct, super_large_count_chg):
-          - large_chg_pct: 400張+ 持股比例週變化
+        Returns (large_chg_pct, retail_chg_pct, super_large_chg_pct, super_large_count_chg, large_2w_trend):
+          - large_chg_pct: 400張+ 持股比例週變化 (this vs last week)
           - retail_chg_pct: 100張以下持股比例週變化
           - super_large_chg_pct: 千張+ 持股比例週變化（正 = 大戶加碼）
           - super_large_count_chg: 千張+ 大戶人數週變化（正 = 新機構進場）
+          - large_2w_trend: 400張+ 兩週趨勢 (this vs 2 weeks ago); None if unavailable
           All None if FINMIND_API_KEY missing or request fails.
 
         大戶定義: ≥ 400,000 shares (400張)
@@ -995,7 +1045,7 @@ class ChipProxyFetcher:
         import os as _os
         api_key = _os.environ.get("FINMIND_API_KEY", "")
         if not api_key:
-            return None, None
+            return None, None, None, None, None
 
         # 取本週和上週的 ISO week key
         iso_week = trade_date.isocalendar()
@@ -1057,19 +1107,31 @@ class ChipProxyFetcher:
                 self._tdcc_week_cache[week_key] = {}
                 return {}
 
+        two_weeks_date = trade_date - timedelta(weeks=2)
+        two_weeks_iso = two_weeks_date.isocalendar()
+        two_weeks_key = f"{two_weeks_iso.year}-{two_weeks_iso.week:02d}"
+
         this_data = _fetch_week(this_week_key, trade_date)
         prev_data = _fetch_week(prev_week_key, prev_date)
+        two_weeks_data = _fetch_week(two_weeks_key, two_weeks_date)
 
         this_entry = (this_data or {}).get(ticker)
         prev_entry = (prev_data or {}).get(ticker)
         if not this_entry or not prev_entry:
-            return None, None, None, None
+            return None, None, None, None, None
 
         large_chg = this_entry[0] - prev_entry[0]
         retail_chg = this_entry[1] - prev_entry[1]
         super_pct_chg = this_entry[2] - prev_entry[2]
         super_count_chg = this_entry[3] - prev_entry[3]
-        return large_chg, retail_chg, super_pct_chg, super_count_chg
+
+        # Factor C: 兩週大戶持股趨勢 (this week vs 2 weeks ago)
+        two_weeks_entry = (two_weeks_data or {}).get(ticker)
+        large_2w_trend: float | None = None
+        if this_entry and two_weeks_entry:
+            large_2w_trend = this_entry[0] - two_weeks_entry[0]
+
+        return large_chg, retail_chg, super_pct_chg, super_count_chg, large_2w_trend
 
     @staticmethod
     def _tdcc_is_super_large(row: dict) -> bool:
@@ -1103,3 +1165,79 @@ class ChipProxyFetcher:
             return upper <= 100_000
         except Exception:
             return False
+
+    def fetch_taifex_context(self, trade_date: date) -> dict:
+        """台指期外資淨口數 — 市場層級過濾因子 (Factor E).
+
+        Returns dict:
+            'futures_bearish': True if foreign net futures position is net short
+            'foreign_net_long': int — today's net long OI (or 0 if unavailable)
+
+        Data source: TAIFEX opendata 外資期貨未平倉量
+        Cache: 24h TTL per trade_date parquet file
+        """
+        cache_file = self._cache_dir / f"taifex_oi_{trade_date}.parquet"
+        if cache_file.exists():
+            try:
+                df = pd.read_parquet(cache_file)
+                if not df.empty and "futures_bearish" in df.columns:
+                    return {
+                        "futures_bearish": bool(df["futures_bearish"].iloc[0]),
+                        "foreign_net_long": int(df["foreign_net_long"].iloc[0]) if "foreign_net_long" in df.columns else 0,
+                    }
+            except Exception:
+                pass
+
+        try:
+            resp = requests.get(
+                "https://opendata.taifex.com.tw/v1/DailyForeignInstitutionalInvestorsTradingVolume",
+                timeout=10,
+                verify=False,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            net_long = 0
+            if isinstance(data, list):
+                for row in data:
+                    contract = str(
+                        row.get("ContractCode") or row.get("contract") or
+                        row.get("期貨") or row.get("商品代號") or ""
+                    )
+                    category = str(
+                        row.get("InstitutionCategory") or row.get("身份別") or
+                        row.get("Identity") or ""
+                    )
+                    if "TX" not in contract:
+                        continue
+                    if "外資" not in category and "foreign" not in category.lower():
+                        continue
+                    # Try net OI field first
+                    for net_key in ("NetOI", "net_oi", "淨口數", "ForeignNetOI"):
+                        if net_key in row:
+                            try:
+                                net_long = int(str(row[net_key]).replace(",", ""))
+                                break
+                            except (ValueError, TypeError):
+                                pass
+                    # Fallback: long - short
+                    if net_long == 0:
+                        try:
+                            l_val = int(str(row.get("LongOI", row.get("買方餘額口數", 0)) or 0).replace(",", ""))
+                            s_val = int(str(row.get("ShortOI", row.get("賣方餘額口數", 0)) or 0).replace(",", ""))
+                            net_long = l_val - s_val
+                        except (ValueError, TypeError):
+                            pass
+                    break  # use first matching TX row
+
+            futures_bearish = net_long < 0
+            result = {"futures_bearish": futures_bearish, "foreign_net_long": net_long}
+            try:
+                pd.DataFrame([result]).to_parquet(cache_file, index=False)
+            except Exception:
+                pass
+            return result
+
+        except Exception as e:
+            logger.debug("TAIFEX context fetch failed %s: %s", trade_date, e)
+            return {"futures_bearish": False, "foreign_net_long": 0}

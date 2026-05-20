@@ -630,6 +630,76 @@ class SurgeRadar:
             return "SURGE_GAMMA"
         return None
 
+    def _score_foreign_trend(
+        self, proxy: TWSEChipProxy | None
+    ) -> tuple[int, list[str]]:
+        """Factor A: 外資W1/W2趨勢加速比 (0 to +4)."""
+        if proxy is None or not proxy.is_available:
+            return 0, []
+        accel = proxy.foreign_trend_accel
+        if accel <= 0:
+            return 0, []
+        if accel >= 2.0:
+            return 4, [f"FOREIGN_ACCEL:{accel:.1f}x"]
+        if accel >= 1.3:
+            return 2, [f"FOREIGN_ACCEL_MILD:{accel:.1f}x"]
+        return 0, []
+
+    def _score_short_cover(
+        self, proxy: TWSEChipProxy | None
+    ) -> tuple[int, list[str]]:
+        """Factor B: 融券回補率 (空頭投降訊號) (0 to +4)."""
+        if proxy is None or not proxy.is_available:
+            return 0, []
+        rate = proxy.short_cover_rate
+        if rate > 0.20:
+            return 4, [f"SHORT_CAPITULATION:{rate:.0%}"]
+        if rate > 0.10:
+            return 2, [f"SHORT_COVER:{rate:.0%}"]
+        return 0, []
+
+    def _score_large_2w_trend(
+        self, proxy: TWSEChipProxy | None
+    ) -> tuple[int, list[str]]:
+        """Factor C: 400張+大戶兩週持股趨勢 (0 to +5)."""
+        if proxy is None or not proxy.is_available:
+            return 0, []
+        trend = proxy.large_holder_2w_trend
+        if trend is None:
+            return 0, []
+        if trend > 1.5:
+            return 5, [f"HOLDER_2W_UPTREND:{trend:+.2f}%"]
+        if trend > 0.5:
+            return 3, [f"HOLDER_2W_UP:{trend:+.2f}%"]
+        if trend > 0:
+            return 1, []
+        return 0, []
+
+    def _score_inst_accel_short(
+        self, proxy: TWSEChipProxy | None
+    ) -> tuple[int, list[str]]:
+        """Factor D: 法人短窗加速 3d/10d (0 to +4)."""
+        if proxy is None or not proxy.is_available:
+            return 0, []
+        accel = proxy.inst_accel_3d_10d
+        if accel <= 0:
+            return 0, []
+        if accel >= 2.0:
+            return 4, [f"INST_SURGE:{accel:.1f}x"]
+        if accel >= 1.3:
+            return 2, [f"INST_ACCEL_SHORT:{accel:.1f}x"]
+        return 0, []
+
+    def _score_taifex_context(
+        self, heat_context: dict | None
+    ) -> tuple[int, list[str]]:
+        """Factor E: 台指期外資淨多單 — 期貨空頭壓力懲罰 (-5 to 0)."""
+        if not heat_context:
+            return 0, []
+        if heat_context.get("taifex_bearish") or heat_context.get("futures_bearish"):
+            return -5, ["TAIFEX_FUTURES_BEARISH"]
+        return 0, []
+
     def _score_market_heat(self, ctx: dict | None) -> tuple[int, list[str]]:
         """Bonus from overnight market heat snapshot (industry 5d trend + concepts + intl).
 
@@ -714,6 +784,11 @@ class SurgeRadar:
             ("ma5_walk", self._score_ma5_walk(ohlcv, history)),
             ("bb_upper_walk", self._score_bb_upper_walk(history, consec)),
             ("market_heat", self._score_market_heat(heat_context)),
+            ("foreign_trend", self._score_foreign_trend(proxy)),
+            ("short_cover", self._score_short_cover(proxy)),
+            ("large_2w_trend", self._score_large_2w_trend(proxy)),
+            ("inst_accel_short", self._score_inst_accel_short(proxy)),
+            ("taifex_context", self._score_taifex_context(heat_context)),
         ]
 
         for name, (pts, flags) in factors:
