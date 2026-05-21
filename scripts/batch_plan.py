@@ -1500,24 +1500,6 @@ def _generate_plan_html(
     hs = heat_summary or {}
     ticker_concepts: dict[str, list[tuple[str, bool]]] = hs.get("ticker_concepts", {})
 
-    # Build industry → concept tags from rotation_map edges (industry→concept only)
-    import math as _math
-    _rm_path = _ROOT_PATH / "config" / "rotation_map.json"
-    _industry_to_concepts: dict[str, list[tuple[str, bool]]] = {}
-    if _rm_path.exists():
-        with open(_rm_path, encoding="utf-8") as _f:
-            _rm = _json.load(_f)
-        _rm_nodes = _rm.get("nodes", {})
-        _hot_concept_keys = {c["key"] for c in hs.get("hot_concepts", [])}
-        for _e in _rm.get("edges", []):
-            _src, _tgt = _e["from"], _e["to"]
-            if _src not in _rm_nodes or _tgt not in _rm_nodes:
-                continue
-            if _rm_nodes[_src]["type"] == "industry" and _rm_nodes[_tgt]["type"] == "concept":
-                _label = _rm_nodes[_tgt]["label"]
-                _is_hot = _tgt in _hot_concept_keys
-                _industry_to_concepts.setdefault(_src, []).append((_label, _is_hot))
-
     cards: list[str] = []
     for i, r in enumerate(filtered):
         ticker = r["ticker"]
@@ -1567,14 +1549,8 @@ def _generate_plan_html(
         upside_s = f"+{upside_pct:.1f}%" if upside_pct > 0 else "--"
         conf_cls = "pos" if action == "LONG" else "conf-watch"
 
-        # Merge direct basket membership + industry-inferred concepts
-        _raw_industry = industry_map.get(ticker, "")
+        # Direct concept basket membership only (from concepts.json curated tickers)
         ctags: list[tuple[str, bool]] = list(ticker_concepts.get(ticker, []))
-        _existing = {name for name, _ in ctags}
-        for _cname, _chot in _industry_to_concepts.get(_raw_industry, []):
-            if _cname not in _existing:
-                ctags.append((_cname, _chot))
-                _existing.add(_cname)
         # hot concepts first, then cold; cap at 6 total
         ctags_sorted = sorted(ctags, key=lambda x: (not x[1], x[0]))[:6]
         concept_html = (
