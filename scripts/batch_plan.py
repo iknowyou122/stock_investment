@@ -1498,7 +1498,25 @@ def _generate_plan_html(
         return conclusion
 
     hs = heat_summary or {}
-    ticker_concepts: dict[str, list[str]] = hs.get("ticker_concepts", {})
+    ticker_concepts: dict[str, list[tuple[str, bool]]] = hs.get("ticker_concepts", {})
+
+    # Build industry → concept tags from rotation_map edges (industry→concept only)
+    import math as _math
+    _rm_path = _ROOT_PATH / "config" / "rotation_map.json"
+    _industry_to_concepts: dict[str, list[tuple[str, bool]]] = {}
+    if _rm_path.exists():
+        with open(_rm_path, encoding="utf-8") as _f:
+            _rm = _json.load(_f)
+        _rm_nodes = _rm.get("nodes", {})
+        _hot_concept_keys = {c["key"] for c in hs.get("hot_concepts", [])}
+        for _e in _rm.get("edges", []):
+            _src, _tgt = _e["from"], _e["to"]
+            if _src not in _rm_nodes or _tgt not in _rm_nodes:
+                continue
+            if _rm_nodes[_src]["type"] == "industry" and _rm_nodes[_tgt]["type"] == "concept":
+                _label = _rm_nodes[_tgt]["label"]
+                _is_hot = _tgt in _hot_concept_keys
+                _industry_to_concepts.setdefault(_src, []).append((_label, _is_hot))
 
     cards: list[str] = []
     for i, r in enumerate(filtered):
@@ -1549,14 +1567,21 @@ def _generate_plan_html(
         upside_s = f"+{upside_pct:.1f}%" if upside_pct > 0 else "--"
         conf_cls = "pos" if action == "LONG" else "conf-watch"
 
-        ctags = ticker_concepts.get(ticker, [])
+        # Merge direct basket membership + industry-inferred concepts
+        _raw_industry = industry_map.get(ticker, "")
+        ctags: list[tuple[str, bool]] = list(ticker_concepts.get(ticker, []))
+        _existing = {name for name, _ in ctags}
+        for _cname, _chot in _industry_to_concepts.get(_raw_industry, []):
+            if _cname not in _existing:
+                ctags.append((_cname, _chot))
+                _existing.add(_cname)
         # hot concepts first, then cold; cap at 6 total
         ctags_sorted = sorted(ctags, key=lambda x: (not x[1], x[0]))[:6]
         concept_html = (
             '<div class="ctag-row">' +
             "".join(
-                f'<span class="ctag {"ctag-hot" if hot else "ctag-cold"}">{_esc(name)}</span>'
-                for name, hot in ctags_sorted
+                f'<span class="ctag {"ctag-hot" if h else "ctag-cold"}">{_esc(n)}</span>'
+                for n, h in ctags_sorted
             ) +
             "</div>"
         ) if ctags_sorted else ""
@@ -1617,7 +1642,10 @@ def _generate_plan_html(
         radar_rows.append(f'<div class="radar-row"><span class="radar-label">🔻 降溫中</span>{badges}</div>')
     if hot_concepts:
         def _fmt_concept(c: dict) -> str:
+            import math as _math
             ret = c.get("ret_5d_pct", 0)
+            if ret is None or (isinstance(ret, float) and _math.isnan(ret)):
+                return _esc(c["name_zh"])
             sign = "+" if ret >= 0 else ""
             return f'{_esc(c["name_zh"])} {sign}{ret:.1f}%'
         badges = "".join(_heat_badge(_fmt_concept(c), "hb-concept") for c in hot_concepts)

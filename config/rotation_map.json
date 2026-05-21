@@ -35,16 +35,16 @@
     "水泥工業":       {"type": "industry", "label": "水泥工業"},
     "文化創意業":     {"type": "industry", "label": "文化創意業"},
     "其他業":         {"type": "industry", "label": "其他業"},
-    "AI_GPU_supply":             {"type": "concept", "label": "AI GPU供應鏈"},
-    "CoWoS_advanced_packaging":  {"type": "concept", "label": "CoWoS封裝"},
-    "CPO_silicon_photonics":     {"type": "concept", "label": "CPO矽光子"},
-    "HBM_memory":                {"type": "concept", "label": "HBM記憶體"},
-    "AI_server_cooling":         {"type": "concept", "label": "AI散熱模組"},
-    "robotics_automation":       {"type": "concept", "label": "機器人/自動化"},
+    "AI_GPU_supply":             {"type": "concept", "label": "AI GPU 供應鏈"},
+    "CoWoS_advanced_packaging":  {"type": "concept", "label": "CoWoS 先進封裝"},
+    "CPO_silicon_photonics":     {"type": "concept", "label": "CPO / 矽光子"},
+    "HBM_memory":                {"type": "concept", "label": "HBM 高頻寬記憶體"},
+    "AI_server_cooling":         {"type": "concept", "label": "AI 伺服器散熱"},
+    "robotics_automation":       {"type": "concept", "label": "機器人/工業自動化"},
     "low_orbit_satellite":       {"type": "concept", "label": "低軌衛星"},
     "heavy_electric":            {"type": "concept", "label": "重電/電網"},
-    "auto_electronics":          {"type": "concept", "label": "車電/充電"},
-    "PCB_substrate":             {"type": "concept", "label": "PCB/載板"}
+    "auto_electronics":          {"type": "concept", "label": "車用電子"},
+    "PCB_substrate":             {"type": "concept", "label": "PCB / 載板"}
   },
   "edges": [
     {"from": "半導體業",            "to": "CoWoS_advanced_packaging", "lag_weeks": 1, "conf": 0.82, "note": "先進封裝訂單隨晶片需求遞延"},
@@ -109,6 +109,12 @@
     {"from": "文化創意業",           "to": "觀光餐旅",                  "lag_weeks": 2, "conf": 0.55, "note": "文創IP帶動觀光"},
     {"from": "金融保險業",           "to": "建材營造業",               "lag_weeks": 2, "conf": 0.60, "note": "放款寬鬆帶動建設"},
     {"from": "PCB_substrate",        "to": "CoWoS_advanced_packaging", "lag_weeks": 1, "conf": 0.72, "note": "載板確認封裝需求"},
-    {"from": "PCB_substrate",        "to": "電子零組件業",              "lag_weeks": 1, "conf": 0.65, "note": "電路板配套被動元件"}
+    {"from": "PCB_substrate",        "to": "電子零組件業",              "lag_weeks": 1, "conf": 0.65, "note": "電路板配套被動元件"},
+    {"from": "電器電纜",             "to": "heavy_electric",           "lag_weeks": 1, "conf": 0.80, "note": "電纜即重電/電網基礎材料"},
+    {"from": "數位雲端",             "to": "AI_GPU_supply",            "lag_weeks": 2, "conf": 0.65, "note": "雲端業者採購AI GPU"},
+    {"from": "其他電子業",           "to": "PCB_substrate",            "lag_weeks": 1, "conf": 0.60, "note": "電子零件→PCB配套"},
+    {"from": "電腦及週邊設備業",     "to": "AI_GPU_supply",            "lag_weeks": 1, "conf": 0.65, "note": "AI伺服器/工作站製造"},
+    {"from": "資訊服務業",           "to": "AI_GPU_supply",            "lag_weeks": 2, "conf": 0.58, "note": "AI軟體拉動GPU需求"},
+    {"from": "橡膠工業",             "to": "auto_electronics",         "lag_weeks": 1, "conf": 0.55, "note": "輪胎/橡膠→EV車用電子"}
   ]
 }
