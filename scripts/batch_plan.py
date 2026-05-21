@@ -1240,7 +1240,8 @@ def _load_heat_summary() -> dict:
             result["market_state"] = hd.get("market_state", "")
 
         concept_files = sorted(_HEAT_DIR.glob("concept_heat_*.json"))
-        ticker_concepts: dict[str, list[str]] = {}
+        # ticker → list of (name_zh, is_hot) tuples — ALL concepts, not just hot
+        ticker_concepts: dict[str, list[tuple[str, bool]]] = {}
         if concept_files:
             with open(concept_files[-1], encoding="utf-8") as f:
                 cd = _json.load(f)
@@ -1258,13 +1259,17 @@ def _load_heat_summary() -> dict:
             if concepts_path.exists():
                 with open(concepts_path, encoding="utf-8") as f:
                     cdefs_raw = _json.load(f)
-                # concepts.json may be {"concepts": {...}} or flat {key: {...}}
                 cdefs = cdefs_raw.get("concepts", cdefs_raw)
-                hot_map = {c["key"]: c["name_zh"] for c in hot}
+                hot_keys = {c["key"] for c in hot}
+                # Build full name map from snapshot (has name_zh) + fallback to cdefs
+                snap_name: dict[str, str] = {
+                    k: v.get("name_zh", k) for k, v in concepts.items()
+                }
                 for ck, cdef in cdefs.items():
-                    if ck in hot_map:
-                        for t in cdef.get("tickers", []):
-                            ticker_concepts.setdefault(t, []).append(hot_map[ck])
+                    name_zh = snap_name.get(ck, cdef.get("name_zh", ck))
+                    is_hot = ck in hot_keys
+                    for t in cdef.get("tickers", []):
+                        ticker_concepts.setdefault(t, []).append((name_zh, is_hot))
 
         result["ticker_concepts"] = ticker_concepts
 
@@ -1545,11 +1550,16 @@ def _generate_plan_html(
         conf_cls = "pos" if action == "LONG" else "conf-watch"
 
         ctags = ticker_concepts.get(ticker, [])
+        # hot concepts first, then cold; cap at 6 total
+        ctags_sorted = sorted(ctags, key=lambda x: (not x[1], x[0]))[:6]
         concept_html = (
             '<div class="ctag-row">' +
-            "".join(f'<span class="ctag">{_esc(c)}</span>' for c in ctags[:3]) +
+            "".join(
+                f'<span class="ctag {"ctag-hot" if hot else "ctag-cold"}">{_esc(name)}</span>'
+                for name, hot in ctags_sorted
+            ) +
             "</div>"
-        ) if ctags else ""
+        ) if ctags_sorted else ""
 
         cards.append(f"""
     <div class="card" style="animation-delay:{delay}s">
@@ -1668,8 +1678,9 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .g-beta{{background:rgba(88,166,255,.15);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}}
 .g-accum{{background:rgba(210,153,34,.15);color:#e3a008;border:1px solid rgba(210,153,34,.3)}}
 .ctag-row{{padding:6px 16px;border-bottom:1px solid #21262d;display:flex;gap:5px;flex-wrap:wrap}}
-.ctag{{font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;
-  background:rgba(163,113,247,.12);color:#a78bfa;border:1px solid rgba(163,113,247,.2)}}
+.ctag{{font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px}}
+.ctag-hot{{background:rgba(163,113,247,.18);color:#c084fc;border:1px solid rgba(163,113,247,.4)}}
+.ctag-cold{{background:rgba(139,148,158,.08);color:#6e7681;border:1px solid rgba(139,148,158,.18)}}
 .metrics{{display:flex;border-bottom:1px solid #21262d}}
 .m{{flex:1;padding:10px 6px;text-align:center;border-right:1px solid #21262d}}
 .m:last-child{{border-right:none}}
