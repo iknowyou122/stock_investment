@@ -1199,7 +1199,8 @@ def run_batch(
     _generate_plan_html(results, str(analysis_date), html_path,
                         name_map=name_map or {}, industry_map=industry_map or {},
                         market_map=market_map or {},
-                        heat_summary=_load_heat_summary())
+                        heat_summary=_load_heat_summary(),
+                        llm_provider=llm_provider)
     _console.print(f"  [dim cyan]📄 HTML: file://{html_path.resolve()}[/dim cyan]")
     import subprocess, sys as _sys
     if _sys.platform == "darwin":
@@ -1212,6 +1213,7 @@ _WATCH_FLAGS_CONSOLIDATING = frozenset(["TREND_CONT", "CHIP_LOADING", "NO_CATALY
 
 _ROOT_PATH = Path(__file__).resolve().parents[1]
 _HEAT_DIR = _ROOT_PATH / "data" / "market_heat"
+_CONCEPT_CACHE_PATH = _ROOT_PATH / "data" / "_concept_classify_cache.json"
 
 
 def _load_heat_summary() -> dict:
@@ -1398,6 +1400,67 @@ def _fetch_plan_chart(ticker: str, market: str) -> dict:
         return empty
 
 
+def _classify_concepts_llm(
+    tickers_info: list[tuple[str, str, str]],
+    llm_provider,
+) -> dict[str, list[str]]:
+    """Classify tickers into concept basket keys using LLM.
+    Returns ticker → [concept_key]. Cached per-ticker (permanent — products rarely change).
+    """
+    import json as _json
+    cached: dict[str, list[str]] = {}
+    if _CONCEPT_CACHE_PATH.exists():
+        try:
+            with open(_CONCEPT_CACHE_PATH, encoding="utf-8") as f:
+                cached = _json.load(f).get("classifications", {})
+        except Exception:
+            pass
+
+    uncached = [(t, n, ind) for t, n, ind in tickers_info if t not in cached]
+    if uncached and llm_provider is not None:
+        try:
+            concept_desc = (
+                "AI_GPU_supply: NVIDIA/AMD GPU製造供應鏈、AI推論晶片、高效能運算\n"
+                "CoWoS_advanced_packaging: 台積電CoWoS先進封裝、ABF載板、矽中介層\n"
+                "CPO_silicon_photonics: 共封裝光學CPO、矽光子元件、光收發模組\n"
+                "HBM_memory: 高頻寬記憶體HBM、DRAM設計製造\n"
+                "AI_server_cooling: AI伺服器散熱（液冷/均溫板/熱管/散熱風扇/3D VC）\n"
+                "robotics_automation: 工業機器人、協作機器人、精密機械、伺服馬達控制\n"
+                "low_orbit_satellite: 低軌衛星LEO、Starlink供應鏈、衛星通訊設備\n"
+                "heavy_electric: 重電設備（高壓變壓器/配電盤/電力電纜）、電網升級\n"
+                "auto_electronics: 車用電子（ADAS/充電樁/OBC/車載半導體/電池管理）\n"
+                "PCB_substrate: 高階PCB、ABF載板、IC基板、銅箔基板"
+            )
+            lines = "\n".join(f"{t} {n}（{ind}）" for t, n, ind in uncached)
+            prompt = (
+                f"你是台灣股市專家。根據以下概念股分類，判斷每家台灣上市公司屬於哪些概念。\n\n"
+                f"概念分類（key: 說明）：\n{concept_desc}\n\n"
+                f"公司列表（代號 名稱 產業別）：\n{lines}\n\n"
+                f"規則：只標記主要業務確實直接相關的概念，不確定或邊緣相關請給空陣列[]。\n"
+                f"只回傳純JSON，格式：{{\"代號\": [\"concept_key\", ...]}}\n"
+                f"範例：{{\"2330\": [\"AI_GPU_supply\", \"CoWoS_advanced_packaging\"], \"1234\": []}}"
+            )
+            import re as _re
+            raw = llm_provider.complete(prompt, max_tokens=1500)
+            m = _re.search(r'\{[\s\S]*\}', raw)
+            if m:
+                result = __import__('json').loads(m.group())
+                for ticker, keys in result.items():
+                    if isinstance(keys, list):
+                        cached[ticker] = [k for k in keys if isinstance(k, str)]
+        except Exception:
+            pass
+
+    try:
+        _CONCEPT_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_CONCEPT_CACHE_PATH, "w", encoding="utf-8") as f:
+            __import__('json').dump({"classifications": cached}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+    return cached
+
+
 def _generate_plan_html(
     results: list[dict],
     scan_date: str,
@@ -1406,6 +1469,7 @@ def _generate_plan_html(
     industry_map: dict[str, str],
     market_map: dict[str, str],
     heat_summary: dict | None = None,
+    llm_provider=None,
 ) -> None:
     """Dark-themed HTML report for plan scan results (LONG + actionable WATCH only)."""
     import json as _json
@@ -1499,6 +1563,32 @@ def _generate_plan_html(
 
     hs = heat_summary or {}
     ticker_concepts: dict[str, list[tuple[str, bool]]] = hs.get("ticker_concepts", {})
+
+    # Build concept_key → (name_zh, is_hot) lookup
+    _concept_meta: dict[str, tuple[str, bool]] = {}
+    _hot_keys = {c["key"] for c in hs.get("hot_concepts", [])}
+    _cdefs_path = _ROOT_PATH / "config" / "concepts.json"
+    if _cdefs_path.exists():
+        with open(_cdefs_path, encoding="utf-8") as _cf:
+            _cd_raw = _json.load(_cf)
+        for _ck, _cv in _cd_raw.get("concepts", _cd_raw).items():
+            _concept_meta[_ck] = (_cv.get("name_zh", _ck), _ck in _hot_keys)
+
+    # LLM concept classification — enrich ticker_concepts for all filtered tickers
+    if llm_provider is not None and _concept_meta:
+        _tinfo = [(r["ticker"], name_map.get(r["ticker"], r["ticker"]), industry_map.get(r["ticker"], "")) for r in filtered]
+        _llm_cache = _classify_concepts_llm(_tinfo, llm_provider)
+        for _t, _keys in _llm_cache.items():
+            _existing = {name for name, _ in ticker_concepts.get(_t, [])}
+            _extras: list[tuple[str, bool]] = []
+            for _k in _keys:
+                if _k in _concept_meta:
+                    _nm, _ih = _concept_meta[_k]
+                    if _nm not in _existing:
+                        _extras.append((_nm, _ih))
+                        _existing.add(_nm)
+            if _extras:
+                ticker_concepts[_t] = list(ticker_concepts.get(_t, [])) + _extras
 
     cards: list[str] = []
     for i, r in enumerate(filtered):
