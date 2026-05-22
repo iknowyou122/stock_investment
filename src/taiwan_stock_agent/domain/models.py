@@ -102,6 +102,10 @@ class TWSEChipProxy(BaseModel):
     foreign_trend_accel: float = 0.0           # W1(近10日)/W2(遠10日) 外資流向加速比; >1=加速
     large_holder_2w_trend: float | None = None  # 400張+大戶持股比例兩週趨勢 (this - 2wks_ago)
     inst_accel_3d_10d: float = 0.0             # 近3日法人日均淨買/近10日日均; >1=短期加速
+    # 隱蔽吸籌因子 (Phase 4.32)
+    margin_decline_streak: int = 0             # 融資餘額連跌天數（讀歷史 parquet 快取）
+    holder_count_chg_weekly: int | None = None  # 總股東人數週變化（負=人頭減少=籌碼集中）
+    holder_count_decline_weeks: int = 0        # 股東人數連續下降週數
     is_available: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
 

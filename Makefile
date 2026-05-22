@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune surge-backtest heat-scan heat-update tight-base-bt tight-base-v2 rotation
+.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune surge-backtest heat-scan heat-update tight-base-bt tight-base-v2 rotation analyze
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -13,6 +13,18 @@ _HEAT_TODAY := data/market_heat/heat_$(_TODAY).json
 # ── 安裝依賴 ─────────────────────────────────────────────────────────────────
 install:
 	$(PYTHON) -m pip install -e ".[llm-gemini,llm-openai]"
+
+# ── 單股深度分析 ─────────────────────────────────────────────────────────────
+# 用法: make analyze TICKER=2330
+#       make analyze TICKER=2454 LLM=gemini
+#       make analyze TICKER=2330 DATE=2026-05-20
+TICKER ?=
+analyze:
+	@test -n "$(TICKER)" || { echo "請指定股票代號：make analyze TICKER=2330"; exit 1; }
+	$(PYTHON) scripts/analyze.py $(TICKER) \
+		$(if $(DATE),--date $(DATE)) \
+		$(if $(LLM),--llm $(LLM)) \
+		$(if $(filter 1,$(NO_LLM)),--no-llm)
 
 # ── 盤後擬定計畫 (Plan) ──────────────────────────────────────────────────────
 # 掃描 + 存 CSV + 寫 DB（factor-report 用）

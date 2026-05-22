@@ -71,6 +71,48 @@ you will create drift that is expensive to fix.
 
 Do not implement Phase N+1 without the Phase N gate condition being met.
 
+## Makefile Commands
+
+All available `make` targets — do NOT cite commands not in this list.
+
+| Command | Script | Engine | Purpose |
+|---------|--------|--------|---------|
+| `make analyze TICKER=2330` | `analyze.py` | TCE | 單股深度分析 + 買賣建議 + 因子解釋 |
+| `make plan` | `batch_plan.py` | TCE | 主要每日掃描（Triple Confirmation Engine）|
+| `make show` | `daily_runner.py show` | — | 互動式查歷史結果 |
+| `make settle` | `daily_runner.py settle` | — | 週末結算（更新信號勝率）|
+| `make backtest` | `backtest.py` | TCE | 歷史回測 |
+| `make backtest-compare` | `backtest_v23_vs_v22.py` | TCE | v2.3 vs v2.2 比較 |
+| `make factor-report` | `factor_report.py` | TCE | 因子 Lift 分析 + Walk-forward |
+| `make optimize` | `optimize.py` | TCE | 一鍵因子優化迴路 |
+| `make label` | `plan_surge_label.py` | — | 標記 plan 信號結果 |
+| `make auto-tune` | `auto_tune.py` | — | 自動調參 |
+| `make test` | pytest | — | 執行所有單元測試 |
+| `make report` | `report.py` | — | 盤後復盤（非 TCE）|
+| `make flow` | plan + surge + report | Both | 全流程一鍵（plan → surge → report）|
+| `make bot` | `bot.py` | — | 啟動 Telegram Bot |
+| `make surge` | `surge_scan.py` | SurgeRadar | 爆量掃描（非 TCE）|
+| `make surge-live` | `surge_scan.py --intraday` | SurgeRadar | 盤中即時爆量掃描 |
+| `make surge-factor` | `surge_factor_report.py` | SurgeRadar | Surge 因子 Lift 報告 |
+| `make surge-tune` | `surge_factor_report.py --llm --apply` | SurgeRadar | Surge 因子 LLM 調參 |
+| `make surge-backtest` | `surge_backtest.py` | SurgeRadar | Surge 歷史回測 |
+| `make heat-scan` | `heat_scan.py` | — | 市場熱度掃描（產業+概念）|
+| `make heat-update` | `update_market_heat.py` | — | 每日熱度快照更新 |
+| `make rotation` | `rotation_tracker.py` | — | 板塊輪動追蹤 |
+| `make tight-base-bt` | `tight_base_backtest.py` | — | 緊縮底部回測 v1 |
+| `make tight-base-v2` | `tight_base_v2_backtest.py` | — | 緊縮底部回測 v2（熱度感知）|
+| `make chip-loading-bt` | `chip_loading_backtest.py` | — | 籌碼吸收回測 |
+| `make monitor` | `accuracy_monitor.py` | — | 信號準確率監控 |
+| `make db-dump` | pg_dump | — | 備份完整 DB |
+| `make db-restore` | pg_restore | — | 還原 DB |
+| `make db-dump-signals` | pg_dump | — | 僅備份 signals 表 |
+| `make db-init` | migrations | — | 初始化/執行 migration |
+| `make migrate` | alembic | — | 執行 DB migration |
+| `make api` | uvicorn | — | 啟動 FastAPI server |
+| `make setup` | pip install | — | 安裝依賴 |
+
+> `make daily` **不存在**。每日工作流程用 `make flow`（plan + surge + report）。
+
 ## gstack
 
 Use the `/browse` skill from gstack for all web browsing. Never use `mcp__claude-in-chrome__*` tools.

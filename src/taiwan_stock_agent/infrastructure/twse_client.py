@@ -88,8 +88,8 @@ class ChipProxyFetcher:
         self._t86_consecutive_failures: int = 0
         self._t86_circuit_open: bool = False
         # TDCC 集保股權分散表 — weekly, cache by ISO week string "YYYY-WW"
-        # {week_key: {ticker: (large_pct, retail_pct, super_pct, super_count)}}
-        self._tdcc_week_cache: dict[str, dict[str, tuple[float, float, float, int]]] = {}
+        # {week_key: {ticker: (large_pct, retail_pct, super_pct, super_count, total_holder_count)}}
+        self._tdcc_week_cache: dict[str, dict[str, tuple[float, float, float, int, int]]] = {}
         # 流通股數表 {ticker: shares (in shares, not lots)}; populated externally by caller
         self.shares_map: dict[str, int] = {}
 
@@ -124,8 +124,10 @@ class ChipProxyFetcher:
         sbl_ratio = self._fetch_sbl_data(ticker, trade_date, flags)
         margin_util = self._fetch_margin_utilization(ticker, trade_date, flags)
         daytrade_ratio = self._fetch_daytrade_data(ticker, trade_date, flags)
-        large_chg, retail_chg, super_pct_chg, super_count_chg, large_2w_trend = self._fetch_tdcc_ownership(ticker, trade_date)
+        (large_chg, retail_chg, super_pct_chg, super_count_chg, large_2w_trend,
+         holder_count_chg, holder_decline_weeks) = self._fetch_tdcc_ownership(ticker, trade_date)
         short_cover_rate = self._fetch_short_cover_rate(ticker, trade_date, flags)
+        margin_streak = self._fetch_margin_decline_streak(ticker, trade_date)
 
         # ── 派生欄位 ──────────────────────────────────────────────────────────
         fn = foreign_net or 0
@@ -180,6 +182,9 @@ class ChipProxyFetcher:
             foreign_trend_accel=foreign_trend_accel,
             large_holder_2w_trend=large_2w_trend,
             inst_accel_3d_10d=inst_accel_3d_10d,
+            margin_decline_streak=margin_streak,
+            holder_count_chg_weekly=holder_count_chg,
+            holder_count_decline_weeks=holder_decline_weeks,
             is_available=is_available,
             data_quality_flags=flags,
         )
@@ -631,6 +636,49 @@ class ChipProxyFetcher:
             return None
         return today - prev
 
+    def _fetch_margin_decline_streak(
+        self, ticker: str, trade_date: date
+    ) -> int:
+        """Count consecutive trading days with declining 融資餘額.
+
+        Reads local parquet cache for historical dates — no API calls for past dates.
+        Returns 0 if today's data is unavailable or margin did not decline.
+        """
+        streak = 0
+        check_date = trade_date
+        for _ in range(7):
+            while check_date.weekday() >= 5:
+                check_date -= timedelta(days=1)
+
+            if check_date == trade_date:
+                silent: list[str] = []
+                today_m, prev_m, *_ = self._fetch_margin_row_openapi(ticker, check_date, silent)
+            else:
+                cache_path = self._cache_dir / f"twse_margin_row_{ticker}_{check_date}.parquet"
+                if not cache_path.exists():
+                    break
+                try:
+                    df = pd.read_parquet(cache_path)
+                    if df.empty:
+                        break
+                    def _col(col: str) -> int | None:
+                        if col not in df.columns:
+                            return None
+                        val = df[col].iloc[0]
+                        return None if pd.isna(val) else int(val)
+                    today_m, prev_m = _col("today_margin"), _col("prev_margin")
+                except Exception:
+                    break
+
+            if today_m is None or prev_m is None:
+                break
+            if today_m < prev_m:
+                streak += 1
+                check_date -= timedelta(days=1)
+            else:
+                break
+        return streak
+
     def _fetch_short_data(
         self, ticker: str, trade_date: date, flags: list[str]
     ) -> tuple[bool, float]:
@@ -1027,16 +1075,19 @@ class ChipProxyFetcher:
 
     def _fetch_tdcc_ownership(
         self, ticker: str, trade_date: date
-    ) -> tuple[float | None, float | None, float | None, int | None, float | None]:
+    ) -> tuple[float | None, float | None, float | None, int | None, float | None, int | None, int]:
         """Fetch 集保股權分散表 via FinMind TaiwanStockShareholding (weekly data).
 
-        Returns (large_chg_pct, retail_chg_pct, super_large_chg_pct, super_large_count_chg, large_2w_trend):
+        Returns (large_chg_pct, retail_chg_pct, super_large_chg_pct, super_large_count_chg,
+                 large_2w_trend, holder_count_chg_weekly, holder_count_decline_weeks):
           - large_chg_pct: 400張+ 持股比例週變化 (this vs last week)
           - retail_chg_pct: 100張以下持股比例週變化
           - super_large_chg_pct: 千張+ 持股比例週變化（正 = 大戶加碼）
           - super_large_count_chg: 千張+ 大戶人數週變化（正 = 新機構進場）
           - large_2w_trend: 400張+ 兩週趨勢 (this vs 2 weeks ago); None if unavailable
-          All None if FINMIND_API_KEY missing or request fails.
+          - holder_count_chg_weekly: 總股東人數週變化（負 = 人頭減少 = 籌碼集中）; None if unavailable
+          - holder_count_decline_weeks: 連續下降週數（0/1/2）
+          All None/0 if FINMIND_API_KEY missing or request fails.
 
         大戶定義: ≥ 400,000 shares (400張)
         千張大戶: ≥ 1,000,000 shares (1000張，機構/主力等級)
@@ -1045,7 +1096,7 @@ class ChipProxyFetcher:
         import os as _os
         api_key = _os.environ.get("FINMIND_API_KEY", "")
         if not api_key:
-            return None, None, None, None, None
+            return None, None, None, None, None, None, 0
 
         # 取本週和上週的 ISO week key
         iso_week = trade_date.isocalendar()
@@ -1099,7 +1150,11 @@ class ChipProxyFetcher:
                     int(r.get("people", r.get("person_count", 0)) or 0)
                     for r in super_rows
                 )
-                result = {ticker: (large_pct, retail_pct, super_pct, super_count)}
+                total_holder_count = sum(
+                    int(r.get("people", r.get("person_count", 0)) or 0)
+                    for r in rows
+                )
+                result = {ticker: (large_pct, retail_pct, super_pct, super_count, total_holder_count)}
                 self._tdcc_week_cache[week_key] = result
                 return result
             except Exception as e:
@@ -1118,7 +1173,7 @@ class ChipProxyFetcher:
         this_entry = (this_data or {}).get(ticker)
         prev_entry = (prev_data or {}).get(ticker)
         if not this_entry or not prev_entry:
-            return None, None, None, None, None
+            return None, None, None, None, None, None, 0
 
         large_chg = this_entry[0] - prev_entry[0]
         retail_chg = this_entry[1] - prev_entry[1]
@@ -1131,7 +1186,21 @@ class ChipProxyFetcher:
         if this_entry and two_weeks_entry:
             large_2w_trend = this_entry[0] - two_weeks_entry[0]
 
-        return large_chg, retail_chg, super_pct_chg, super_count_chg, large_2w_trend
+        # 總股東人數週變化（負 = 籌碼集中）
+        this_total = this_entry[4] if len(this_entry) > 4 else 0
+        prev_total = prev_entry[4] if len(prev_entry) > 4 else 0
+        holder_count_chg: int | None = (this_total - prev_total) if (this_total > 0 and prev_total > 0) else None
+
+        # 連續下降週數（最多看 2 週）
+        holder_decline_weeks = 0
+        if holder_count_chg is not None and holder_count_chg < 0:
+            holder_decline_weeks = 1
+            two_weeks_total = two_weeks_entry[4] if (two_weeks_entry and len(two_weeks_entry) > 4) else 0
+            prev_chg = (prev_total - two_weeks_total) if two_weeks_total > 0 else 0
+            if prev_chg < 0:
+                holder_decline_weeks = 2
+
+        return large_chg, retail_chg, super_pct_chg, super_count_chg, large_2w_trend, holder_count_chg, holder_decline_weeks
 
     @staticmethod
     def _tdcc_is_super_large(row: dict) -> bool:

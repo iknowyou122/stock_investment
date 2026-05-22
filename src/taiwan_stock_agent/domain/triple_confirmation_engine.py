@@ -41,6 +41,12 @@ Score breakdown (max 100 pts before risk deductions):
     vol_asymmetry_pts:       0/2/4     — 上漲日均量 ÷ 下跌日均量 ≥1.2→2, ≥1.5→4
     dual_inst_flow_pts:      0/3/5     — 外資+投信雙向 20D 累積確認（兩者同為正值）
     chip_cleanliness_pts:    0/4/7/10  — 籌碼乾淨度 K-of-6（融資低/融資降/當沖低/借券低/大戶增/散戶減）
+    obv_stealth_pts:         0/3       — OBV 10d 斜率正 + 股價 10d 報酬 <2%（偷吸）
+    margin_persist_decline_pts: 0/2/4  — 融資連跌 ≥3d→2, ≥5d→4（浮額洗盤完成）
+    holder_count_declining_pts: 0/3/5  — 股東人數週減→3, 連減2週→5（HOLDER_SHRINK）
+    chip_concentration_accel_pts: 0/3/6 — 大戶持股加速集中（本週>上週 + 千張同向）
+    short_squeeze_setup_pts: 0/3/5    — 券資比>0.25+回補>8%→3; 券資比>0.40+回補>15%→5
+    stealth_accum_composite_pts: 0/6/10 — K-of-6 隱蔽吸籌複合（4/6→STEALTH_ACCUM; 5-6/6→PRIME）
 
   Pillar 3: Structure/Space (max 38 pts)
     breakout_20d_pts:     0/8    — close ≥ twenty_day_high × 0.99 (only when > 0) → +8
@@ -255,6 +261,13 @@ class _ScoreBreakdown:
     short_cover_pts: int = 0          # 0 to +4 — 融券回補率（空頭投降）
     large_2w_trend_pts: int = 0       # -3 to +5 — 400張+大戶兩週持股趨勢
     inst_accel_3d_pts: int = 0        # -2 to +4 — 法人短窗加速(3d/10d)
+    # --- 隱蔽吸籌因子 (Phase 4.32) ---
+    obv_stealth_pts: int = 0              # 0/3 — OBV 10d 斜率+ 且股價橫盤（偷吸信號）
+    margin_persist_decline_pts: int = 0   # 0/2/4 — 融資連跌天數（讀歷史快取）
+    holder_count_declining_pts: int = 0   # 0/3/5 — 總股東人數連週下降（TDCC，需付費）
+    chip_concentration_accel_pts: int = 0 # 0/3/6 — 大戶持股本週加速集中（CHIP_ACCEL/PRIME）
+    short_squeeze_setup_pts: int = 0      # 0/3/5 — 券資比高+空頭回補啟動（SHORT_SQUEEZE_SETUP）
+    stealth_accum_composite_pts: int = 0  # 0/6/10 — K-of-6 隱蔽吸籌複合（STEALTH_ACCUM/PRIME）
 
     # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 40) ---
     proximity_pts: int = 0            # 0/6/12 — close distance to 20d_high
@@ -336,6 +349,12 @@ class _ScoreBreakdown:
             + self.short_cover_pts
             + self.large_2w_trend_pts       # can be negative
             + self.inst_accel_3d_pts        # can be negative
+            + self.obv_stealth_pts
+            + self.margin_persist_decline_pts
+            + self.holder_count_declining_pts
+            + self.chip_concentration_accel_pts
+            + self.short_squeeze_setup_pts
+            + self.stealth_accum_composite_pts
             # Pillar 3
             + self.proximity_pts
             + self.bb_compression_pts
@@ -402,6 +421,12 @@ class _ScoreBreakdown:
             + self.short_cover_pts
             + self.large_2w_trend_pts
             + self.inst_accel_3d_pts
+            + self.obv_stealth_pts
+            + self.margin_persist_decline_pts
+            + self.holder_count_declining_pts
+            + self.chip_concentration_accel_pts
+            + self.short_squeeze_setup_pts
+            + self.stealth_accum_composite_pts
         )
 
     @property
@@ -813,6 +838,32 @@ class TripleConfirmationEngine:
             if ia_flag:
                 bd.flags.append(ia_flag)
 
+        # --- 隱蔽吸籌因子 (Phase 4.32) ---
+        obv_s_pts, obv_s_flag = self._obv_stealth_score(ohlcv, ohlcv_history)
+        bd.obv_stealth_pts = obv_s_pts
+        if obv_s_flag:
+            bd.flags.append(obv_s_flag)
+
+        if twse_proxy is not None:
+            bd.margin_persist_decline_pts = self._margin_persist_decline_score(twse_proxy)
+            if bd.margin_persist_decline_pts > 0:
+                bd.flags.append(f"MARGIN_PERSIST_DECLINE:{twse_proxy.margin_decline_streak}d")
+
+            hcd_pts, hcd_flag = self._holder_count_declining_score(twse_proxy)
+            bd.holder_count_declining_pts = hcd_pts
+            if hcd_flag:
+                bd.flags.append(hcd_flag)
+
+            cca_pts, cca_flag = self._chip_concentration_accel_score(twse_proxy)
+            bd.chip_concentration_accel_pts = cca_pts
+            if cca_flag:
+                bd.flags.append(cca_flag)
+
+            ssq_pts, ssq_flag = self._short_squeeze_setup_score(twse_proxy)
+            bd.short_squeeze_setup_pts = ssq_pts
+            if ssq_flag:
+                bd.flags.append(ssq_flag)
+
         # --- Pillar 3: Compression Structure ---
         bd.proximity_pts = self._proximity_score(ohlcv.close, volume_profile.twenty_day_high)
         if bd.proximity_pts == 12:
@@ -855,6 +906,12 @@ class TripleConfirmationEngine:
 
         # --- Pillar 4: Accumulation Detection ---
         self._accumulation_score(bd, ohlcv, ohlcv_history, volume_profile, twse_proxy)
+
+        # --- Stealth Composite (must run after all Pillars so bd fields are set) ---
+        sac_pts, sac_flag = self._stealth_accum_composite_score(bd, ohlcv, ohlcv_history, twse_proxy)
+        bd.stealth_accum_composite_pts = sac_pts
+        if sac_flag:
+            bd.flags.append(sac_flag)
 
         # --- Risk deductions ---
         self._apply_risk_deductions(
@@ -2884,6 +2941,184 @@ class TripleConfirmationEngine:
             return None, None
         return round(float(ml), 4), round(float(sl), 4)
 
+    # ------------------------------------------------------------------
+    # Phase 4.32: Stealth Accumulation scoring methods
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _obv_stealth_score(
+        ohlcv: DailyOHLCV, history: list[DailyOHLCV]
+    ) -> tuple[int, str | None]:
+        """OBV 10d 斜率正 AND 股價 10d 報酬 < 2% → 偷吸信號。
+
+        區別於 obv_accumulation_score（20d window + range）:
+        此因子用 10d 短窗口 + 看 return 方向（橫盤而非振幅）。
+        """
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        bars = (sorted_h[-10:] if len(sorted_h) >= 10 else sorted_h)
+        if len(bars) < 5:
+            return 0, None
+
+        obv = 0.0
+        obv_series = [0.0]
+        for i in range(1, len(bars)):
+            curr, prev = bars[i], bars[i - 1]
+            if curr.close > prev.close:
+                obv += curr.volume
+            elif curr.close < prev.close:
+                obv -= curr.volume
+            obv_series.append(obv)
+
+        if ohlcv.close > bars[-1].close:
+            obv += ohlcv.volume
+        elif ohlcv.close < bars[-1].close:
+            obv -= ohlcv.volume
+        obv_series.append(obv)
+
+        all_bars = bars + [ohlcv]
+        avg_vol = sum(b.volume for b in all_bars) / len(all_bars)
+        if avg_vol <= 0:
+            return 0, None
+
+        normalized_slope = (obv_series[-1] - obv_series[0]) / (len(obv_series) * avg_vol)
+        if normalized_slope <= 0.02:
+            return 0, None
+
+        # 10d price return（方向性橫盤：股價幾乎沒漲）
+        base_close = bars[0].close
+        if base_close <= 0:
+            return 0, None
+        price_return = (ohlcv.close - base_close) / base_close
+
+        if abs(price_return) < 0.02:
+            return 3, "OBV_STEALTH"
+        return 0, None
+
+    @staticmethod
+    def _margin_persist_decline_score(proxy: TWSEChipProxy) -> int:
+        """融資連跌天數加分。
+
+        streak ≥ 5 → +4 (融資洗盤完成)
+        streak ≥ 3 → +2 (持續洗盤中)
+        """
+        streak = proxy.margin_decline_streak
+        if streak >= 5:
+            return 4
+        if streak >= 3:
+            return 2
+        return 0
+
+    @staticmethod
+    def _holder_count_declining_score(proxy: TWSEChipProxy) -> tuple[int, str | None]:
+        """總股東人數連週下降 = 籌碼集中最純粹的訊號。
+
+        需付費 FinMind；無 API Key 則返回 0（不扣分）。
+        """
+        weeks = proxy.holder_count_decline_weeks
+        chg = proxy.holder_count_chg_weekly
+        if chg is None:
+            return 0, None
+        if weeks >= 2:
+            return 5, f"HOLDER_SHRINK:2w({chg:+d})"
+        if weeks >= 1:
+            return 3, f"HOLDER_SHRINK:1w({chg:+d})"
+        return 0, None
+
+    @staticmethod
+    def _chip_concentration_accel_score(proxy: TWSEChipProxy) -> tuple[int, str | None]:
+        """大戶持股本週加速集中：本週變化 > 上週變化（加速度）。
+
+        large_holder_2w_trend = this_week_pct - two_weeks_ago_pct
+        last_week_chg = large_holder_2w_trend - large_holder_chg_pct
+        acceleration = this_week > last_week AND this_week ≥ 0.5%
+        """
+        this_week = proxy.large_holder_chg_pct
+        trend_2w = proxy.large_holder_2w_trend
+        if this_week is None or trend_2w is None:
+            return 0, None
+        if this_week < 0.5:
+            return 0, None
+
+        last_week = trend_2w - this_week
+        if this_week <= last_week:
+            return 0, None
+
+        # 加速確認：千張大戶同向
+        super_also_up = (
+            proxy.super_large_holder_chg_pct is not None
+            and proxy.super_large_holder_chg_pct >= 0.3
+        )
+        if super_also_up:
+            return 6, f"CHIP_ACCEL_PRIME:{this_week:+.2f}%/wk"
+        return 3, f"CHIP_ACCEL:{this_week:+.2f}%/wk"
+
+    @staticmethod
+    def _short_squeeze_setup_score(proxy: TWSEChipProxy) -> tuple[int, str | None]:
+        """券資比高 + 空頭開始回補 = 軋空潛力。
+
+        區別於 sbl_pressure_pts（借券賣出，懲罰型）:
+        此因子看融券/融資比 + 回補率，是潛在彈力的正面信號。
+        """
+        smr = proxy.short_margin_ratio
+        scr = proxy.short_cover_rate
+        if smr <= 0:
+            return 0, None
+        if smr > 0.40 and scr > 0.15:
+            return 5, f"SHORT_SQUEEZE_SETUP:SMR={smr:.2f}/SCR={scr:.2f}"
+        if smr > 0.25 and scr > 0.08:
+            return 3, f"SHORT_SQUEEZE_SETUP:SMR={smr:.2f}"
+        return 0, None
+
+    @staticmethod
+    def _stealth_accum_composite_score(
+        bd: "_ScoreBreakdown",
+        ohlcv: "DailyOHLCV",
+        history: list["DailyOHLCV"],
+        proxy: "TWSEChipProxy | None",
+    ) -> tuple[int, str | None]:
+        """K-of-6 隱蔽吸籌複合分。
+
+        6 個條件：
+          [1] OBV 偷吸（obv_stealth_pts > 0）
+          [2] 融資連跌 ≥ 3 日（margin_decline_streak）
+          [3] 股東人數下降（holder_count_declining_pts > 0）
+          [4] 大戶持股加速（chip_concentration_accel_pts > 0）
+          [5] 量縮（volume_dryup_pts ≥ 4）
+          [6] 股價 10d 橫盤（|return| < 3%）
+
+        4/6 → +6  STEALTH_ACCUM
+        5/6 → +10 STEALTH_ACCUM_PRIME
+        """
+        count = 0
+
+        if bd.obv_stealth_pts > 0:
+            count += 1
+
+        if proxy is not None and proxy.margin_decline_streak >= 3:
+            count += 1
+
+        if bd.holder_count_declining_pts > 0:
+            count += 1
+
+        if bd.chip_concentration_accel_pts > 0:
+            count += 1
+
+        if bd.volume_dryup_pts >= 4:
+            count += 1
+
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        bars_10 = sorted_h[-10:] if len(sorted_h) >= 10 else sorted_h
+        if bars_10:
+            base = bars_10[0].close
+            if base > 0 and abs((ohlcv.close - base) / base) < 0.03:
+                count += 1
+
+        if count >= 5:
+            return 10, f"STEALTH_ACCUM_PRIME:{count}/6"
+        if count >= 4:
+            return 6, f"STEALTH_ACCUM:{count}/6"
+        return 0, None
+
     @staticmethod
     def _make_execution_plan(
         ohlcv: DailyOHLCV, volume_profile: VolumeProfile
@@ -2891,16 +3126,24 @@ class TripleConfirmationEngine:
         """Compute deterministic entry/stop/target.
 
         entry_bid_limit = close × 0.995  (lower bound, limit order)
-        entry_max_chase = close × 1.005  (upper bound, max acceptable chase)
-        stop_loss       = close × 0.97   (3% below T+0 close, below entry)
-        target          = max(poc_proxy × 1.05, close × 1.05)
-                          Guarantees target > entry. poc_proxy may be lower than
-                          current close when the highest-volume day was a panic
-                          selloff, so we floor at close × 1.05.
+        entry_max_chase = close × 1.005  (upper bound, max chase)
+        stop_loss       = close × 0.97   (3% below close)
+        target          = nearest real resistance level ≥ close × 1.03
+                          (60d high → 120d high → 52w high, whichever is closest
+                           and at least 3% above close).
+                          Falls back to close × 1.05 if stock is already at/above
+                          all resistance levels.
         """
         close = ohlcv.close
-        raw_target = round(volume_profile.poc_proxy * 1.05, 2)
-        target = max(raw_target, round(close * 1.05, 2))
+        candidates = [
+            level for level in [
+                volume_profile.sixty_day_high,
+                volume_profile.one_twenty_day_high,
+                volume_profile.fiftytwo_week_high,
+            ]
+            if level > close * 1.03
+        ]
+        target = round(min(candidates), 2) if candidates else round(close * 1.05, 2)
         return ExecutionPlan(
             entry_bid_limit=round(close * 0.995, 2),
             entry_max_chase=round(close * 1.005, 2),
