@@ -34,23 +34,18 @@ from taiwan_stock_agent.infrastructure.db import get_connection, init_pool
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-_SCANS_DIR = Path(__file__).resolve().parents[1] / "data" / "scans"
 _SURGE_GRADES = {"SURGE_ALPHA", "SURGE_BETA"}
-# Calendar days to search forward for a surge hit
 _CAL_LOOKFORWARD = 5
 
 
 def _load_surge_tickers(surge_date: date) -> dict[str, dict]:
-    """Return {ticker: row} for ALPHA/BETA entries on surge_date."""
-    path = _SCANS_DIR / f"surge_{surge_date}.csv"
-    if not path.exists():
+    """Return {ticker: row} for ALPHA/BETA entries on surge_date from DB."""
+    try:
+        from taiwan_stock_agent.infrastructure.surge_recorder import query_surge_signals
+        rows = query_surge_signals(surge_date, grades=_SURGE_GRADES)
+        return {r["ticker"]: r for r in rows}
+    except Exception:
         return {}
-    result: dict[str, dict] = {}
-    with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            if row.get("grade", "") in _SURGE_GRADES:
-                result[row["ticker"]] = row
-    return result
 
 
 def _find_surge_hit(ticker: str, signal_date: date) -> tuple[float | None, str | None]:

@@ -41,9 +41,9 @@ NOTIFY  ?= 1
 plan:
 ifeq ($(DATE),$(_TODAY))
 	@test -f "$(_HEAT_TODAY)" || { echo "  [熱度快照] 今日尚無資料，自動更新…"; $(PYTHON) scripts/update_market_heat.py --quiet || echo "  [熱度快照] 更新失敗（略過）"; }
-	$(PYTHON) scripts/batch_plan.py --save-csv --save-db --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
+	$(PYTHON) scripts/batch_plan.py --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
 else
-	$(PYTHON) scripts/batch_plan.py --save-csv --save-db --date $(DATE) --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
+	$(PYTHON) scripts/batch_plan.py --date $(DATE) --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
 endif
 
 TOP     ?= 20
@@ -221,7 +221,7 @@ bot:
 SURGE_DATE ?=
 surge:
 	@test -f "$(_HEAT_TODAY)" || { echo "  [熱度快照] 今日尚無資料，自動更新…"; $(PYTHON) scripts/update_market_heat.py --quiet || echo "  [熱度快照] 更新失敗（略過）"; }
-	$(PYTHON) scripts/surge_scan.py --save-csv --llm $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(SURGE_DATE),--date $(SURGE_DATE))
+	$(PYTHON) scripts/surge_scan.py $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(SURGE_DATE),--date $(SURGE_DATE))
 
 surge-live:
 	$(PYTHON) scripts/surge_scan.py --intraday $(if $(NOTIFY),--notify) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS))

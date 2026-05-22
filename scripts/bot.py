@@ -53,7 +53,6 @@ _console = Console()
 _ROOT = Path(__file__).resolve().parents[1]
 _SCAN_DIR = _ROOT / "data" / "scans"
 _NAME_MAP_DIR = _ROOT / "data" / "watchlist_cache"
-_SURGE_CSV    = _ROOT / "data" / "scans" / "surge_live.csv"
 _SURGE_HTML   = _ROOT / "data" / "scans" / "surge_live.html"
 _PARAMS_PATH  = _ROOT / "config" / "engine_params.json"
 _HISTORY_PATH = _ROOT / "config" / "param_history.json"
@@ -462,73 +461,119 @@ def _get_latest_name_map() -> dict[str, str]:
         return {}
 
 
-def _latest_scan_csv(offset_trading_days: int = 0) -> Path | None:
-    """Find the scan CSV that is `offset_trading_days` trading days before today."""
-    candidate = date.today()
-    skipped = 0
-    for _ in range(30):  # look back at most 30 calendar days
-        if candidate.weekday() < 5:  # Mon–Fri
-            if skipped == offset_trading_days:
-                path = _SCAN_DIR / f"scan_{candidate}.csv"
-                if path.exists():
-                    return path
-            skipped += 1
-        candidate -= timedelta(days=1)
-    return None
-
-
-def _parse_scan_csv(path: Path, min_conf: int = 40, max_n: int = 20) -> list[dict]:
-    name_map = _get_latest_name_map()
-    signals = []
-    with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            if row.get("action") not in ("LONG", "WATCH"):
-                continue
-            conf = int(row.get("confidence", 0) or 0)
-            if conf < min_conf:
-                continue
-            ticker = row["ticker"]
-            signals.append({
-                "ticker": ticker,
-                "name": name_map.get(ticker, ""),
-                "action": row["action"],
-                "confidence": conf,
-                "entry_bid": float(row.get("entry_bid", 0) or 0),
-                "target": float(row.get("target", 0) or 0),
-                "stop_loss": float(row.get("stop_loss", 0) or 0),
-                "flags": row.get("data_quality_flags", ""),
-            })
-    signals.sort(key=lambda x: x["confidence"], reverse=True)
-    return signals[:max_n]
-
-
-def _parse_surge_csv(path: Path, min_score: int = 50, max_n: int = 30) -> list[dict]:
-    if not path.exists():
+def _query_plan_signals_db(
+    signal_date: "date | None" = None,
+    min_conf: int = 40,
+    max_n: int = 20,
+) -> list[dict]:
+    """Query signal_outcomes for LONG/WATCH signals on signal_date (defaults to most recent)."""
+    import os
+    if not os.environ.get("DATABASE_URL"):
         return []
-    rows = []
-    with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            try:
-                score = int(float(row.get("score", 0) or 0))
-                if score < min_score:
-                    continue
-                raw_flags = row.get("flags", "") or ""
-                rows.append({
-                    "ticker":           row.get("ticker", ""),
-                    "name":             row.get("name", ""),
-                    "grade":            row.get("grade", ""),
-                    "score":            score,
-                    "vol_ratio":        float(row.get("vol_ratio", 0) or 0),
-                    "day_chg_pct":      float(row.get("day_chg_pct", 0) or 0),
-                    "rsi":              float(row.get("rsi", 0) or 0) or None,
-                    "industry":         row.get("industry", ""),
-                    "inst_consec_days": int(float(row.get("inst_consec_days", 0) or 0)),
-                    "flags":            [f for f in raw_flags.split("|") if f],
-                })
-            except (ValueError, TypeError):
-                continue
-    rows.sort(key=lambda x: x["score"], reverse=True)
-    return rows[:max_n]
+    try:
+        from taiwan_stock_agent.infrastructure.db import get_connection, init_pool
+        init_pool()
+    except Exception:
+        return []
+
+    name_map = _get_latest_name_map()
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                if signal_date is None:
+                    cur.execute(
+                        "SELECT MAX(signal_date) FROM signal_outcomes WHERE source='live'"
+                    )
+                    row = cur.fetchone()
+                    if not row or not row[0]:
+                        return []
+                    signal_date = row[0]
+                cur.execute(
+                    """
+                    SELECT ticker, action, confidence_score, entry_price,
+                           stop_loss, halt_flag
+                    FROM signal_outcomes
+                    WHERE signal_date = %s AND source = 'live'
+                      AND action IN ('LONG', 'WATCH')
+                      AND confidence_score >= %s
+                      AND halt_flag = FALSE
+                    ORDER BY confidence_score DESC
+                    LIMIT %s
+                    """,
+                    (signal_date, min_conf, max_n),
+                )
+                signals = []
+                for r in cur.fetchall():
+                    ticker = r[0]
+                    signals.append({
+                        "ticker": ticker,
+                        "name": name_map.get(ticker, ""),
+                        "action": r[1],
+                        "confidence": r[2],
+                        "entry_bid": float(r[3] or 0),
+                        "target": 0.0,
+                        "stop_loss": float(r[4] or 0),
+                        "flags": "",
+                    })
+        return signals
+    except Exception as e:
+        logger.warning("_query_plan_signals_db: %s", e)
+        return []
+
+
+def _query_surge_signals_db(
+    analysis_date: "date | None" = None,
+    min_score: int = 50,
+    max_n: int = 30,
+) -> list[dict]:
+    """Query surge_signals for signals on analysis_date (defaults to most recent)."""
+    import os
+    if not os.environ.get("DATABASE_URL"):
+        return []
+    try:
+        from taiwan_stock_agent.infrastructure.db import get_connection, init_pool
+        init_pool()
+    except Exception:
+        return []
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                if analysis_date is None:
+                    cur.execute("SELECT MAX(analysis_date) FROM surge_signals")
+                    row = cur.fetchone()
+                    if not row or not row[0]:
+                        return []
+                    analysis_date = row[0]
+                cur.execute(
+                    """
+                    SELECT ticker, name, grade, score, vol_ratio,
+                           day_chg_pct, rsi, industry, inst_consec_days, flags
+                    FROM surge_signals
+                    WHERE analysis_date = %s AND score >= %s
+                    ORDER BY score DESC
+                    LIMIT %s
+                    """,
+                    (analysis_date, min_score, max_n),
+                )
+                rows = []
+                for r in cur.fetchall():
+                    raw_flags = r[9] or ""
+                    rows.append({
+                        "ticker": r[0],
+                        "name": r[1] or "",
+                        "grade": r[2] or "",
+                        "score": int(r[3] or 0),
+                        "vol_ratio": float(r[4] or 0),
+                        "day_chg_pct": float(r[5] or 0),
+                        "rsi": float(r[6] or 0) or None,
+                        "industry": r[7] or "",
+                        "inst_consec_days": int(r[8] or 0),
+                        "flags": [f for f in raw_flags.split("|") if f],
+                    })
+        return rows
+    except Exception as e:
+        logger.warning("_query_surge_signals_db: %s", e)
+        return []
 
 
 # ── Scheduled jobs ───────────────────────────────────────────────────────────
@@ -545,7 +590,6 @@ async def _job_opening_scan(force: bool = False, notify_fn=None) -> None:
         await notify(f"🔍 *掃描開始* {t0:%H:%M}\n正在執行全市場分析，請稍候...")
         code, out = await _run_subprocess_async([
             sys.executable, "scripts/batch_plan.py",
-            "--save-csv", "--save-db",
             "--llm", _state["llm"], "--llm-top", "5",
         ])
         elapsed = int((datetime.now() - t0).total_seconds())
@@ -555,11 +599,9 @@ async def _job_opening_scan(force: bool = False, notify_fn=None) -> None:
             return
         logger.info("opening_scan batch_plan done elapsed=%ds", elapsed)
         await notify(f"📡 掃描完成（{elapsed}s），正在讀取結果...")
-        csv_path = _latest_scan_csv(0)
-        if csv_path:
-            _state["shortlist"] = _parse_scan_csv(csv_path)
-            _state["last_scan_time"] = datetime.now()
-            logger.info("opening_scan shortlist loaded n=%d from %s", len(_state["shortlist"]), csv_path.name)
+        _state["shortlist"] = _query_plan_signals_db()
+        _state["last_scan_time"] = datetime.now()
+        logger.info("opening_scan shortlist loaded n=%d from DB", len(_state["shortlist"]))
         await notify(format_opening_list(_state["shortlist"], str(date.today())))
         logger.info("opening_scan DONE n=%d", len(_state["shortlist"]))
 
@@ -577,16 +619,12 @@ async def _job_hourly_rescan() -> None:
         logger.info("hourly_rescan START %s", t0.strftime("%H:%M"))
         code, out = await _run_subprocess_async([
             sys.executable, "scripts/batch_plan.py",
-            "--save-csv", "--save-db",
             "--llm", _state["llm"], "--llm-top", "5",
         ])
         if code != 0:
             logger.error("hourly_rescan FAILED code=%d\n%s", code, out[:300])
             return
-        csv_path = _latest_scan_csv(0)
-        if not csv_path:
-            return
-        new_list = _parse_scan_csv(csv_path)
+        new_list = _query_plan_signals_db()
         old_tickers = {s["ticker"] for s in _state["shortlist"]}
         new_tickers = {s["ticker"] for s in new_list}
         added = new_tickers - old_tickers
@@ -634,7 +672,7 @@ async def _job_surge_live(force: bool = False, notify_fn=None) -> None:
             logger.error("surge_live FAILED code=%d elapsed=%ds", code, elapsed)
             await notify(f"❌ Surge 掃描失敗（{elapsed}s）")
             return
-        signals = _parse_surge_csv(_SURGE_CSV)
+        signals = _query_surge_signals_db()
         _state["surge_signals"] = signals
         _state["surge_updated_at"] = datetime.now()
         alpha = sum(1 for s in signals if s["grade"] == "SURGE_ALPHA")
@@ -657,7 +695,7 @@ async def _job_surge_postmarket(force: bool = False, notify_fn=None) -> None:
 
     # ── 1. Surge scan ─────────────────────────────────────────────────────────
     code, out = await _run_subprocess_async([
-        sys.executable, "scripts/surge_scan.py", "--save-csv",
+        sys.executable, "scripts/surge_scan.py",
     ])
     if code != 0:
         logger.error("surge_postmarket FAILED code=%d\n%s", code, out[:300])
@@ -671,8 +709,7 @@ async def _job_surge_postmarket(force: bool = False, notify_fn=None) -> None:
             sys.path.insert(0, _scripts_dir)
         import surge_tracker  # noqa: PLC0415
 
-        _SCANS_DIR = _ROOT / "data" / "scans"
-        surge_tracker.save_watch(_SCANS_DIR / f"surge_{today.isoformat()}.csv", today)
+        surge_tracker.save_watch(today)
 
         yesterday = today - timedelta(days=1)
         confirmed = surge_tracker.check_d1(yesterday, _get_latest_market_map())
@@ -712,10 +749,9 @@ async def _job_postmarket_report(force: bool = False, notify_fn=None) -> None:
             logger.info("postmarket_report scan done elapsed=%ds", elapsed)
 
     await notify(f"📊 掃描完成（{elapsed}s），正在產生盤後報告...")
-    yesterday_csv = _latest_scan_csv(1)
-    yesterday_signals = _parse_scan_csv(yesterday_csv) if yesterday_csv else []
-    tomorrow_csv = _latest_scan_csv(0)
-    tomorrow_signals = _parse_scan_csv(tomorrow_csv) if tomorrow_csv else []
+    yesterday = date.today() - timedelta(days=1)
+    yesterday_signals = _query_plan_signals_db(signal_date=yesterday)
+    tomorrow_signals = _query_plan_signals_db()
     logger.info("postmarket_report yesterday=%d tomorrow=%d", len(yesterday_signals), len(tomorrow_signals))
 
     await _send(format_postmarket_report(
@@ -1487,16 +1523,14 @@ def _render_watchlist_detail_panel() -> Panel:
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def _try_preload_shortlist() -> None:
-    """On startup, populate shortlist from the most recent scan CSV (today or yesterday)."""
-    paths = sorted(_SCAN_DIR.glob("scan_????-??-??.csv"), reverse=True)
-    for csv_path in paths[:10]:
-        signals = _parse_scan_csv(csv_path)
-        if signals:
-            _state["shortlist"] = signals
-            _state["last_scan_time"] = datetime.fromtimestamp(csv_path.stat().st_mtime)
-            logger.info("startup: preloaded shortlist n=%d from %s", len(signals), csv_path.name)
-            return
-    logger.info("startup: no scan CSV found, shortlist empty")
+    """On startup, populate shortlist from DB (most recent signal_date)."""
+    signals = _query_plan_signals_db()
+    if signals:
+        _state["shortlist"] = signals
+        _state["last_scan_time"] = datetime.now()
+        logger.info("startup: preloaded shortlist n=%d from DB", len(signals))
+    else:
+        logger.info("startup: no signals in DB, shortlist empty")
 
 
 async def main_async(llm: str) -> None:
@@ -1511,12 +1545,11 @@ async def main_async(llm: str) -> None:
         sys.exit(1)
     _state["chat_id"] = chat_id
     _try_preload_shortlist()
-    # Preload surge signals from existing CSV if available
-    surge_signals = _parse_surge_csv(_SURGE_CSV)
+    surge_signals = _query_surge_signals_db()
     if surge_signals:
         _state["surge_signals"] = surge_signals
-        _state["surge_updated_at"] = datetime.fromtimestamp(_SURGE_CSV.stat().st_mtime)
-        logger.info("startup: preloaded surge signals n=%d", len(surge_signals))
+        _state["surge_updated_at"] = datetime.now()
+        logger.info("startup: preloaded surge signals n=%d from DB", len(surge_signals))
     logger.info("Bot START llm=%s chat_id=%s log=%s", llm, chat_id, _LOG_PATH)
 
     app = Application.builder().token(token).build()

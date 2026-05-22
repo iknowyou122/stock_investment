@@ -18,7 +18,6 @@ Interactive (make scan):
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import logging
 import os
@@ -456,44 +455,54 @@ def _apply_catalyst_filter(
     return n
 
 
-def _load_recent_csvs(
+def _load_recent_db(
     analysis_date: date,
-    data_dir: Path,
     lookback: int = 3,
     min_conf: int = 40,
 ) -> list[dict[str, int]]:
-    """Load the last N trading days' scan CSVs as [{ticker: confidence}, ...].
+    """Query signal_outcomes for last N trading days before analysis_date.
 
-    Returns list ordered old→new (index 0 = oldest, index -1 = most recent).
-    Only includes tickers with confidence ≥ min_conf.
+    Returns [{ticker: confidence}, ...] ordered old→new.
+    Falls back to empty list when DB is unavailable.
     """
-    csvs: list[dict[str, int]] = []
-    candidate = analysis_date - timedelta(days=1)
-    days_checked = 0
+    import os
+    if not os.environ.get("DATABASE_URL"):
+        return []
+    try:
+        from taiwan_stock_agent.infrastructure.db import get_connection, init_pool
+        init_pool()
+    except Exception:
+        return []
 
-    while len(csvs) < lookback and days_checked < 10:
-        if candidate.weekday() < 5:
-            csv_path = data_dir / f"scan_{candidate}.csv"
-            if csv_path.exists():
-                try:
-                    scores: dict[str, int] = {}
-                    with csv_path.open(encoding="utf-8") as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            try:
-                                conf = int(row.get("confidence", 0))
-                                if conf >= min_conf:
-                                    scores[row["ticker"]] = conf
-                            except (ValueError, KeyError):
-                                continue
-                    csvs.append(scores)
-                except Exception:
-                    pass
-        candidate -= timedelta(days=1)
-        days_checked += 1
+    cutoff = analysis_date - timedelta(days=lookback * 2 + 7)
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT signal_date, ticker, confidence_score
+                    FROM signal_outcomes
+                    WHERE signal_date >= %s
+                      AND signal_date < %s
+                      AND source = 'live'
+                      AND confidence_score >= %s
+                    ORDER BY signal_date
+                    """,
+                    (cutoff, analysis_date, min_conf),
+                )
+                rows = cur.fetchall()
+    except Exception:
+        return []
 
-    csvs.reverse()  # old → new
-    return csvs
+    by_date: dict[date, dict[str, int]] = {}
+    for sig_date, ticker, conf in rows:
+        if isinstance(sig_date, str):
+            sig_date = date.fromisoformat(sig_date)
+        by_date.setdefault(sig_date, {})[ticker] = conf
+
+    sorted_dates = sorted(d for d in by_date if d < analysis_date)
+    recent_dates = sorted_dates[-lookback:]
+    return [by_date[d] for d in recent_dates]
 
 
 def _apply_persistence_bonus(
@@ -504,7 +513,8 @@ def _apply_persistence_bonus(
 ) -> int:
     """Trajectory-aware persistence bonus.
 
-    Reads the last 3 trading days' CSVs and computes per-ticker score trajectory:
+    Queries signal_outcomes for the last 3 trading days and computes per-ticker
+    score trajectory:
       RISING   (3 consecutive days, each score higher than previous) → +7 pts
       STABLE   (appeared yesterday with score ≥ min_prev_conf)      → +5 pts
       DECLINING (appeared yesterday but score dropped > 5 pts)       → +0 pts
@@ -512,7 +522,7 @@ def _apply_persistence_bonus(
     Adds PERSIST_RISING / PERSIST_STABLE flag to boosted stocks.
     Returns count of stocks boosted.
     """
-    recent = _load_recent_csvs(analysis_date, data_dir, lookback=3, min_conf=40)
+    recent = _load_recent_db(analysis_date, lookback=3, min_conf=40)
     if not recent:
         return 0
 
@@ -585,7 +595,7 @@ def _apply_near_high_first_day(
     Called after _apply_persistence_bonus so there is no double-count.
     Returns count of stocks boosted.
     """
-    recent = _load_recent_csvs(analysis_date, data_dir, lookback=1, min_conf=40)
+    recent = _load_recent_db(analysis_date, lookback=1, min_conf=40)
     yesterday_tickers: set[str] = set(recent[0].keys()) if recent else set()
 
     boosted = 0
@@ -732,43 +742,6 @@ CSV_FIELDS = [
 ]
 
 
-def _save_csv(results: list[dict], analysis_date: date, csv_path: Path, sort_by: str = "trend") -> None:
-    """Write scan results to a CSV file sorted by trend_score (then confidence)."""
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    scan_date = date.today().isoformat()
-
-    # Sort before saving so CSV row order matches what the table shows
-    ordered = sorted(
-        results,
-        key=lambda r: (r.get("trend_score", 0), r["confidence"]),
-        reverse=True,
-    ) if sort_by == "trend" else sorted(
-        results, key=lambda r: r["confidence"], reverse=True
-    )
-
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        for r in ordered:
-            writer.writerow({
-                "scan_date": scan_date,
-                "analysis_date": analysis_date.isoformat(),
-                "ticker": r["ticker"],
-                "action": r["action"],
-                "confidence": r["confidence"],
-                "trend_score": r.get("trend_score", 0),
-                "free_tier": r.get("free_tier", ""),
-                "halt": r["halt"],
-                "entry_bid": r["entry_bid"],
-                "stop_loss": r["stop_loss"],
-                "target": r["target"],
-                "momentum": r["momentum"],
-                "chip_analysis": r["chip"],
-                "risk_factors": r["risk"],
-                "data_quality_flags": "|".join(r.get("flags") or []),
-            })
-
-    _console.print(f"\n  [green]📄 CSV 已儲存:[/green] {csv_path}  ({len(results)} 筆)")
 
 
 def _action_style(action: str) -> str:
@@ -1123,12 +1096,11 @@ def run_batch(
     top: int,
     min_confidence: int,
     workers: int,
-    csv_path: Path | None = None,
     llm_provider=None,
     llm_top: int | None = None,
     label_repo=None,
     industry_map: dict[str, str] | None = None,
-    save_db: bool = False,
+    save_db: bool = True,
     name_map: dict[str, str] | None = None,
     market_map: dict[str, str] | None = None,
     sort_by: str = "trend",
@@ -1262,10 +1234,7 @@ def run_batch(
             sort_by=sort_by,
         )
 
-    if csv_path:
-        _save_csv(results, analysis_date, csv_path, sort_by=sort_by)
-
-    html_path = (csv_path or Path("data/scans") / f"scan_{analysis_date}.csv").with_suffix(".html")
+    html_path = (Path(__file__).resolve().parents[1] / "data" / "scans" / f"scan_{analysis_date}.html")
     _generate_plan_html(results, str(analysis_date), html_path,
                         name_map=name_map or {}, industry_map=industry_map or {},
                         market_map=market_map or {},
@@ -1963,13 +1932,6 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=10, help="顯示前 N 名（預設: 10）")
     parser.add_argument("--min-confidence", type=int, default=50, help="最低信心分數門檻（預設: 50）")
     parser.add_argument("--workers", type=int, default=5, help="並行 worker 數（預設: 5；建議 3-8，受 FinMind rate limit 限制）")
-    parser.add_argument("--save-csv", action="store_true", help="儲存結果到 CSV 檔案")
-    parser.add_argument(
-        "--csv-path",
-        type=Path,
-        default=None,
-        help="CSV 路徑（預設: data/scans/scan_YYYY-MM-DD.csv）",
-    )
     parser.add_argument(
         "--llm",
         default=None,
@@ -1989,14 +1951,9 @@ def main() -> None:
         help="關閉 LLM reasoning，只跑 deterministic scoring",
     )
     parser.add_argument(
-        "--save-db",
-        action="store_true",
-        help="將訊號寫入 signal_outcomes DB (source=live)，用於 factor-report 分析",
-    )
-    parser.add_argument(
         "--show",
         metavar="DATE",
-        help="顯示指定日期的掃描結果（從 CSV 讀取，例: --show 2026-04-10）",
+        help="顯示指定日期的掃描結果（從 DB 查詢，例: --show 2026-04-10）",
     )
     parser.add_argument(
         "--sort-by",
@@ -2013,21 +1970,31 @@ def main() -> None:
 
     # ── show 模式：從 CSV 印出歷史結果 ──────────────────────────────────────
     if args.show is not None:
-        scan_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
-        available = sorted(p.stem.replace("scan_", "") for p in scan_dir.glob("scan_*.csv"))
+        import os
+        if not os.environ.get("DATABASE_URL"):
+            _console.print("[red]--show 需要 DATABASE_URL 設定（signal_outcomes 表）[/red]")
+            return
+        from taiwan_stock_agent.infrastructure.db import get_connection, init_pool
+        init_pool()
 
         show_date = args.show.strip() if args.show.strip() else ""
         if not show_date:
-            # 互動式選擇（上下鍵）
+            # 從 DB 取可用日期
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT DISTINCT signal_date FROM signal_outcomes WHERE source='live' "
+                        "ORDER BY signal_date DESC LIMIT 90"
+                    )
+                    available = [str(r[0]) for r in cur.fetchall()]
             if not available:
-                _console.print("[red]找不到任何掃描結果（data/scans/ 目錄為空）[/red]")
+                _console.print("[red]DB 中找不到任何掃描結果[/red]")
                 return
             import questionary
-            rev = list(reversed(available))
             show_date = questionary.select(
                 "選擇掃描日期",
-                choices=rev,
-                default=rev[0],
+                choices=available,
+                default=available[0],
                 style=questionary.Style([
                     ("selected", "fg:cyan bold"),
                     ("pointer", "fg:cyan bold"),
@@ -2036,53 +2003,44 @@ def main() -> None:
                 ]),
             ).ask()
             if show_date is None:
-                return  # Ctrl-C
+                return
 
-        csv_file = scan_dir / f"scan_{show_date}.csv"
-        if not csv_file.exists():
-            if not available:
-                _console.print("[red]找不到任何掃描結果（data/scans/ 目錄為空）[/red]")
-                return
-            _console.print(f"[yellow]找不到 {show_date} 的資料，請重新選擇：[/yellow]")
-            import questionary
-            rev = list(reversed(available))
-            show_date = questionary.select(
-                "選擇掃描日期",
-                choices=rev,
-                default=rev[0],
-                style=questionary.Style([
-                    ("selected", "fg:cyan bold"),
-                    ("pointer", "fg:cyan bold"),
-                    ("highlighted", "fg:cyan"),
-                    ("question", "bold"),
-                ]),
-            ).ask()
-            if show_date is None:
-                return
-            csv_file = scan_dir / f"scan_{show_date}.csv"
-        import csv as _csv
-        with open(csv_file, newline="", encoding="utf-8") as f:
-            rows_raw = list(_csv.DictReader(f))
-        # Dedup by ticker: keep last (newest) row per ticker (guards against legacy append CSVs)
-        seen: dict[str, dict] = {}
-        for r in rows_raw:
-            seen[r["ticker"]] = r
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ticker, action, confidence_score, entry_price,
+                           stop_loss, halt_flag, score_breakdown
+                    FROM signal_outcomes
+                    WHERE signal_date = %s AND source = 'live'
+                    ORDER BY confidence_score DESC
+                    """,
+                    (show_date,),
+                )
+                db_rows = cur.fetchall()
+
+        if not db_rows:
+            _console.print(f"[yellow]DB 中找不到 {show_date} 的掃描結果[/yellow]")
+            return
+
         results = [
             {
-                "ticker": r["ticker"],
-                "action": r["action"],
-                "confidence": int(r["confidence"]),
-                "free_tier": r.get("free_tier", "True") == "True",
-                "halt": r.get("halt", "False") == "True",
+                "ticker": r[0],
+                "action": r[1],
+                "confidence": r[2],
+                "free_tier": True,
+                "halt": bool(r[5]),
                 "error": None,
-                "entry_bid": float(r["entry_bid"]),
-                "stop_loss": float(r["stop_loss"]),
-                "target": float(r["target"]),
-                "momentum": r.get("momentum", ""),
-                "chip": r.get("chip_analysis", ""),
-                "risk": r.get("risk_factors", ""),
+                "entry_bid": float(r[3] or 0),
+                "stop_loss": float(r[4] or 0),
+                "target": 0.0,
+                "momentum": "",
+                "chip": "",
+                "risk": "",
+                "flags": [],
+                "trend_score": 0,
             }
-            for r in seen.values()
+            for r in db_rows
         ]
         ind_map = _build_industry_map()
         if ind_map:
@@ -2090,14 +2048,6 @@ def main() -> None:
         else:
             _print_table(results, args.top, args.min_confidence, scan_date=show_date, name_map=_build_name_map(), sort_by="confidence")
         return
-
-    csv_path: Path | None = None
-    if args.save_csv:
-        if args.csv_path:
-            csv_path = args.csv_path
-        else:
-            scan_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
-            csv_path = scan_dir / f"scan_{args.date}.csv"
 
     industry_map: dict[str, str] = {}
 
@@ -2159,16 +2109,15 @@ def main() -> None:
 
     run_batch(
         tickers, args.date, args.top, args.min_confidence, args.workers,
-        csv_path, llm_provider, llm_top, label_repo,
+        llm_provider, llm_top, label_repo,
         industry_map=industry_map,
-        save_db=args.save_db,
         name_map=name_map,
         market_map=market_map,
         sort_by=args.sort_by,
     )
 
-    if args.notify and csv_path and csv_path.exists():
-        _notify_telegram(csv_path, args.date, args.top, args.min_confidence)
+    if args.notify:
+        _notify_telegram(args.date, args.top, args.min_confidence)
 
 
 def _tg_escape(text: str) -> str:
@@ -2178,45 +2127,60 @@ def _tg_escape(text: str) -> str:
     return text
 
 
-def _notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int) -> None:
-    """Read the saved CSV and push the opening list to Telegram."""
+def _notify_telegram(scan_date, top: int, min_confidence: int) -> None:
+    """Query DB for today's signals and push the opening list to Telegram."""
     try:
-        _do_notify_telegram(csv_path, scan_date, top, min_confidence)
+        _do_notify_telegram(scan_date, top, min_confidence)
     except Exception as exc:
         import traceback
         _console.print(f"  [red]❌ _notify_telegram 例外：{exc}[/red]")
         _console.print(traceback.format_exc())
 
 
-def _do_notify_telegram(csv_path: Path, scan_date, top: int, min_confidence: int) -> None:
+def _do_notify_telegram(scan_date, top: int, min_confidence: int) -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
         _console.print("  [yellow]⚠ TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未設定，略過推播[/yellow]")
         return
 
+    import os as _os
+    if not _os.environ.get("DATABASE_URL"):
+        _console.print("  [yellow]⚠ DATABASE_URL 未設定，略過 TG 推播[/yellow]")
+        return
+
+    from taiwan_stock_agent.infrastructure.db import get_connection, init_pool
+    init_pool()
     name_map = _build_name_map()
     signals: list[dict] = []
-    with open(csv_path, newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh):
-            if row.get("action") not in ("LONG", "WATCH"):
-                continue
-            conf = int(row.get("confidence", 0) or 0)
-            if conf < min_confidence:
-                continue
-            if "NO_CATALYST" in (row.get("flags") or ""):
-                continue
-            signals.append({
-                "ticker": row["ticker"],
-                "name": name_map.get(row["ticker"], ""),
-                "action": row["action"],
-                "confidence": conf,
-                "trend_score": int(row.get("trend_score", 0) or 0),
-                "entry_bid": float(row.get("entry_bid", 0) or 0),
-                "target": float(row.get("target", 0) or 0),
-                "stop_loss": float(row.get("stop_loss", 0) or 0),
-                "flags": row.get("data_quality_flags", ""),
-            })
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ticker, action, confidence_score, entry_price,
+                       stop_loss, score_breakdown
+                FROM signal_outcomes
+                WHERE signal_date = %s AND source = 'live'
+                  AND action IN ('LONG', 'WATCH')
+                  AND confidence_score >= %s
+                  AND halt_flag = FALSE
+                ORDER BY confidence_score DESC
+                """,
+                (scan_date, min_confidence),
+            )
+            for row in cur.fetchall():
+                ticker, action, conf, entry_price, stop_loss, breakdown = row
+                signals.append({
+                    "ticker": ticker,
+                    "name": name_map.get(ticker, ""),
+                    "action": action,
+                    "confidence": conf,
+                    "trend_score": 0,
+                    "entry_bid": float(entry_price or 0),
+                    "target": 0.0,
+                    "stop_loss": float(stop_loss or 0),
+                    "flags": "",
+                })
 
     _console.print(f"  [dim]TG notify: {len(signals)} 筆 LONG/WATCH (min_conf={min_confidence}, top={top})[/dim]")
 

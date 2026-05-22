@@ -95,7 +95,7 @@ def test_format_opening_list_empty():
 
 def test_format_entry_signal():
     msg = format_entry_signal("6933", "信驊", price=322.0, entry_low=318.0, entry_high=328.0, stop=312.0)
-    assert "6933" in msg and "322" in msg and "✅" in msg
+    assert "6933" in msg and "322" in msg and "在區間" in msg
 
 def test_format_postmarket_hit_rate():
     hits = [{"ticker": "6933", "triggered": True, "price": 322.0}]

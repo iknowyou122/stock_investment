@@ -293,85 +293,78 @@ def load_scan_signals(
     min_confidence: int = 0,
     industry_filter: Optional[str] = None,
 ) -> list[dict]:
-    """Load signals from scan_*.csv files.
+    """Load signals from signal_outcomes DB (source='live').
 
     Returns list of dicts with keys:
       signal_id, ticker, signal_date, confidence, action, entry_price,
       industry, market.
-    Deduplicates (ticker, signal_date) keeping highest confidence.
     """
-    if not scan_dir.exists():
+    import os
+    if not os.environ.get("DATABASE_URL"):
         return []
 
     industry_map = _load_industry_map()
     market_map = _load_market_map()
 
-    seen: dict[tuple[str, date], dict] = {}
+    try:
+        from taiwan_stock_agent.infrastructure.db import get_connection, init_pool
+        init_pool()
+    except Exception:
+        return []
 
-    for csv_path in sorted(scan_dir.glob("scan_*.csv")):
-        try:
-            file_date_str = csv_path.stem.replace("scan_", "")
-            file_date = date.fromisoformat(file_date_str)
-        except ValueError:
+    params: list = []
+    where_clauses = ["source = 'live'", "action != 'CAUTION'"]
+    if date_from:
+        where_clauses.append("signal_date >= %s")
+        params.append(date_from)
+    if date_to:
+        where_clauses.append("signal_date <= %s")
+        params.append(date_to)
+    if min_confidence:
+        where_clauses.append("confidence_score >= %s")
+        params.append(min_confidence)
+
+    where_sql = " AND ".join(where_clauses)
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT signal_id, ticker, signal_date, confidence_score,
+                           action, entry_price, halt_flag
+                    FROM signal_outcomes
+                    WHERE {where_sql}
+                    ORDER BY signal_date, ticker
+                    """,
+                    params,
+                )
+                rows = cur.fetchall()
+    except Exception:
+        return []
+
+    results = []
+    for sig_id, ticker, sig_date, conf, action, entry_price, halt in rows:
+        if halt:
             continue
+        industry = industry_map.get(ticker, "未知")
+        if industry_filter and industry != industry_filter:
+            continue
+        market = market_map.get(ticker, "TSE")
+        if isinstance(sig_date, str):
+            sig_date = date.fromisoformat(sig_date)
+        results.append({
+            "signal_id": str(sig_id),
+            "ticker": ticker,
+            "signal_date": sig_date,
+            "confidence": conf,
+            "action": action,
+            "entry_price": float(entry_price or 0),
+            "industry": industry,
+            "market": market,
+        })
 
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                action = row.get("action", "CAUTION")
-                if action == "CAUTION":
-                    continue
-
-                ticker = row.get("ticker", "").strip()
-                if not ticker:
-                    continue
-
-                try:
-                    confidence = int(float(row.get("confidence", 0) or 0))
-                except (ValueError, TypeError):
-                    confidence = 0
-
-                if confidence < min_confidence:
-                    continue
-
-                # Resolve signal date
-                raw_date = row.get("analysis_date") or row.get("scan_date")
-                try:
-                    sig_date = date.fromisoformat(raw_date) if raw_date else file_date
-                except ValueError:
-                    sig_date = file_date
-
-                if date_from and sig_date < date_from:
-                    continue
-                if date_to and sig_date > date_to:
-                    continue
-
-                industry = industry_map.get(ticker, "未知")
-                if industry_filter and industry != industry_filter:
-                    continue
-
-                market = market_map.get(ticker, "TSE")
-
-                try:
-                    entry_price = float(row.get("entry_bid") or 0.0)
-                except (ValueError, TypeError):
-                    entry_price = 0.0
-
-                key = (ticker, sig_date)
-                existing = seen.get(key)
-                if existing is None or confidence > existing["confidence"]:
-                    seen[key] = {
-                        "signal_id": f"{ticker}_{sig_date.isoformat()}",
-                        "ticker": ticker,
-                        "signal_date": sig_date,
-                        "confidence": confidence,
-                        "action": action,
-                        "entry_price": entry_price,
-                        "industry": industry,
-                        "market": market,
-                    }
-
-    return sorted(seen.values(), key=lambda x: (x["signal_date"], x["ticker"]))
+    return results
 
 
 # ---------------------------------------------------------------------------

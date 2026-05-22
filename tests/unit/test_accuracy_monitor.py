@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import sys
 import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -295,106 +297,79 @@ class TestCacheStore:
 # ---------------------------------------------------------------------------
 
 class TestLoadScanSignals:
-    def _write_scan_csv(self, path: Path, rows: list[dict]) -> None:
-        fieldnames = [
-            "scan_date", "analysis_date", "ticker", "action", "confidence",
-            "trend_score", "free_tier", "halt", "entry_bid", "stop_loss",
-            "target", "momentum", "chip_analysis", "risk_factors", "data_quality_flags",
-        ]
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(row)
+    """Tests for the DB-backed load_scan_signals function."""
 
-    def test_load_basic(self, tmp_path):
-        scan_dir = tmp_path / "scans"
-        scan_dir.mkdir()
-        csv_path = scan_dir / "scan_2026-04-10.csv"
-        self._write_scan_csv(csv_path, [
-            {
-                "scan_date": "2026-04-11",
-                "analysis_date": "2026-04-10",
-                "ticker": "2330",
-                "action": "LONG",
-                "confidence": "75",
-                "entry_bid": "585.0",
-            },
-        ])
-        signals = load_scan_signals(scan_dir=scan_dir)
+    def _mock_db(self, rows):
+        """Set up MagicMock for get_connection/cursor context managers."""
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = rows
+        # make cursor work as context manager
+        mock_cur.__enter__ = MagicMock(return_value=mock_cur)
+        mock_cur.__exit__ = MagicMock(return_value=False)
+
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+
+        mock_gc = MagicMock(return_value=mock_conn)
+        return mock_gc
+
+    def test_no_database_url_returns_empty(self):
+        env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
+        with patch.dict(os.environ, env, clear=True):
+            signals = load_scan_signals()
+        assert signals == []
+
+    def test_load_basic(self):
+        rows = [("uuid-1", "2330", date(2026, 4, 10), 75, "LONG", 585.0, False)]
+        mock_gc = self._mock_db(rows)
+        with patch.dict(os.environ, {"DATABASE_URL": "postgresql://test"}), \
+             patch("accuracy_monitor._load_industry_map", return_value={}), \
+             patch("accuracy_monitor._load_market_map", return_value={}), \
+             patch("taiwan_stock_agent.infrastructure.db.init_pool"), \
+             patch("taiwan_stock_agent.infrastructure.db.get_connection", mock_gc):
+            signals = load_scan_signals()
         assert len(signals) == 1
         assert signals[0]["ticker"] == "2330"
         assert signals[0]["confidence"] == 75
-
-    def test_skip_caution(self, tmp_path):
-        scan_dir = tmp_path / "scans"
-        scan_dir.mkdir()
-        csv_path = scan_dir / "scan_2026-04-10.csv"
-        self._write_scan_csv(csv_path, [
-            {
-                "scan_date": "2026-04-11",
-                "analysis_date": "2026-04-10",
-                "ticker": "2330",
-                "action": "CAUTION",
-                "confidence": "50",
-                "entry_bid": "585.0",
-            },
-        ])
-        signals = load_scan_signals(scan_dir=scan_dir)
-        assert len(signals) == 0
-
-    def test_deduplicates_by_ticker_date(self, tmp_path):
-        scan_dir = tmp_path / "scans"
-        scan_dir.mkdir()
-        csv_path = scan_dir / "scan_2026-04-10.csv"
-        self._write_scan_csv(csv_path, [
-            {
-                "scan_date": "2026-04-11",
-                "analysis_date": "2026-04-10",
-                "ticker": "2330",
-                "action": "LONG",
-                "confidence": "75",
-                "entry_bid": "585.0",
-            },
-            {
-                "scan_date": "2026-04-11",
-                "analysis_date": "2026-04-10",
-                "ticker": "2330",
-                "action": "LONG",
-                "confidence": "60",
-                "entry_bid": "585.0",
-            },
-        ])
-        signals = load_scan_signals(scan_dir=scan_dir)
-        assert len(signals) == 1
-        # Keeps higher confidence
-        assert signals[0]["confidence"] == 75
-
-    def test_filter_by_date_range(self, tmp_path):
-        scan_dir = tmp_path / "scans"
-        scan_dir.mkdir()
-        for d in ["2026-04-05", "2026-04-10", "2026-04-15"]:
-            p = scan_dir / f"scan_{d}.csv"
-            self._write_scan_csv(p, [{
-                "scan_date": d,
-                "analysis_date": d,
-                "ticker": "2330",
-                "action": "LONG",
-                "confidence": "70",
-                "entry_bid": "580.0",
-            }])
-
-        signals = load_scan_signals(
-            scan_dir=scan_dir,
-            date_from=date(2026, 4, 8),
-            date_to=date(2026, 4, 12),
-        )
-        assert len(signals) == 1
         assert signals[0]["signal_date"] == date(2026, 4, 10)
 
-    def test_no_scan_dir(self, tmp_path):
-        missing_dir = tmp_path / "nonexistent"
-        signals = load_scan_signals(scan_dir=missing_dir)
+    def test_halted_stock_skipped(self):
+        rows = [("uuid-1", "2330", date(2026, 4, 10), 75, "LONG", 585.0, True)]
+        mock_gc = self._mock_db(rows)
+        with patch.dict(os.environ, {"DATABASE_URL": "postgresql://test"}), \
+             patch("accuracy_monitor._load_industry_map", return_value={}), \
+             patch("accuracy_monitor._load_market_map", return_value={}), \
+             patch("taiwan_stock_agent.infrastructure.db.init_pool"), \
+             patch("taiwan_stock_agent.infrastructure.db.get_connection", mock_gc):
+            signals = load_scan_signals()
+        assert len(signals) == 0
+
+    def test_load_multiple(self):
+        rows = [
+            ("uuid-1", "2330", date(2026, 4, 10), 75, "LONG", 585.0, False),
+            ("uuid-2", "2454", date(2026, 4, 10), 60, "WATCH", 200.0, False),
+        ]
+        mock_gc = self._mock_db(rows)
+        with patch.dict(os.environ, {"DATABASE_URL": "postgresql://test"}), \
+             patch("accuracy_monitor._load_industry_map", return_value={}), \
+             patch("accuracy_monitor._load_market_map", return_value={}), \
+             patch("taiwan_stock_agent.infrastructure.db.init_pool"), \
+             patch("taiwan_stock_agent.infrastructure.db.get_connection", mock_gc):
+            signals = load_scan_signals()
+        assert len(signals) == 2
+        tickers = {s["ticker"] for s in signals}
+        assert tickers == {"2330", "2454"}
+
+    def test_db_exception_returns_empty(self):
+        mock_gc = MagicMock(side_effect=Exception("DB error"))
+        with patch.dict(os.environ, {"DATABASE_URL": "postgresql://test"}), \
+             patch("accuracy_monitor._load_industry_map", return_value={}), \
+             patch("accuracy_monitor._load_market_map", return_value={}), \
+             patch("taiwan_stock_agent.infrastructure.db.init_pool"), \
+             patch("taiwan_stock_agent.infrastructure.db.get_connection", mock_gc):
+            signals = load_scan_signals()
         assert signals == []
 
 

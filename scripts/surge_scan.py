@@ -4,14 +4,12 @@ Usage:
     python scripts/surge_scan.py                          # 互動式產業選擇
     python scripts/surge_scan.py --sectors 1 4
     python scripts/surge_scan.py --tickers 2330 2454
-    python scripts/surge_scan.py --save-csv
     python scripts/surge_scan.py --date 2026-04-21
     python scripts/surge_scan.py --notify                 # Telegram
 """
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import resource
@@ -48,12 +46,6 @@ load_dotenv()
 from taiwan_stock_agent.domain.models import DailyOHLCV
 from taiwan_stock_agent.domain.surge_radar import SurgeRadar
 from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
-
-try:
-    from surge_db import insert_signals as _surge_db_insert
-    _HAS_SURGE_DB = True
-except ImportError:
-    _HAS_SURGE_DB = False
 
 _console = Console()
 _lock = Lock()
@@ -200,13 +192,6 @@ def _get_time_ratio() -> float:
     close_ = now.replace(hour=13, minute=30, second=0, microsecond=0)
     elapsed = (now - open_).total_seconds() / 60
     return max(0.0, min(1.0, elapsed / 270))
-
-SURGE_CSV_FIELDS = [
-    "scan_date", "analysis_date", "ticker", "name", "market", "industry",
-    "grade", "score", "vol_ratio", "close_strength", "day_chg_pct",
-    "gap_pct", "surge_day", "industry_rank_pct", "rsi", "inst_consec_days",
-    "close_price", "score_breakdown", "flags",
-]
 
 GRADE_COLOR = {
     "SURGE_ALPHA": "bold red",
@@ -1065,72 +1050,29 @@ document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.ob
     html_path.write_text(html, encoding="utf-8")
 
 
-def _save_surge_csv(
-    results: list[dict],
-    scan_date: str,
-    analysis_date: date,
-    csv_path: Path,
-    name_map: dict[str, str],
-    industry_map: dict[str, str],
-) -> None:
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=SURGE_CSV_FIELDS, extrasaction="ignore")
-        writer.writeheader()
-        for r in sorted(results, key=lambda x: x.get("score", 0), reverse=True):
-            ticker = r.get("ticker", "")
-            writer.writerow({
-                "scan_date": scan_date,
-                "analysis_date": analysis_date.isoformat(),
-                "ticker": ticker,
-                "name": name_map.get(ticker, ticker),
-                "market": r.get("market", ""),
-                "industry": industry_map.get(ticker, ""),
-                "grade": r.get("grade", ""),
-                "score": r.get("score", 0),
-                "vol_ratio": r.get("vol_ratio", ""),
-                "close_strength": r.get("close_strength", ""),
-                "day_chg_pct": r.get("day_chg_pct", ""),
-                "gap_pct": r.get("gap_pct", ""),
-                "surge_day": r.get("surge_day", ""),
-                "industry_rank_pct": r.get("industry_rank_pct", ""),
-                "rsi": r.get("rsi", ""),
-                "inst_consec_days": r.get("inst_consec_days", 0),
-                "close_price": r.get("close_price", ""),
-                "score_breakdown": json.dumps(r.get("score_breakdown", {})),
-                "flags": "|".join(r.get("flags", [])),
-            })
-    _console.print(f"\n  [green]Surge CSV 已儲存:[/green] {csv_path}  ({len(results)} 筆)")
-
-
-def _notify_surge_telegram(csv_path: Path, scan_date: str) -> None:
+def _notify_surge_telegram(results: list[dict], scan_date: str) -> None:
     import urllib.request
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
         return
     try:
-        rows = []
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                if row.get("grade", "") in ("SURGE_ALPHA", "SURGE_BETA"):
-                    rows.append(row)
+        rows = [r for r in results if r.get("grade", "") in ("SURGE_ALPHA", "SURGE_BETA")]
         if not rows:
             return
-
         lines = [f"噴發雷達 {scan_date}\n"]
         grade_text = {"SURGE_ALPHA": "ALPHA", "SURGE_BETA": "BETA"}
-        for row in rows[:12]:
-            grade = row.get("grade", "")
+        for r in rows[:12]:
+            grade = r.get("grade", "")
             lines.append(
-                f"*{row.get('ticker', '')}* {row.get('name', '')}  "
-                f"`{row.get('score', '--')}分` ({grade_text.get(grade, grade)})"
+                f"*{r.get('ticker', '')}* {r.get('name', '')}  "
+                f"`{r.get('score', '--')}分` ({grade_text.get(grade, grade)})"
             )
             lines.append(
-                f"   量比:{row.get('vol_ratio', '--')}x  "
-                f"漲:{row.get('day_chg_pct', '--')}%  "
-                f"收位:{row.get('close_strength', '--')}  "
-                f"產業:{row.get('industry_rank_pct', '--')}%\n"
+                f"   量比:{r.get('vol_ratio', '--')}x  "
+                f"漲:{r.get('day_chg_pct', '--')}%  "
+                f"收位:{r.get('close_strength', '--')}  "
+                f"產業:{r.get('industry_rank_pct', '--')}%\n"
             )
         text = "\n".join(lines)
         payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}).encode()
@@ -1269,7 +1211,6 @@ def run_surge_scan(
     market_map: dict[str, str] | None = None,
     name_map: dict[str, str] | None = None,
     industry_map: dict[str, str] | None = None,
-    csv_path: Path | None = None,
     notify: bool = False,
     intraday: bool = False,
     no_html: bool = False,
@@ -1397,44 +1338,35 @@ def run_surge_scan(
 
     _print_surge_table(results, scan_date, name_map)
 
-    if _HAS_SURGE_DB and results:
-        _db_rows = []
-        for r in results:
-            ticker = r.get("ticker", "")
-            _db_rows.append({
-                "signal_date": str(scan_date),
-                "ticker": ticker,
-                "grade": r.get("grade", ""),
-                "score": r.get("score", 0),
-                "vol_ratio": r.get("vol_ratio"),
-                "day_chg_pct": r.get("day_chg_pct"),
-                "gap_pct": r.get("gap_pct"),
-                "close_strength": r.get("close_strength"),
-                "rsi": r.get("rsi"),
-                "inst_consec_days": r.get("inst_consec_days", 0),
-                "industry_rank_pct": r.get("industry_rank_pct"),
-                "close_price": r.get("close_price"),
-                "market": r.get("market", "TSE"),
-                "industry": industry_map.get(ticker, ""),
-                "score_breakdown": json.dumps(r.get("score_breakdown") or {}),
-            })
-        inserted = _surge_db_insert(_db_rows)
-        _console.print(f"  [dim]📋 surge_signals DB: {inserted} 筆新增[/dim]")
+    # ── Write to DB ──────────────────────────────────────────────────────────
+    if results and os.environ.get("DATABASE_URL"):
+        try:
+            from taiwan_stock_agent.infrastructure.db import init_pool
+            from taiwan_stock_agent.infrastructure.surge_recorder import record_surge_signals
+            init_pool()
+            scan_date_obj = date.today() if intraday else analysis_date
+            inserted = record_surge_signals(results, analysis_date, scan_date_obj)
+            _console.print(f"  [dim]📋 surge_signals DB: {inserted} 筆[/dim]")
+        except Exception as _e:
+            _console.print(f"  [dim yellow]⚠ DB 寫入失敗，略過: {_e}[/dim yellow]")
 
     if llm_provider is not None and results:
         _run_llm_analysis(results, llm_provider, scan_date=scan_date)
 
-    if csv_path and results:
-        _save_surge_csv(results, scan_date, analysis_date, csv_path, name_map, industry_map)
-        html_path = csv_path.with_suffix(".html")
-        if no_html:
-            _console.print(f"  [dim]📊 HTML 略過（--no-html）: file://{html_path.resolve()}[/dim]")
-        else:
-            _generate_html_report(results, scan_date, name_map or {}, html_path, intraday=intraday, industry_map=industry_map)
-            _console.print(f"  [green]📊 HTML 報告:[/green] file://{html_path.resolve()}")
-            os.system(f'open "{html_path.resolve()}"')
-        if notify:
-            _notify_surge_telegram(csv_path, scan_date)
+    # ── HTML 報告 ─────────────────────────────────────────────────────────────
+    scan_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
+    scan_dir.mkdir(parents=True, exist_ok=True)
+    suffix = "live" if intraday else analysis_date.isoformat()
+    html_path = scan_dir / f"surge_{suffix}.html"
+    if no_html:
+        _console.print(f"  [dim]📊 HTML 略過（--no-html）[/dim]")
+    else:
+        _generate_html_report(results, scan_date, name_map or {}, html_path, intraday=intraday, industry_map=industry_map)
+        _console.print(f"  [green]📊 HTML 報告:[/green] file://{html_path.resolve()}")
+        os.system(f'open "{html_path.resolve()}"')
+
+    if notify:
+        _notify_surge_telegram(results, scan_date)
 
     return results
 
@@ -1466,10 +1398,7 @@ def main() -> None:
     parser.add_argument("--tickers", nargs="+", help="指定個股代號")
     parser.add_argument("--sectors", nargs="+", type=int, help="產業代號")
     parser.add_argument("--date", default=None, help="分析日期 YYYY-MM-DD")
-    parser.add_argument("--save-csv", action="store_true", default=True, help="儲存 CSV（預設開啟）")
-    parser.add_argument("--no-save", action="store_true", help="不儲存 CSV")
     parser.add_argument("--notify", action="store_true", help="推播 Telegram")
-    parser.add_argument("--only-notify", action="store_true", help="僅推播現有 CSV")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--intraday", action="store_true", help="盤中即時模式（MIS 報價取代 FinMind 今日 bar）")
     parser.add_argument("--no-html", action="store_true", dest="no_html", help="不產生 HTML 報告也不自動開啟瀏覽器")
@@ -1481,18 +1410,6 @@ def main() -> None:
         analysis_date = date.today()
     else:
         analysis_date = date.fromisoformat(args.date) if args.date else _default_date()
-
-    scan_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
-    suffix = "live" if args.intraday else analysis_date.isoformat()
-    csv_path = scan_dir / f"surge_{suffix}.csv"
-
-    if args.only_notify:
-        if csv_path.exists():
-            _notify_surge_telegram(csv_path, analysis_date.isoformat())
-            _console.print(f"  [green]已針對現有 CSV 執行推播:[/green] {csv_path}")
-        else:
-            _console.print(f"  [red]找不到 CSV 檔案，無法推播:[/red] {csv_path}")
-        return
 
     industry_map = _build_industry_map()
     name_map = _build_name_map()
@@ -1524,9 +1441,6 @@ def main() -> None:
 
         tickers = sorted(t for t, ind in industry_map.items() if ind in chosen)
 
-    save_csv = args.save_csv and not args.no_save
-    final_csv_path = csv_path if save_csv else None
-
     llm_provider = None
     if args.llm:
         from taiwan_stock_agent.domain.llm_provider import create_llm_provider
@@ -1541,7 +1455,6 @@ def main() -> None:
         market_map=market_map,
         name_map=name_map,
         industry_map=industry_map,
-        csv_path=final_csv_path,
         notify=args.notify,
         intraday=args.intraday,
         no_html=args.no_html,
@@ -1549,11 +1462,11 @@ def main() -> None:
     )
 
     # ── 訊號追蹤（盤後模式才執行）────────────────────────────────────────────
-    if not args.intraday and final_csv_path:
-        _run_tracker(final_csv_path, analysis_date, market_map, notify=args.notify)
+    if not args.intraday:
+        _run_tracker(analysis_date, market_map, notify=args.notify)
 
 
-def _run_tracker(csv_path: Path, scan_date: "date", market_map: dict, notify: bool = False) -> None:
+def _run_tracker(scan_date: "date", market_map: dict, notify: bool = False) -> None:
     """D+0 存 watch → D+1 驗條件 → 印出（並選擇性推播）進場提醒。"""
     import sys as _sys
     _scripts = str(Path(__file__).parent)
@@ -1566,9 +1479,9 @@ def _run_tracker(csv_path: Path, scan_date: "date", market_map: dict, notify: bo
         return
 
     # D+0：存今日 ALPHA watch
-    watch_path = surge_tracker.save_watch(csv_path, scan_date)
-    if watch_path:
-        _console.print(f"  [dim]📌 Watch 已儲存: {watch_path}[/dim]")
+    n_watch = surge_tracker.save_watch(scan_date)
+    if n_watch:
+        _console.print(f"  [dim]📌 Watch 已儲存: {n_watch} 筆[/dim]")
 
     # D+1：驗昨日 watch
     from datetime import timedelta
