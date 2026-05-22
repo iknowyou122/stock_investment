@@ -1,0 +1,86 @@
+[
+  {
+    "ticker": "6133",
+    "name": "金橋",
+    "market": "TSE",
+    "industry": "電子零組件業",
+    "score": 62.0,
+    "close_price": 24.35,
+    "vol_ratio": 10.04,
+    "close_strength": 0.73,
+    "day_chg_pct": 7.74,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY2|VOL_SURGE:10.04x|CLOSE_HEALTHY:0.73|IND_HOT:100|POCKET_PIVOT|GAP_FULL:7.1%|RS:+8.1%|BREAKOUT_20D:24.35>24.20|RSI_HEALTHY:55.7|MARGIN_COOL:11.8%|BB_SQUEEZE_EXPAND:BB:0.105→0.145|IND_HEAT_HOT:97|IND_ACCEL"
+  },
+  {
+    "ticker": "2388",
+    "name": "威盛",
+    "market": "TSE",
+    "industry": "半導體業",
+    "score": 61.0,
+    "close_price": 86.0,
+    "vol_ratio": 2.06,
+    "close_strength": 0.69,
+    "day_chg_pct": 5.26,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY1|VOL_SOLID:2.06x|CLOSE_HEALTHY:0.69|IND_HOT:89|POCKET_PIVOT|GAP_PARTIAL:0.6%|RS:+5.6%|BREAKOUT_20D:86.00>85.40|RSI_HEALTHY:62.3|MARGIN_COOL:10.5%|MARGIN_DECLINING|BB_WIDE:0.188|IND_HEAT_HOT:82|IND_ACCEL|SHORT_CAPITULATION:21%"
+  },
+  {
+    "ticker": "4916",
+    "name": "事欣科",
+    "market": "TSE",
+    "industry": "電腦及週邊設備業",
+    "score": 61.0,
+    "close_price": 89.9,
+    "vol_ratio": 5.17,
+    "close_strength": 1.0,
+    "day_chg_pct": 9.9,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY1|VOL_SURGE:5.17x|CLOSE_STRONG:1.00|IND_WARM:67|POCKET_PIVOT|GAP_PARTIAL:1.6%|RS:+10.3%|BREAKOUT_20D:89.90>81.80|RSI_BREAKOUT:78.9|MARGIN_HOT:27.8%|BB_SQUEEZE_BREAK:BB:0.149→0.415|MA5_WALK|IND_HEAT_HOT:85|IND_ACCEL|SHORT_CAPITULATION:32%"
+  },
+  {
+    "ticker": "2401",
+    "name": "凌陽",
+    "market": "TSE",
+    "industry": "半導體業",
+    "score": 60.0,
+    "close_price": 26.9,
+    "vol_ratio": 3.83,
+    "close_strength": 0.79,
+    "day_chg_pct": 7.82,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY1|VOL_IDEAL:3.83x|CLOSE_HEALTHY:0.79|IND_HOT:89|POCKET_PIVOT|GAP_PARTIAL:0.8%|RS:+8.2%|BREAKOUT_20D:26.90>26.60|RSI_HEALTHY:66.0|MARGIN_COOL:7.8%|MARGIN_DECLINING|BB_WIDE:0.144|IND_HEAT_HOT:82|IND_ACCEL"
+  },
+  {
+    "ticker": "5425",
+    "name": "台半",
+    "market": "TPEx",
+    "industry": "半導體業",
+    "score": 58.0,
+    "close_price": 86.9,
+    "vol_ratio": 3.93,
+    "close_strength": 0.77,
+    "day_chg_pct": 1.52,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY2|VOL_IDEAL:3.93x|CLOSE_HEALTHY:0.77|IND_HOT:89|POCKET_PIVOT|RS:+1.9%|BREAKOUT_20D:86.90>85.60|RSI_BREAKOUT:77.0|FLOW_ACCEL:5.0x|BB_WIDE:0.513|IND_HEAT_HOT:82|IND_ACCEL|FOREIGN_ACCEL:2.0x|INST_SURGE:4.1x"
+  },
+  {
+    "ticker": "2352",
+    "name": "佳世達",
+    "market": "TSE",
+    "industry": "電腦及週邊設備業",
+    "score": 57.0,
+    "close_price": 27.2,
+    "vol_ratio": 2.66,
+    "close_strength": 0.81,
+    "day_chg_pct": 4.41,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY1|VOL_SOLID:2.66x|CLOSE_STRONG:0.81|IND_WARM:67|POCKET_PIVOT|GAP_FULL:1.5%|RS:+4.8%|BREAKOUT_20D:27.20>26.50|RSI_HEALTHY:62.1|MARGIN_COOL:3.3%|BB_WIDE:0.130|IND_HEAT_HOT:85|IND_ACCEL"
+  },
+  {
+    "ticker": "5471",
+    "name": "松翰",
+    "market": "TSE",
+    "industry": "半導體業",
+    "score": 56.0,
+    "close_price": 52.3,
+    "vol_ratio": 2.06,
+    "close_strength": 1.0,
+    "day_chg_pct": 9.87,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY1|VOL_SOLID:2.06x|CLOSE_STRONG:1.00|IND_HOT:89|POCKET_PIVOT|GAP_PARTIAL:0.8%|RS:+10.3%|RSI_HEALTHY:64.5|MARGIN_COOL:10.9%|MARGIN_DECLINING|BB_SQUEEZE_EXPAND:BB:0.170→0.313|IND_HEAT_HOT:82|IND_ACCEL"
+  }
+]

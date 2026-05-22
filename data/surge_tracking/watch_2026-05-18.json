@@ -1,0 +1,98 @@
+[
+  {
+    "ticker": "8374",
+    "name": "羅昇",
+    "market": "TSE",
+    "industry": "電機機械",
+    "score": 74.0,
+    "close_price": 113.0,
+    "vol_ratio": 4.91,
+    "close_strength": 1.0,
+    "day_chg_pct": 9.71,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY2|VOL_IDEAL:4.91x|CLOSE_STRONG:1.00|IND_HOT:100|POCKET_PIVOT|GAP_FULL:1.9%|RS:+11.1%|BREAKOUT_20D:113.00>103.00|RSI_BREAKOUT:87.5|MARGIN_COOL:10.9%|BB_SQUEEZE_EXPAND:BB:0.236→0.401|MA5_WALK|MOMENTUM_WALK|IND_HEAT_WARM:62"
+  },
+  {
+    "ticker": "4562",
+    "name": "穎漢",
+    "market": "TSE",
+    "industry": "電機機械",
+    "score": 70.0,
+    "close_price": 42.95000076293945,
+    "vol_ratio": 4.72,
+    "close_strength": 1.0,
+    "day_chg_pct": 9.99,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY2|VOL_IDEAL:4.72x|CLOSE_STRONG:1.00|IND_HOT:100|POCKET_PIVOT|GAP_FULL:1.5%|RS:+11.4%|BREAKOUT_20D:42.95>40.50|RSI_HEALTHY:67.4|MARGIN_COOL:13.4%|BB_WIDE:0.314|IND_HEAT_WARM:62"
+  },
+  {
+    "ticker": "8091",
+    "name": "翔名",
+    "market": "TPEx",
+    "industry": "半導體業",
+    "score": 65.0,
+    "close_price": 260.5,
+    "vol_ratio": 3.34,
+    "close_strength": 1.0,
+    "day_chg_pct": 9.92,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY2|VOL_IDEAL:3.34x|CLOSE_STRONG:1.00|IND_COLD:44|POCKET_PIVOT|GAP_FULL:4.6%|RS:+11.3%|BREAKOUT_20D:260.50>237.00|RSI_BREAKOUT:78.6|BB_SQUEEZE_BREAK:BB:0.119→0.410|MOMENTUM_WALK|IND_HEAT_WARM:79|INTL_TAIL:+3"
+  },
+  {
+    "ticker": "6215",
+    "name": "和椿",
+    "market": "TSE",
+    "industry": "其他電子業",
+    "score": 62.0,
+    "close_price": 130.5,
+    "vol_ratio": 4.18,
+    "close_strength": 1.0,
+    "day_chg_pct": 9.66,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY1|VOL_IDEAL:4.18x|CLOSE_STRONG:1.00|IND_WARM:67|POCKET_PIVOT|RS:+11.1%|BREAKOUT_20D:130.50>128.00|RSI_HEALTHY:67.8|MARGIN_HOT:31.8%|BB_SQUEEZE_BREAK:BB:0.170→0.273|MOMENTUM_WALK|IND_HEAT_WARM:65"
+  },
+  {
+    "ticker": "6239",
+    "name": "力成",
+    "market": "TSE",
+    "industry": "半導體業",
+    "score": 59.0,
+    "close_price": 248.0,
+    "vol_ratio": 2.86,
+    "close_strength": 0.82,
+    "day_chg_pct": 8.3,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY1|VOL_SOLID:2.86x|CLOSE_STRONG:0.82|IND_COLD:44|POCKET_PIVOT|GAP_FULL:1.5%|RS:+9.7%|RSI_HEALTHY:63.1|MARGIN_COOL:8.5%|BB_SQUEEZE_BREAK:BB:0.134→0.208|IND_HEAT_WARM:79|INTL_TAIL:+3"
+  },
+  {
+    "ticker": "2359",
+    "name": "所羅門",
+    "market": "TSE",
+    "industry": "其他電子業",
+    "score": 58.0,
+    "close_price": 142.0,
+    "vol_ratio": 3.76,
+    "close_strength": 0.92,
+    "day_chg_pct": 5.19,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY2|VOL_IDEAL:3.76x|CLOSE_STRONG:0.92|IND_WARM:67|POCKET_PIVOT|GAP_PARTIAL:1.1%|RS:+6.6%|BREAKOUT_20D:142.00>135.00|RSI_BREAKOUT:74.5|MARGIN_WARM:15.7%|BB_WIDE:0.262|MOMENTUM_WALK|IND_HEAT_WARM:65"
+  },
+  {
+    "ticker": "3379",
+    "name": "彬台",
+    "market": "TPEx",
+    "industry": "電機機械",
+    "score": 57.0,
+    "close_price": 41.29999923706055,
+    "vol_ratio": 4.0,
+    "close_strength": 1.0,
+    "day_chg_pct": 9.99,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY2|VOL_IDEAL:4.00x|CLOSE_STRONG:1.00|IND_HOT:100|POCKET_PIVOT|GAP_FULL:1.2%|RS:+11.4%|RSI_HEALTHY:57.6|BB_WIDE:0.228|IND_HEAT_WARM:62"
+  },
+  {
+    "ticker": "8028",
+    "name": "昇陽半導體",
+    "market": "TSE",
+    "industry": "半導體業",
+    "score": 56.0,
+    "close_price": 287.5,
+    "vol_ratio": 2.01,
+    "close_strength": 1.0,
+    "day_chg_pct": 9.94,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY1|VOL_SOLID:2.01x|CLOSE_STRONG:1.00|IND_COLD:44|POCKET_PIVOT|GAP_PARTIAL:1.0%|RS:+11.3%|BREAKOUT_20D:287.50>261.50|RSI_HEALTHY:69.3|MARGIN_HOT:28.4%|MARGIN_DECLINING|BB_WIDE:0.367|IND_HEAT_WARM:79|INTL_TAIL:+3"
+  }
+]

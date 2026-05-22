@@ -1,0 +1,74 @@
+[
+  {
+    "ticker": "6133",
+    "name": "金橋",
+    "market": "TSE",
+    "industry": "電子零組件業",
+    "score": 68.0,
+    "close_price": 24.299999237060547,
+    "vol_ratio": 4.25,
+    "close_strength": 0.55,
+    "day_chg_pct": 7.52,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY2|VOL_IDEAL:4.25x|CLOSE_SOFT:0.55|IND_HOT:89|POCKET_PIVOT|GAP_FULL:7.1%|RS:+9.3%|BREAKOUT_20D:24.30>24.20|RSI_HEALTHY:55.7|MARGIN_COOL:11.3%|BB_SQUEEZE_EXPAND:BB:0.105→0.144|IND_HEAT_WARM:61"
+  },
+  {
+    "ticker": "3576",
+    "name": "聯合再生",
+    "market": "TSE",
+    "industry": "光電業",
+    "score": 60.0,
+    "close_price": 19.25,
+    "vol_ratio": 2.75,
+    "close_strength": 1.0,
+    "day_chg_pct": 10.0,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY1|VOL_SOLID:2.75x|CLOSE_STRONG:1.00|IND_HOT:100|POCKET_PIVOT|RS:+11.8%|BREAKOUT_20D:19.25>18.60|RSI_HEALTHY:64.3|BB_WIDE:0.288|MA5_WALK|IND_HEAT_HOT:85"
+  },
+  {
+    "ticker": "3055",
+    "name": "蔚華科",
+    "market": "TSE",
+    "industry": "電子通路業",
+    "score": 59.0,
+    "close_price": 124.0,
+    "vol_ratio": 4.16,
+    "close_strength": 1.0,
+    "day_chg_pct": 9.73,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY1|VOL_IDEAL:4.16x|CLOSE_STRONG:1.00|IND_WARM:78|POCKET_PIVOT|GAP_PARTIAL:4.4%|RS:+11.5%|BREAKOUT_20D:124.00>119.50|RSI_BREAKOUT:80.3|MARGIN_HOT:33.3%|BB_WIDE:0.652|MA5_WALK|MOMENTUM_WALK|IND_HEAT_HOT:97"
+  },
+  {
+    "ticker": "2412",
+    "name": "中華電",
+    "market": "TSE",
+    "industry": "通信網路業",
+    "score": 56.0,
+    "close_price": 142.5,
+    "vol_ratio": 4.83,
+    "close_strength": 0.79,
+    "day_chg_pct": 4.01,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY1|VOL_IDEAL:4.83x|CLOSE_HEALTHY:0.79|IND_COLD:56|POCKET_PIVOT|RS:+5.8%|BREAKOUT_20D:142.50>138.00|RSI_WEAK:50.0|MARGIN_COOL:0.0%|MARGIN_DECLINING|BB_SQUEEZE_BREAK:BB:0.020→0.044|MOMENTUM_WALK|IND_HEAT_WARM:73"
+  },
+  {
+    "ticker": "3663",
+    "name": "鑫科",
+    "market": "TPEx",
+    "industry": "其他電子業",
+    "score": 55.0,
+    "close_price": 83.4,
+    "vol_ratio": 3.98,
+    "close_strength": 1.0,
+    "day_chg_pct": 9.88,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY2|VOL_IDEAL:3.98x|CLOSE_STRONG:1.00|IND_COLD:33|POCKET_PIVOT|GAP_PARTIAL:0.5%|RS:+11.6%|BREAKOUT_20D:83.40>79.90|RSI_HEALTHY:63.4|BB_SQUEEZE_EXPAND:BB:0.168→0.245"
+  },
+  {
+    "ticker": "5291",
+    "name": "邑昇",
+    "market": "TPEx",
+    "industry": "電子零組件業",
+    "score": 55.0,
+    "close_price": 76.5,
+    "vol_ratio": 3.25,
+    "close_strength": 0.79,
+    "day_chg_pct": 4.37,
+    "flags": "SURGE_GATE_PASS|SURGE_DAY1|VOL_IDEAL:3.25x|CLOSE_HEALTHY:0.79|IND_HOT:89|POCKET_PIVOT|GAP_FULL:1.6%|RS:+6.1%|RSI_HEALTHY:68.6|BB_WIDE:0.318|IND_HEAT_WARM:61"
+  }
+]
