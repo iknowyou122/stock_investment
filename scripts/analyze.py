@@ -498,6 +498,37 @@ def _filter_data_warnings(data_quality_flags: list[str]) -> list[str]:
     return result
 
 
+def _compute_breakout_readiness(pts: dict) -> tuple[int, list[str], str]:
+    """Return (stars 0-5, active_signal_labels, verdict_text)."""
+    signals = [
+        (pts.get("bb_upper_walk_pts", 0) > 0,         "沿BB上軌行走（控盤吸籌）"),
+        (pts.get("breakout_volume_pts", 0) > 0,        "量能確認突破方向"),
+        (pts.get("institution_continuity_pts", 0) >= 4,"法人連買3日以上"),
+        (pts.get("foreign_strength_pts", 0) >= 8,      "外資強力買超"),
+        (pts.get("volume_dryup_pts", 0) >= 4,          "縮量整理（賣壓萎縮）"),
+        (pts.get("short_squeeze_setup_pts", 0) > 0,    "空頭開始回補"),
+        (pts.get("margin_persist_decline_pts", 0) >= 2,"融資持續降低（浮額洗出）"),
+        (pts.get("chip_concentration_accel_pts", 0) > 0,"大戶加速集中"),
+        (pts.get("vol_asymmetry_pts", 0) >= 2,         "上漲日成交量大於下跌日"),
+        (pts.get("obv_stealth_pts", 0) > 0,            "OBV隱蔽上升（資金悄悄進場）"),
+    ]
+    active = [label for hit, label in signals if hit]
+    count = len(active)
+
+    if count <= 1:
+        stars, verdict = 1, "條件不足，突破動能尚未累積"
+    elif count <= 3:
+        stars, verdict = 2, "機率偏低，可觀察但不宜追"
+    elif count <= 5:
+        stars, verdict = 3, "機率中等，需等量能配合再進"
+    elif count <= 7:
+        stars, verdict = 4, "機率較高，多項訊號支持"
+    else:
+        stars, verdict = 5, "多項訊號共振，突破動能強"
+
+    return stars, active, verdict
+
+
 def _infer_target_basis(plan, score_breakdown: dict | None) -> str:
     """Infer which resistance level was used as the target."""
     if not plan or not score_breakdown:
@@ -574,6 +605,30 @@ def _render_execution(plan, close: float | None, score_breakdown: dict | None = 
         "  [dim]目標價 = 上方最近一道真實壓力帶（60日高點 → 120日高點 → 52週高點），"
         "需至少距現價 3%。已在高點附近則用收盤×1.05。[/dim]"
     )
+
+    # Breakout readiness (only show when there's a meaningful target above)
+    if score_breakdown and up_pct > 3:
+        pts_dict = score_breakdown.get("pts", {})
+        stars, active_signals, verdict = _compute_breakout_readiness(pts_dict)
+        star_filled = "★" * stars + "☆" * (5 - stars)
+        star_color = (
+            "bright_green" if stars >= 4
+            else "yellow" if stars == 3
+            else "red"
+        )
+        console.print()
+        console.print(Rule("[bold]突破研判[/bold]", style="dim"))
+        console.print()
+        console.print(
+            f"  [{star_color}]{star_filled}[/{star_color}]  "
+            f"[bold]{verdict}[/bold]  "
+            f"[dim]（{stars}/5，{len(active_signals)}/10 項訊號達標）[/dim]"
+        )
+        if active_signals:
+            console.print()
+            for sig in active_signals:
+                console.print(f"  [green]✓[/green] [dim]{sig}[/dim]")
+        console.print()
 
 
 # ---------------------------------------------------------------------------
