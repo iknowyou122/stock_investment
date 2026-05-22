@@ -790,6 +790,50 @@ def main() -> None:
         console.print()
         _render_diagnosis(flags, signal.action)
 
+    # ── Monthly Revenue (Growth) ──────────────────────────────────────────────
+    try:
+        from batch_plan import _load_growth_index
+        growth_index = _load_growth_index()
+        grec = growth_index.get(ticker)
+        if grec:
+            console.print()
+            console.print(Rule("[bold]月營收基本面[/bold]", style="dim"))
+            console.print()
+            yoy  = grec.get("yoy_pct") or 0.0
+            mom  = grec.get("mom_pct") or 0.0
+            con  = grec.get("consecutive", 0) or 0
+            accel = grec.get("acceleration_pct") or 0.0
+            score_g = grec.get("score", 0.0)
+
+            yoy_color  = "red" if yoy > 0 else "green"
+            mom_color  = "red" if mom > 0 else "green"
+            accel_str  = (f"[red]+{accel:.1f}%[/red]" if accel > 0
+                          else f"[green]{accel:.1f}%[/green]")
+
+            from rich.table import Table as _Table
+            from rich import box as _box
+            gtbl = _Table(box=_box.SIMPLE, show_header=False, padding=(0, 2))
+            gtbl.add_column(style="dim", width=20)
+            gtbl.add_column()
+            gtbl.add_column(style="dim")
+            gtbl.add_row("月營收 YoY",   f"[{yoy_color}]{yoy:+.1f}%[/{yoy_color}]",  "年增率")
+            gtbl.add_row("月營收 MoM",   f"[{mom_color}]{mom:+.1f}%[/{mom_color}]",  "月增率")
+            gtbl.add_row("連續成長",      f"{con} 個月",                               "連續正 YoY 月數")
+            gtbl.add_row("成長加速",      accel_str,                                   "本月 YoY − 上月 YoY")
+            gtbl.add_row("成長評分",      f"{score_g:.1f} 分",                         "綜合評分（滿分 100）")
+            console.print(gtbl)
+
+            if yoy >= 50:
+                console.print("  [bold red]★ 高成長股（YoY ≥50%），基本面評分 +8 pts[/bold red]")
+            elif yoy >= 30:
+                console.print("  [red]▲ 中成長股（YoY ≥30%），基本面評分 +5 pts[/red]")
+            elif yoy >= 20:
+                console.print("  [dim]▲ 成長股（YoY ≥20%），基本面評分 +3 pts[/dim]")
+            if con >= 3:
+                console.print(f"  [dim]+ 連續成長 {con} 個月，額外 +2 pts[/dim]")
+    except Exception:
+        pass
+
     # ── Execution Plan ────────────────────────────────────────────────────────
     console.print()
     console.print(Rule("[bold]執行計畫[/bold]", style="dim"))

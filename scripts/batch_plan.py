@@ -357,6 +357,71 @@ def _apply_sector_ranks(results: list[dict], industry_map: dict[str, str]) -> in
     return boosted
 
 
+def _load_growth_index() -> dict[str, dict]:
+    """Load the most recent growth scan results as a ticker→record dict.
+
+    Returns empty dict if no file found (graceful degradation).
+    """
+    import glob as _glob
+    pattern = str(Path(__file__).resolve().parents[1] / "data" / "growth" / "growth_*.json")
+    files = sorted(_glob.glob(pattern), reverse=True)
+    if not files:
+        return {}
+    try:
+        import json as _json
+        data = _json.loads(Path(files[0]).read_text())
+        return {r["ticker"]: r for r in data.get("records", [])}
+    except Exception:
+        return {}
+
+
+def _apply_growth_bonus(results: list[dict], growth_index: dict[str, dict]) -> int:
+    """Boost stocks that appear in the monthly revenue growth scan.
+
+    Tiers (applied to non-halted, non-error stocks only):
+      YoY ≥ 50%                   → +8 pts  (GROWTH_HIGH flag)
+      YoY ≥ 30%                   → +5 pts  (GROWTH_MID flag)
+      YoY ≥ 20%                   → +3 pts  (GROWTH_LOW flag)
+      consecutive months ≥ 3      → additional +2 pts (GROWTH_CONSEC flag)
+
+    Returns count of stocks boosted.
+    """
+    if not growth_index:
+        return 0
+
+    boosted = 0
+    for r in results:
+        if r.get("halt") or r.get("error") is not None:
+            continue
+        rec = growth_index.get(r["ticker"])
+        if not rec:
+            continue
+        yoy = rec.get("yoy_pct") or 0.0
+        if yoy >= 50:
+            bonus, flag = 8, "GROWTH_HIGH"
+        elif yoy >= 30:
+            bonus, flag = 5, "GROWTH_MID"
+        elif yoy >= 20:
+            bonus, flag = 3, "GROWTH_LOW"
+        else:
+            continue
+
+        consecutive = rec.get("consecutive", 0) or 0
+        consec_bonus = 2 if consecutive >= 3 else 0
+
+        r["confidence"] = min(100, r["confidence"] + bonus + consec_bonus)
+        flags = list(r.get("flags") or [])
+        flags.append(f"{flag}:YoY{yoy:.0f}%")
+        if consec_bonus:
+            flags.append(f"GROWTH_CONSEC:{consecutive}M")
+        r["flags"] = flags
+        r["growth_yoy"] = yoy
+        r["growth_consecutive"] = consecutive
+        boosted += 1
+
+    return boosted
+
+
 def _apply_catalyst_filter(
     results: list[dict],
     industry_map: dict[str, str],
@@ -1140,6 +1205,11 @@ def run_batch(
     industry_strength: dict[str, float] = {
         ind: _median_local(chgs) for ind, chgs in _industry_change.items()
     }
+
+    growth_index = _load_growth_index()
+    n_growth = _apply_growth_bonus(results, growth_index)
+    if n_growth:
+        _console.print(f"  [dim]↑ 月營收成長加分: {n_growth} 檔 (GROWTH_HIGH +8 / MID +5 / LOW +3)[/dim]")
 
     if industry_map:
         n_sector = _apply_sector_ranks(results, industry_map)

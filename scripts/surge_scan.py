@@ -1384,6 +1384,17 @@ def run_surge_scan(
                 except Exception:
                     pass
 
+    # Growth bonus — load monthly revenue data and boost matching tickers
+    try:
+        from batch_plan import _apply_growth_bonus, _load_growth_index
+        growth_index = _load_growth_index()
+        n_growth = _apply_growth_bonus(results, growth_index)
+        if n_growth:
+            _console.print(f"  [dim]↑ 月營收成長加分: {n_growth} 檔 (GROWTH_HIGH +8 / MID +5 / LOW +3)[/dim]")
+            results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    except Exception:
+        pass
+
     _print_surge_table(results, scan_date, name_map)
 
     if _HAS_SURGE_DB and results:
