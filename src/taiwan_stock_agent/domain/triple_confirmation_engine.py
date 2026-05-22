@@ -711,6 +711,9 @@ class TripleConfirmationEngine:
             if self._is_momentum_breakout(ohlcv, ohlcv_history, volume_profile, gate_detail_flags):
                 bd.flags.append("MOMENTUM_TRACK")
                 # proceed to full pillar scoring below
+            elif self._is_inst_momentum(ohlcv, volume_profile, gate_detail_flags, twse_proxy):
+                bd.flags.append("INST_MOMENTUM")
+                # proceed to full pillar scoring below
             elif self._is_chip_loading(gate_detail_flags, twse_proxy):
                 bd.flags.append("CHIP_LOADING")
                 bd.flags.extend(gate_detail_flags)
@@ -2403,12 +2406,12 @@ class TripleConfirmationEngine:
             data_quality_flags.append("TAIFEX_FUTURES_BEARISH")
 
         # v2.2b: propagate COILING / COILING_PRIME flags (set in _compute)
-        for tag in ("COILING_PRIME", "COILING", "MOMENTUM_TRACK"):
+        for tag in ("COILING_PRIME", "COILING", "MOMENTUM_TRACK", "INST_MOMENTUM"):
             if tag in breakdown.flags and tag not in data_quality_flags:
                 data_quality_flags.append(tag)
 
-        # For MOMENTUM_TRACK: also surface gate pass/fail flags so UI shows context
-        if "MOMENTUM_TRACK" in breakdown.flags:
+        # For MOMENTUM_TRACK / INST_MOMENTUM: surface gate pass/fail flags so UI shows context
+        if "MOMENTUM_TRACK" in breakdown.flags or "INST_MOMENTUM" in breakdown.flags:
             for f in breakdown.flags:
                 if any(f.startswith(p) for p in ("GATE_PASS:", "GATE_FAIL:", "GATE_SKIP:")):
                     if f not in data_quality_flags:
@@ -2631,6 +2634,42 @@ class TripleConfirmationEngine:
             return False
 
         return True
+
+    @staticmethod
+    def _is_inst_momentum(
+        ohlcv: "DailyOHLCV",
+        volume_profile: "VolumeProfile",
+        gate_flags: list[str],
+        twse_proxy: "TWSEChipProxy | None",
+    ) -> bool:
+        """Institutional Momentum Track: sustained institutional buying bypasses G2.
+
+        Catches stocks being gradually accumulated while drifting higher — wide BB
+        because the price is trending, not consolidating flat. Unlike momentum_breakout
+        (which requires a single strong day), this track fires on multi-day institutional
+        conviction even if each individual day is unremarkable.
+
+        Activates when ALL of:
+          - G2 is the ONLY gate failure (G1, G3, G4, G5 all passed/skipped)
+          - Proximity ≥ 85% of 20D high (wider than momentum_breakout's 92%)
+          - Foreign OR Trust consecutive buy ≥ 5 days (sustained, not one-off)
+        """
+        failures = [f for f in gate_flags if f.startswith("GATE_FAIL:")]
+        if len(failures) != 1 or not failures[0].startswith("GATE_FAIL:G2"):
+            return False
+
+        if volume_profile.twenty_day_high <= 0:
+            return False
+        if ohlcv.close / volume_profile.twenty_day_high < 0.85:
+            return False
+
+        if twse_proxy is None or not twse_proxy.is_available:
+            return False
+
+        return (
+            twse_proxy.foreign_consecutive_buy_days >= 5
+            or twse_proxy.trust_consecutive_buy_days >= 5
+        )
 
     @staticmethod
     def _is_chip_loading(

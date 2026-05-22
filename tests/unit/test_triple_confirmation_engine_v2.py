@@ -2164,6 +2164,162 @@ class TestMomentumBreakoutTrack:
         assert "NO_SETUP" in signal.data_quality_flags
 
 
+class TestInstMomentumTrack:
+    """_is_inst_momentum() — institutional consecutive buying bypasses G2."""
+
+    def _gate_flags(self, extra: list[str] | None = None) -> list[str]:
+        flags = [
+            "GATE_PASS:G1_ZONE:87.0%",
+            "GATE_FAIL:G2_BB_WIDE_PCT:55.0p",
+            "GATE_PASS:G3_LIQ:500.0M",
+            "GATE_PASS:G4_REGIME:uptrend",
+        ]
+        return flags + (extra or [])
+
+    def _proxy(self, foreign_consec: int = 5, trust_consec: int = 0) -> TWSEChipProxy:
+        return _make_twse_proxy(
+            foreign_consecutive_buy_days=foreign_consec,
+            trust_consecutive_buy_days=trust_consec,
+            is_available=True,
+        )
+
+    def _vp(self, twenty_day_high: float = 100.0) -> VolumeProfile:
+        return _make_volume_profile(twenty_day_high=twenty_day_high)
+
+    def _ohlcv(self, close: float = 87.0) -> DailyOHLCV:
+        return _make_ohlcv(close=close, high=close + 2, low=close - 2, volume=10_000)
+
+    # --- unit: _is_inst_momentum ---
+
+    def test_fires_when_only_g2_fails_and_foreign_consec_5d(self):
+        ohlcv = self._ohlcv(close=87.0)
+        vp = self._vp(twenty_day_high=100.0)
+        proxy = self._proxy(foreign_consec=5)
+        flags = self._gate_flags()
+        assert TripleConfirmationEngine._is_inst_momentum(ohlcv, vp, flags, proxy)
+
+    def test_fires_on_trust_consec_5d(self):
+        ohlcv = self._ohlcv(close=87.0)
+        vp = self._vp(twenty_day_high=100.0)
+        proxy = self._proxy(foreign_consec=0, trust_consec=5)
+        flags = self._gate_flags()
+        assert TripleConfirmationEngine._is_inst_momentum(ohlcv, vp, flags, proxy)
+
+    def test_does_not_fire_when_consec_only_4d(self):
+        ohlcv = self._ohlcv(close=87.0)
+        vp = self._vp(twenty_day_high=100.0)
+        proxy = self._proxy(foreign_consec=4, trust_consec=0)
+        flags = self._gate_flags()
+        assert not TripleConfirmationEngine._is_inst_momentum(ohlcv, vp, flags, proxy)
+
+    def test_does_not_fire_when_proximity_below_85pct(self):
+        ohlcv = self._ohlcv(close=84.0)          # 84/100 = 84% < 85%
+        vp = self._vp(twenty_day_high=100.0)
+        proxy = self._proxy(foreign_consec=6)
+        flags = self._gate_flags()
+        assert not TripleConfirmationEngine._is_inst_momentum(ohlcv, vp, flags, proxy)
+
+    def test_does_not_fire_when_two_gates_fail(self):
+        ohlcv = self._ohlcv(close=87.0)
+        vp = self._vp(twenty_day_high=100.0)
+        proxy = self._proxy(foreign_consec=6)
+        flags = ["GATE_FAIL:G2_BB_WIDE_PCT:55.0p", "GATE_FAIL:G5_OVERHEAD:75.0%"]
+        assert not TripleConfirmationEngine._is_inst_momentum(ohlcv, vp, flags, proxy)
+
+    def test_does_not_fire_when_g1_fails_not_g2(self):
+        ohlcv = self._ohlcv(close=87.0)
+        vp = self._vp(twenty_day_high=100.0)
+        proxy = self._proxy(foreign_consec=6)
+        flags = ["GATE_FAIL:G1_TOO_FAR_BELOW:80.0%"]
+        assert not TripleConfirmationEngine._is_inst_momentum(ohlcv, vp, flags, proxy)
+
+    def test_does_not_fire_when_proxy_unavailable(self):
+        ohlcv = self._ohlcv(close=87.0)
+        vp = self._vp(twenty_day_high=100.0)
+        proxy = _make_twse_proxy(foreign_consecutive_buy_days=6, is_available=False)
+        flags = self._gate_flags()
+        assert not TripleConfirmationEngine._is_inst_momentum(ohlcv, vp, flags, proxy)
+
+    def test_does_not_fire_when_proxy_is_none(self):
+        ohlcv = self._ohlcv(close=87.0)
+        vp = self._vp(twenty_day_high=100.0)
+        flags = self._gate_flags()
+        assert not TripleConfirmationEngine._is_inst_momentum(ohlcv, vp, flags, None)
+
+    # --- integration: full engine ---
+
+    @staticmethod
+    def _make_wide_bb_history() -> list[DailyOHLCV]:
+        """60 calm bars (tight BB) + 20 volatile bars (wide BB) = 80 bars.
+
+        Need ≥79 bars so rolling-20 BB produces ≥60 values, enabling bb_width_pct
+        calculation (percentile). Calm bars → BB_W ≈ 0; volatile bars → BB_W >> 15%.
+        The percentile puts current BB at ~70th → G2 FAIL.
+        G3 passes (600k × ~80 = 48M >> 20M TSE threshold).
+        """
+        bars = []
+        base = date(2025, 1, 2)
+        for i in range(60):
+            c = 75.0
+            bars.append(DailyOHLCV(
+                ticker="TEST", trade_date=base + timedelta(days=i),
+                open=c, high=c + 0.3, low=c - 0.3, close=c, volume=600_000,
+            ))
+        for i in range(20):
+            # Alternating volatile closes so std_dev is high (not a smooth trend)
+            c = 80.0 + (5 if i % 2 == 0 else -5)
+            bars.append(DailyOHLCV(
+                ticker="TEST", trade_date=base + timedelta(days=60 + i),
+                open=c - 3, high=c + 8, low=c - 8, close=c, volume=600_000,
+            ))
+        return bars
+
+    def test_inst_momentum_gives_watch_not_caution(self):
+        """Stock at 87% of 20D high, wide BB (G2 only fail), foreign buying 5+ days → INST_MOMENTUM fires."""
+        history = self._make_wide_bb_history()
+        ohlcv = _make_ohlcv(close=87.0, high=89.0, low=85.0, volume=600_000)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=108.0, sixty_day_sessions=60)
+        proxy = _make_twse_proxy(
+            foreign_consecutive_buy_days=5,
+            trust_consecutive_buy_days=0,
+            is_available=True,
+        )
+
+        engine = TripleConfirmationEngine()
+        signal, _, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history,
+            chip_report=_make_chip_report(),
+            volume_profile=vp,
+            twse_proxy=proxy,
+            taiex_history=_make_history(30, base_close=17000.0, flat=False),
+        )
+        assert "INST_MOMENTUM" in signal.data_quality_flags, (
+            f"Expected INST_MOMENTUM, got flags={signal.data_quality_flags}"
+        )
+        assert signal.action != "CAUTION", f"Expected WATCH/LONG, got CAUTION (conf={signal.confidence})"
+
+    def test_inst_momentum_flag_not_set_when_only_4d(self):
+        history = self._make_wide_bb_history()
+        ohlcv = _make_ohlcv(close=87.0, high=89.0, low=85.0, volume=600_000)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=108.0, sixty_day_sessions=60)
+        proxy = _make_twse_proxy(
+            foreign_consecutive_buy_days=4,
+            is_available=True,
+        )
+
+        engine = TripleConfirmationEngine()
+        signal, _, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=history,
+            chip_report=_make_chip_report(),
+            volume_profile=vp,
+            twse_proxy=proxy,
+            taiex_history=_make_history(30, base_close=17000.0, flat=False),
+        )
+        assert "INST_MOMENTUM" not in signal.data_quality_flags
+
+
 class TestChipLoadingTrack:
     """_is_chip_loading() + full-engine CHIP_LOADING integration."""
 

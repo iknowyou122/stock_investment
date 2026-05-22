@@ -399,6 +399,9 @@ def _translate_flag(flag: str) -> tuple[str, str] | None:
     if "MOMENTUM_TRACK" in flag:
         return "green", "前日已出現訊號，今日動能持續追蹤中"
 
+    if "INST_MOMENTUM" in flag:
+        return "green", "法人連續買超 ≥5 天，籌碼持續累積中（BB寬但趨勢向上）"
+
     if "BB_SQUEEZE_BREAKOUT" in flag:
         return "green", "布林帶壓縮後向上突破：技術面啟動訊號"
 
