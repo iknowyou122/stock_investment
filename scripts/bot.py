@@ -735,6 +735,26 @@ async def _job_optimize() -> None:
     logger.info("optimize DONE result=%s", result)
 
 
+async def _job_growth_scan(force: bool = False, notify_fn=None) -> None:
+    """11th of each month 22:00 — monthly revenue growth scanner."""
+    import scripts.growth_scan as growth_scan  # type: ignore
+    notify = notify_fn or _send
+    logger.info("growth_scan START force=%s", force)
+    await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: growth_scan.run(min_yoy=20, top=20, notify=False, force=force, quiet=True),
+    )
+    loaded = growth_scan.load_latest_results()
+    if not loaded:
+        logger.warning("growth_scan returned no results")
+        await notify("📈 月營收掃描完成，但無符合條件標的")
+        return
+    records, year, month = loaded
+    msg = growth_scan.format_telegram_msg(records, year, month, top=20)
+    await notify(msg)
+    logger.info("growth_scan DONE n=%d", len(records))
+
+
 # ── Telegram command handlers ────────────────────────────────────────────────
 
 @_track("top")
@@ -940,6 +960,12 @@ async def cmd_rollback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"⏪ 已還原上一版參數：\n{lines}")
 
 
+@_track("growth")
+async def cmd_growth(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("📈 *月營收成長掃描中…* 請稍候", parse_mode="Markdown")
+    await _job_growth_scan(force=True, notify_fn=_send)
+
+
 @_track("help")
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     msg = (
@@ -950,6 +976,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/surge        爆量雷達盤中即時掃描（Surge Live）\n"
         "/report       盤後報告（命中率 \\+ 隔日名單）\n"
         "/optimize     啟動 AI 參數優化 Agent\n"
+        "/growth       月營收成長股掃描（YoY ≥20%）\n"
         "\n"
         "*查詢*\n"
         "/top          查看今日名單（不重新掃描）\n"
@@ -972,7 +999,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "09:05          開盤掃描 \\+ 推播名單\n"
         "10–13:05       每小時重掃，有異動才推\n"
         "17:00          盤後報告\n"
-        "週二/五 18:00  AI 優化"
+        "週二/五 18:00  AI 優化\n"
+        "每月11日 22:00 月營收成長掃描"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -1501,6 +1529,7 @@ async def main_async(llm: str) -> None:
         ("params", cmd_params), ("optimize", cmd_optimize),
         ("approve", cmd_approve), ("rollback", cmd_rollback),
         ("plan", cmd_plan), ("surge", cmd_surge), ("report", cmd_report),
+        ("growth", cmd_growth),
         ("test", cmd_test), ("help", cmd_help),
     ]:
         app.add_handler(CommandHandler(cmd_name, handler))
@@ -1519,6 +1548,8 @@ async def main_async(llm: str) -> None:
     scheduler.add_job(_job_surge_postmarket, "cron", day_of_week="mon-fri", hour=17, minute=5)
     # 18:00 optimize on Tue and Fri
     scheduler.add_job(_job_optimize, "cron", day_of_week="tue,fri", hour=18, minute=0)
+    # 22:00 on 11th of each month — monthly revenue growth scan
+    scheduler.add_job(_job_growth_scan, "cron", day=11, hour=22, minute=0)
     scheduler.start()
 
     await app.initialize()

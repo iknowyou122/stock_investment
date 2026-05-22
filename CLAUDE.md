@@ -89,7 +89,8 @@ All available `make` targets — do NOT cite commands not in this list.
 | `make auto-tune` | `auto_tune.py` | — | 自動調參 |
 | `make test` | pytest | — | 執行所有單元測試 |
 | `make report` | `report.py` | — | 盤後復盤（非 TCE）|
-| `make flow` | plan + surge + report | Both | 全流程一鍵（plan → surge → report）|
+| `make growth` | `growth_scan.py` | — | 月營收成長股掃描（MOPS，YoY ≥20%）|
+| `make flow` | plan + surge + report | Both | 全流程一鍵（growth[月] → plan → surge → report）|
 | `make bot` | `bot.py` | — | 啟動 Telegram Bot |
 | `make surge` | `surge_scan.py` | SurgeRadar | 爆量掃描（非 TCE）|
 | `make surge-live` | `surge_scan.py --intraday` | SurgeRadar | 盤中即時爆量掃描 |

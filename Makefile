@@ -3,12 +3,13 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune surge-backtest heat-scan heat-update tight-base-bt tight-base-v2 rotation analyze
+.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune surge-backtest heat-scan heat-update tight-base-bt tight-base-v2 rotation analyze growth
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
 
-_HEAT_TODAY := data/market_heat/heat_$(_TODAY).json
+_HEAT_TODAY        := data/market_heat/heat_$(_TODAY).json
+_GROWTH_THIS_MONTH := data/growth/growth_$(shell date +%Y-%m).json
 
 # ── 安裝依賴 ─────────────────────────────────────────────────────────────────
 install:
@@ -147,14 +148,29 @@ else
 	$(PYTHON) scripts/report.py --date $(DATE)
 endif
 
+# ── 月營收成長股掃描 ──────────────────────────────────────────────────────────
+# 用法: make growth             # 掃最新完整月份
+#       make growth MIN_YOY=30  # 調高 YoY 門檻
+#       make growth TOP=30      # 顯示前30名（預設20）
+MIN_YOY ?= 20
+TOP     ?= 20
+
+growth:
+	$(PYTHON) scripts/growth_scan.py \
+		--min-yoy $(MIN_YOY) \
+		--top $(TOP) \
+		$(if $(filter 1,$(NOTIFY)),--notify)
+
 # ── 完整每日流程 (Flow) ────────────────────────────────────────────────────────
 # 掃描 + 產出報告（一鍵執行）
 # 用法: make flow
 # 執行順序：
-#   1. plan   — 預突破批次掃描
-#   2. surge  — 噴發雷達掃描（短線爆量）
-#   3. report — T+1 結算 + 勝率報告
+#   1. growth — 月營收成長掃描（本月尚無資料時自動執行）
+#   2. plan   — 預突破批次掃描
+#   3. surge  — 噴發雷達掃描（短線爆量）
+#   4. report — T+1 結算 + 勝率報告
 flow:
+	@test -f "$(_GROWTH_THIS_MONTH)" || { echo "  [成長掃描] 本月尚無資料，執行中…"; $(MAKE) growth; }
 	$(MAKE) plan
 	$(MAKE) surge
 	$(MAKE) report
