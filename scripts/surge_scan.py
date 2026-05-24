@@ -1230,13 +1230,15 @@ def run_surge_scan(
     llm_provider=None,
 ) -> list[dict]:
     from taiwan_stock_agent.infrastructure.twse_client import ChipProxyFetcher
+    from taiwan_stock_agent.infrastructure.paid_data_fetcher import PaidDataFetcher
 
     market_map = market_map or {}
     name_map = name_map or {}
     industry_map = industry_map or {}
 
     finmind = FinMindClient()
-    chip_fetcher = ChipProxyFetcher()
+    paid_fetcher = PaidDataFetcher()
+    chip_fetcher = ChipProxyFetcher(paid_fetcher=paid_fetcher)
     chip_fetcher.shares_map = _load_shares_map()
 
     # Shared TAIEX history

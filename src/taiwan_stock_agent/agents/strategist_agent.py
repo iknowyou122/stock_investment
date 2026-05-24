@@ -82,6 +82,10 @@ class StrategistAgent:
         # TAIEX history cache: one fetch per date serves all tickers on that date.
         # {analysis_date: list[DailyOHLCV] | None}
         self._taiex_cache: dict[date, list[DailyOHLCV] | None] = {}
+        # Market-level taifex context (margin rate, futures bearish flag).
+        # Set externally by batch_plan/_run_phase before launching workers so
+        # all tickers in a batch share the same market-level context.
+        self._taifex_context: dict = {}
 
     def run(self, ticker: str, analysis_date: date, market: str = "TSE") -> SignalOutput:
         """Run the full pipeline for one ticker on analysis_date.
@@ -169,6 +173,7 @@ class StrategistAgent:
             twse_proxy=twse_proxy,
             taiex_history=taiex_history,
             market=market,
+            taifex_context=self._taifex_context or None,
         )
 
         # --- LLM reasoning (Phase 3) ---
