@@ -54,16 +54,22 @@ class PaidDataFetcher:
             return []
 
     def fetch_disposal_tickers(self, trade_date: date) -> frozenset[str]:
-        """Tickers under disposition on trade_date (公布處置有價證券表)."""
+        """Tickers under disposition on trade_date (公布處置有價證券表).
+
+        Dataset: TaiwanStockDispositionSecuritiesPeriod
+        Fields verified 2026-05-25: date, stock_id, stock_name, disposition_cnt,
+        condition, measure, period_start, period_end
+        """
         if trade_date in self._disposal_cache:
             return self._disposal_cache[trade_date]
-        rows = self._get("TaiwanStockDisposal", trade_date)
+        rows = self._get("TaiwanStockDispositionSecuritiesPeriod", trade_date)
         result: set[str] = set()
         for r in rows:
             ticker = str(r.get("stock_id", "")).strip()
             if not ticker:
                 continue
-            end_str = str(r.get("end_date", "")).strip()
+            # period_end is the actual end field in TaiwanStockDispositionSecuritiesPeriod
+            end_str = str(r.get("period_end", "")).strip()
             try:
                 end = date.fromisoformat(end_str) if end_str else trade_date
                 if end >= trade_date:
@@ -77,27 +83,42 @@ class PaidDataFetcher:
         return fs
 
     def fetch_halt_tickers(self, trade_date: date) -> frozenset[str]:
-        """Tickers with trading halted (台股暫停交易公告)."""
+        """Tickers with trading halted (台股暫停交易公告).
+
+        Dataset: TaiwanStockSuspended
+        Fields verified 2026-05-25: date, stock_id, suspension_time,
+        resumption_date, resumption_time
+        """
         if trade_date in self._halt_cache:
             return self._halt_cache[trade_date]
-        rows = self._get("TaiwanStockTradingHalt", trade_date)
+        rows = self._get("TaiwanStockSuspended", trade_date)
         result = frozenset(str(r.get("stock_id", "")).strip() for r in rows if r.get("stock_id"))
         self._halt_cache[trade_date] = result
         return result
 
     def fetch_limit_up_tickers(self, trade_date: date) -> frozenset[str]:
-        """Tickers that closed at limit-up price (漲停收盤)."""
+        """Tickers that closed at limit-up price (漲停收盤).
+
+        Dataset: TaiwanStockPriceLimit
+        Fields verified 2026-05-25: date, stock_id, reference_price, limit_up, limit_down
+        NOTE: This dataset provides price *limits* (thresholds), not actual closing prices.
+        We compare reference_price to limit_up as a proxy — tickers where the reference
+        price equals the limit-up price are effectively locked at limit-up from prior day.
+        This is an approximation; true same-day close vs limit requires TaiwanStockPrice.
+        """
         if trade_date in self._limit_up_cache:
             return self._limit_up_cache[trade_date]
-        rows = self._get("TaiwanDailyPriceLimit", trade_date)
+        rows = self._get("TaiwanStockPriceLimit", trade_date)
         result: set[str] = set()
         for r in rows:
             ticker = str(r.get("stock_id", "")).strip()
-            close = r.get("close") or r.get("收盤價")
-            limit_up = r.get("limit_up_price") or r.get("漲停價") or r.get("漲停")
-            if ticker and close is not None and limit_up is not None:
+            # reference_price is yesterday's close; limit_up is today's upper bound
+            ref = r.get("reference_price")
+            limit_up = r.get("limit_up")
+            if ticker and ref is not None and limit_up is not None:
                 try:
-                    if abs(float(close) - float(limit_up)) < 0.02:
+                    # If reference_price == limit_up, the stock was already at ceiling
+                    if abs(float(ref) - float(limit_up)) < 0.02:
                         result.add(ticker)
                 except (TypeError, ValueError):
                     pass
@@ -106,30 +127,38 @@ class PaidDataFetcher:
         return fs
 
     def fetch_daytrade_restricted_tickers(self, trade_date: date) -> frozenset[str]:
-        """Tickers where 先賣後買當沖 is suspended (暫停先賣後買當沖預告表)."""
+        """Tickers where 先賣後買當沖 is suspended (暫停先賣後買當沖預告表).
+
+        Dataset: TaiwanStockDayTradingSuspension
+        Fields verified 2026-05-25: stock_id, date, end_date, reason
+        The API returns rows where trade_date falls within [date, end_date].
+        """
         if trade_date in self._daytrade_cache:
             return self._daytrade_cache[trade_date]
-        rows = self._get("TaiwanStockDayTradeRestriction", trade_date)
+        rows = self._get("TaiwanStockDayTradingSuspension", trade_date)
         result = frozenset(str(r.get("stock_id", "")).strip() for r in rows if r.get("stock_id"))
         self._daytrade_cache[trade_date] = result
         return result
 
     def fetch_market_margin_maintenance(self, trade_date: date) -> float | None:
-        """Overall market margin maintenance rate (大盤融資維持率). None if unavailable."""
+        """Overall market margin maintenance rate (大盤融資維持率). None if unavailable.
+
+        Dataset: TaiwanTotalExchangeMarginMaintenance
+        Fields verified 2026-05-25: date, TotalExchangeMarginMaintenance
+        Returns a single float (market-wide rate, e.g. 196.864 for 2026-05-22).
+        """
         if trade_date in self._margin_cache:
             return self._margin_cache[trade_date]
-        rows = self._get("TaiwanMarginMaintenanceRatio", trade_date)
+        rows = self._get("TaiwanTotalExchangeMarginMaintenance", trade_date)
         rate: float | None = None
         for r in rows:
-            for key in ("margin_maintenance_ratio", "rate", "維持率", "整體維持率"):
-                v = r.get(key)
-                if v is not None:
-                    try:
-                        rate = float(v)
-                        break
-                    except (TypeError, ValueError):
-                        pass
-            if rate is not None:
-                break
+            # Actual field name is TotalExchangeMarginMaintenance (CamelCase)
+            v = r.get("TotalExchangeMarginMaintenance")
+            if v is not None:
+                try:
+                    rate = float(v)
+                    break
+                except (TypeError, ValueError):
+                    pass
         self._margin_cache[trade_date] = rate
         return rate
