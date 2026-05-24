@@ -39,9 +39,9 @@ class TestFetchDisposalTickers:
         pf = self._make_fetcher(monkeypatch)
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"data": [
-            {"stock_id": "2330", "end_date": "2026-05-30"},
-            {"stock_id": "3481", "end_date": "2026-05-20"},  # already ended
-            {"stock_id": "6547", "end_date": "2026-05-22"},  # ends today — include
+            {"stock_id": "2330", "period_end": "2026-05-30"},
+            {"stock_id": "3481", "period_end": "2026-05-20"},  # already ended
+            {"stock_id": "6547", "period_end": "2026-05-22"},  # ends today — include
         ]}
         mock_resp.raise_for_status = MagicMock()
         with patch("requests.get", return_value=mock_resp):
@@ -53,7 +53,7 @@ class TestFetchDisposalTickers:
     def test_caches_result(self, monkeypatch):
         pf = self._make_fetcher(monkeypatch)
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"data": [{"stock_id": "2330", "end_date": "2026-05-30"}]}
+        mock_resp.json.return_value = {"data": [{"stock_id": "2330", "period_end": "2026-05-30"}]}
         mock_resp.raise_for_status = MagicMock()
         with patch("requests.get", return_value=mock_resp) as mock_get:
             pf.fetch_disposal_tickers(TEST_DATE)
@@ -72,7 +72,7 @@ class TestFetchMarketMarginMaintenance:
         monkeypatch.setenv("FINMIND_API_KEY", "test_key")
         pf = PaidDataFetcher()
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"data": [{"margin_maintenance_ratio": 145.2}]}
+        mock_resp.json.return_value = {"data": [{"TotalExchangeMarginMaintenance": 145.2}]}
         mock_resp.raise_for_status = MagicMock()
         with patch("requests.get", return_value=mock_resp):
             rate = pf.fetch_market_margin_maintenance(TEST_DATE)
