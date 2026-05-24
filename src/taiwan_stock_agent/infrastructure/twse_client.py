@@ -25,6 +25,7 @@ import requests
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from taiwan_stock_agent.domain.models import TWSEChipProxy
+from taiwan_stock_agent.infrastructure.paid_data_fetcher import PaidDataFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +67,9 @@ class ChipProxyFetcher:
         proxy = fetcher.fetch("2330", date(2026, 3, 24))
     """
 
-    def __init__(self, cache_dir: Path | None = None) -> None:
+    def __init__(self, cache_dir: Path | None = None, paid_fetcher: PaidDataFetcher | None = None) -> None:
         self._cache_dir = cache_dir or CACHE_DIR
+        self._paid = paid_fetcher
         # Date-level in-memory cache: {date: {ticker: (foreign, trust, dealer)}}
         # One T86 HTTP request per date serves ALL tickers (selectType=ALL returns full table).
         self._t86_date_cache: dict[date, dict[str, tuple[int | None, int | None, int | None]]] = {}
@@ -150,6 +152,21 @@ class ChipProxyFetcher:
             reason = "TWSE 限流（非 JSON 回應）" if rate_limited else "無資料（假日或尚未更新）"
             logger.info("ChipProxy unavailable for %s %s: %s", ticker, trade_date, reason)
 
+        # --- Gate 0: paid market-level filters ---
+        is_disposal = False
+        is_halt = False
+        is_limit_up = False
+        is_daytrade_restricted = False
+        if self._paid is not None:
+            disposal_set = self._paid.fetch_disposal_tickers(trade_date)
+            halt_set = self._paid.fetch_halt_tickers(trade_date)
+            limit_up_set = self._paid.fetch_limit_up_tickers(trade_date)
+            daytrade_set = self._paid.fetch_daytrade_restricted_tickers(trade_date)
+            is_disposal = ticker in disposal_set
+            is_halt = ticker in halt_set
+            is_limit_up = ticker in limit_up_set
+            is_daytrade_restricted = ticker in daytrade_set
+
         return TWSEChipProxy(
             ticker=ticker,
             trade_date=trade_date,
@@ -185,6 +202,10 @@ class ChipProxyFetcher:
             margin_decline_streak=margin_streak,
             holder_count_chg_weekly=holder_count_chg,
             holder_count_decline_weeks=holder_decline_weeks,
+            is_disposal=is_disposal,
+            is_trading_halt=is_halt,
+            is_limit_up=is_limit_up,
+            is_daytrade_restricted=is_daytrade_restricted,
             is_available=is_available,
             data_quality_flags=flags,
         )
@@ -1114,7 +1135,7 @@ class ChipProxyFetcher:
                 resp = requests.get(
                     "https://api.finmindtrade.com/api/v4/data",
                     params={
-                        "dataset": "TaiwanStockShareholding",
+                        "dataset": "TaiwanStockHoldingSharesPer",
                         "data_id": ticker,
                         "start_date": str(start),
                         "end_date": str(ref_date),
@@ -1206,8 +1227,13 @@ class ChipProxyFetcher:
     def _tdcc_is_super_large(row: dict) -> bool:
         """千張 (1,000,000 shares) 以上為千張大戶（機構/主力等級）。"""
         try:
-            level = str(row.get("HolderCountLevel") or row.get("level", ""))
-            lower = int(level.replace(",", "").split("-")[0].strip())
+            # FinMind TaiwanStockHoldingSharesPer uses "HoldingSharesLevel"
+            level = str(row.get("HoldingSharesLevel") or row.get("HolderCountLevel") or row.get("level", ""))
+            raw = level.replace(",", "").strip()
+            if raw.startswith("more than"):
+                lower = int(raw.replace("more than", "").strip())
+            else:
+                lower = int(raw.split("-")[0].strip())
             return lower >= 1_000_000
         except Exception:
             return False
@@ -1216,10 +1242,13 @@ class ChipProxyFetcher:
     def _tdcc_is_large(row: dict) -> bool:
         """400張 (400,000 shares) 以上為大戶。"""
         try:
-            # FinMind HolderCountLevel 格式: "400,001-600,000" 或數字欄位
-            level = str(row.get("HolderCountLevel") or row.get("level", ""))
-            # 取下界
-            lower = int(level.replace(",", "").split("-")[0].strip())
+            # FinMind TaiwanStockHoldingSharesPer uses "HoldingSharesLevel"
+            level = str(row.get("HoldingSharesLevel") or row.get("HolderCountLevel") or row.get("level", ""))
+            raw = level.replace(",", "").strip()
+            if raw.startswith("more than"):
+                lower = int(raw.replace("more than", "").strip())
+            else:
+                lower = int(raw.split("-")[0].strip())
             return lower >= 400_000
         except Exception:
             return False
@@ -1228,8 +1257,12 @@ class ChipProxyFetcher:
     def _tdcc_is_retail(row: dict) -> bool:
         """100張 (100,000 shares) 以下為散戶。"""
         try:
-            level = str(row.get("HolderCountLevel") or row.get("level", ""))
-            parts = level.replace(",", "").split("-")
+            # FinMind TaiwanStockHoldingSharesPer uses "HoldingSharesLevel"
+            level = str(row.get("HoldingSharesLevel") or row.get("HolderCountLevel") or row.get("level", ""))
+            raw = level.replace(",", "").strip()
+            if raw.startswith("more than") or raw == "total":
+                return False
+            parts = raw.split("-")
             upper = int(parts[-1].strip()) if len(parts) > 1 else int(parts[0].strip())
             return upper <= 100_000
         except Exception:

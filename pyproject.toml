@@ -40,3 +40,4 @@ build-backend = "poetry.core.masonry.api"
 # ValueError — conftest takes ownership of the plugin.
 addopts = "-p no:pytest_postgresql"
 testpaths = ["tests"]
+pythonpath = ["src"]

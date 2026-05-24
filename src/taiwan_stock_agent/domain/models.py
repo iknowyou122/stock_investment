@@ -44,11 +44,11 @@ class ChipReport(BaseModel):
     ticker: str
     report_date: date
     # top-15 branches by buy volume, each annotated with label
-    top_buyers: list[BrokerWithLabel]
-    concentration_top15: float      # top-15 buy vol / total buy vol (0–1)
-    net_buyer_count_diff: int       # sum over last 3 days of (buying_branches - selling_branches)
-    risk_flags: list[str]           # e.g. ['隔日沖_TOP3']
-    active_branch_count: int        # number of branches with buy_volume > 0 today
+    top_buyers: list[BrokerWithLabel] = Field(default_factory=list)
+    concentration_top15: float = 0.0   # top-15 buy vol / total buy vol (0–1)
+    net_buyer_count_diff: int = 0      # sum over last 3 days of (buying_branches - selling_branches)
+    risk_flags: list[str] = Field(default_factory=list)  # e.g. ['隔日沖_TOP3']
+    active_branch_count: int = 0       # number of branches with buy_volume > 0 today
     # v2 field: historical top-5 buyer lists for continuity scoring
     # index 0 = yesterday, 1 = 2 days ago, etc.
     historical_top5_buyers: list[list[BrokerWithLabel]] = Field(default_factory=list)
@@ -106,6 +106,12 @@ class TWSEChipProxy(BaseModel):
     margin_decline_streak: int = 0             # 融資餘額連跌天數（讀歷史 parquet 快取）
     holder_count_chg_weekly: int | None = None  # 總股東人數週變化（負=人頭減少=籌碼集中）
     holder_count_decline_weeks: int = 0        # 股東人數連續下降週數
+    # Gate 0 flags — populated by PaidDataFetcher (require FINMIND_API_KEY)
+    is_disposal: bool = False             # 公布處置有價證券 → SKIP
+    is_trading_halt: bool = False         # 暫停交易 → SKIP
+    is_limit_up: bool = False             # 漲停收盤（標記，非跳過）
+    is_daytrade_restricted: bool = False  # 暫停先賣後買（量能閾值調整）
+
     is_available: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
 
@@ -119,7 +125,7 @@ class VolumeProfile(BaseModel):
     to prevent target < entry when poc_proxy is depressed by panic selloff days.
     """
     ticker: str
-    period_end: date
+    period_end: date | None = None
     poc_proxy: float          # highest-volume day's close in last 20 sessions
     twenty_day_high: float
     twenty_day_sessions: int  # actual sessions counted (may be <20 near listing or holidays)

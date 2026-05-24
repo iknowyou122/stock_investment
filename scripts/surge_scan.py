@@ -420,6 +420,12 @@ def _scan_one_surge(
 
         proxy = chip_fetcher.fetch(ticker, chip_date, today_volume=ohlcv.volume)
 
+        # Gate 0: 處置股 / 暫停交易 → 直接跳過
+        if proxy is not None and proxy.is_disposal:
+            return None
+        if proxy is not None and proxy.is_trading_halt:
+            return None
+
         # TAIEX regime
         taiex_closes = [b.close for b in sorted(taiex_history, key=lambda x: x.trade_date)]
         taiex_regime = "neutral"
@@ -435,6 +441,13 @@ def _scan_one_surge(
         )
 
         eng = SurgeRadar(market=market)
+
+        # Gate 0d: 當沖限制 → volume ratio 門檻上調 20%
+        if proxy is not None and proxy.is_daytrade_restricted:
+            gates = eng._params.setdefault("gates", {})
+            base = gates.get("vol_ratio_min", 1.5)
+            gates["vol_ratio_min"] = base * 1.2
+
         result = eng.score_full(
             ohlcv=ohlcv,
             history=prior_history,
@@ -1217,13 +1230,15 @@ def run_surge_scan(
     llm_provider=None,
 ) -> list[dict]:
     from taiwan_stock_agent.infrastructure.twse_client import ChipProxyFetcher
+    from taiwan_stock_agent.infrastructure.paid_data_fetcher import PaidDataFetcher
 
     market_map = market_map or {}
     name_map = name_map or {}
     industry_map = industry_map or {}
 
     finmind = FinMindClient()
-    chip_fetcher = ChipProxyFetcher()
+    paid_fetcher = PaidDataFetcher()
+    chip_fetcher = ChipProxyFetcher(paid_fetcher=paid_fetcher)
     chip_fetcher.shares_map = _load_shares_map()
 
     # Shared TAIEX history

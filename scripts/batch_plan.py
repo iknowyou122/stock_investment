@@ -57,6 +57,7 @@ load_dotenv()
 
 from taiwan_stock_agent.agents.strategist_agent import StrategistAgent
 from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
+from taiwan_stock_agent.infrastructure.paid_data_fetcher import PaidDataFetcher
 from taiwan_stock_agent.infrastructure.twse_client import ChipProxyFetcher
 
 logging.basicConfig(
@@ -1014,7 +1015,8 @@ def _run_phase(
     """
     # 建立共用客戶端 — 所有 worker 共享快取
     shared_finmind = FinMindClient()
-    shared_chip = ChipProxyFetcher()
+    shared_paid = PaidDataFetcher()
+    shared_chip = ChipProxyFetcher(paid_fetcher=shared_paid)
     shared_chip.shares_map = _load_shares_map()
     shared_agent = _make_agent(
         llm_provider=llm_provider,
@@ -1023,6 +1025,13 @@ def _run_phase(
         finmind=shared_finmind,
         chip_fetcher=shared_chip,
     )
+
+    # 注入大盤融資維持率至 taifex_context（Gate 0 macro filter）
+    taifex_ctx: dict = {}
+    margin_rate = shared_paid.fetch_market_margin_maintenance(analysis_date)
+    if margin_rate is not None:
+        taifex_ctx["margin_maintenance_rate"] = margin_rate
+    shared_agent._taifex_context = taifex_ctx
 
     results: list[dict] = []
     total = len(tickers)
