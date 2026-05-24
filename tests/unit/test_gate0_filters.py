@@ -102,3 +102,47 @@ class TestDaytradeRestrictedFlag:
             _ohlcv(), _history(), _chip(), _vp(), twse_proxy=proxy
         )
         assert "DAYTRADE_RESTRICTED" in signal.data_quality_flags
+
+
+class TestMarginMaintenanceGate:
+    """Market-level margin maintenance rate gate via taifex_context."""
+
+    def _run(self, rate: float | None) -> tuple:
+        engine = TripleConfirmationEngine()
+        ohlcv = _ohlcv(close=100.0, volume=8_000_000)
+        history = _history(n=30, close=90.0)
+        proxy = _proxy(
+            foreign_net_buy=2000,
+            foreign_consecutive_buy_days=5,
+            is_available=True,
+        )
+        taifex_ctx: dict = {}
+        if rate is not None:
+            taifex_ctx["margin_maintenance_rate"] = rate
+        signal, _, _ = engine.score_full(
+            ohlcv, history, _chip(), _vp(),
+            twse_proxy=proxy, taifex_context=taifex_ctx
+        )
+        return signal
+
+    def test_normal_rate_no_crisis_flag(self):
+        """Rate >= 130: no MARKET_MARGIN_* flag added."""
+        signal = self._run(145.0)
+        assert not any("MARKET_MARGIN" in f for f in signal.data_quality_flags)
+
+    def test_stress_rate_adds_flag(self):
+        """120 <= rate < 130: MARKET_MARGIN_STRESS flag set, LONG demoted to WATCH."""
+        signal = self._run(125.0)
+        assert "MARKET_MARGIN_STRESS" in signal.data_quality_flags
+        assert signal.action != "LONG", f"LONG should be demoted to WATCH when rate=125, got {signal.action}"
+
+    def test_crisis_rate_adds_flag_and_demotes(self):
+        """Rate < 120: MARKET_MARGIN_CRISIS flag set, LONG/WATCH → CAUTION."""
+        signal = self._run(115.0)
+        assert "MARKET_MARGIN_CRISIS" in signal.data_quality_flags
+        assert signal.action not in ("LONG", "WATCH"), f"Expected CAUTION/SKIP, got {signal.action}"
+
+    def test_none_rate_no_flag(self):
+        """No rate in context → no MARKET_MARGIN_* flag."""
+        signal = self._run(None)
+        assert not any("MARKET_MARGIN" in f for f in signal.data_quality_flags)

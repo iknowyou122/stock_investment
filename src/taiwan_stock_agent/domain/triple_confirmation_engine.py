@@ -2437,6 +2437,20 @@ class TripleConfirmationEngine:
         if taifex_ctx.get("futures_bearish"):
             data_quality_flags.append("TAIFEX_FUTURES_BEARISH")
 
+        # 大盤融資維持率 Macro Gate
+        margin_rate = taifex_ctx.get("margin_maintenance_rate")
+        if margin_rate is not None:
+            if margin_rate < 120.0:
+                # 市場斷頭危機：所有 LONG/WATCH → CAUTION
+                if action in ("LONG", "WATCH"):
+                    action = "CAUTION"
+                data_quality_flags.append("MARKET_MARGIN_CRISIS")
+            elif margin_rate < 130.0:
+                # 壓力偏高：LONG → WATCH
+                if action == "LONG":
+                    action = "WATCH"
+                data_quality_flags.append("MARKET_MARGIN_STRESS")
+
         # v2.2b: propagate COILING / COILING_PRIME flags (set in _compute)
         for tag in ("COILING_PRIME", "COILING", "MOMENTUM_TRACK", "INST_MOMENTUM"):
             if tag in breakdown.flags and tag not in data_quality_flags:
