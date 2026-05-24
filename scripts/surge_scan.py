@@ -420,6 +420,12 @@ def _scan_one_surge(
 
         proxy = chip_fetcher.fetch(ticker, chip_date, today_volume=ohlcv.volume)
 
+        # Gate 0: 處置股 / 暫停交易 → 直接跳過
+        if proxy is not None and proxy.is_disposal:
+            return None
+        if proxy is not None and proxy.is_trading_halt:
+            return None
+
         # TAIEX regime
         taiex_closes = [b.close for b in sorted(taiex_history, key=lambda x: x.trade_date)]
         taiex_regime = "neutral"
@@ -435,6 +441,13 @@ def _scan_one_surge(
         )
 
         eng = SurgeRadar(market=market)
+
+        # Gate 0d: 當沖限制 → volume ratio 門檻上調 20%
+        if proxy is not None and proxy.is_daytrade_restricted:
+            gates = eng._params.setdefault("gates", {})
+            base = gates.get("vol_ratio_min", 1.5)
+            gates["vol_ratio_min"] = base * 1.2
+
         result = eng.score_full(
             ohlcv=ohlcv,
             history=prior_history,
