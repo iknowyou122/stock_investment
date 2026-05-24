@@ -242,11 +242,13 @@ def _render_reasoning(reasoning) -> None:
         return
 
     fields = [
-        ("verdict",       "操作結論",   "bold white"),
-        ("position",      "倉位建議",   "cyan"),
-        ("momentum",      "動能分析",   "white"),
-        ("chip_analysis", "籌碼分析",   "white"),
-        ("risk_factors",  "風險提示",   "yellow"),
+        ("verdict",        "操作結論",   "bold white"),
+        ("position",       "倉位建議",   "cyan"),
+        ("entry_strategy", "進場策略",   "bright_cyan"),
+        ("key_levels",     "關鍵價位",   "bright_yellow"),
+        ("momentum",       "動能分析",   "white"),
+        ("chip_analysis",  "籌碼分析",   "white"),
+        ("risk_factors",   "風險提示",   "yellow"),
     ]
     for attr, label, style in fields:
         val = getattr(reasoning, attr, "").strip()
