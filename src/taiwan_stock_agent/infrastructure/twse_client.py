@@ -1135,7 +1135,7 @@ class ChipProxyFetcher:
                 resp = requests.get(
                     "https://api.finmindtrade.com/api/v4/data",
                     params={
-                        "dataset": "TaiwanStockShareholding",
+                        "dataset": "TaiwanStockHoldingSharesPer",
                         "data_id": ticker,
                         "start_date": str(start),
                         "end_date": str(ref_date),
@@ -1227,8 +1227,13 @@ class ChipProxyFetcher:
     def _tdcc_is_super_large(row: dict) -> bool:
         """千張 (1,000,000 shares) 以上為千張大戶（機構/主力等級）。"""
         try:
-            level = str(row.get("HolderCountLevel") or row.get("level", ""))
-            lower = int(level.replace(",", "").split("-")[0].strip())
+            # FinMind TaiwanStockHoldingSharesPer uses "HoldingSharesLevel"
+            level = str(row.get("HoldingSharesLevel") or row.get("HolderCountLevel") or row.get("level", ""))
+            raw = level.replace(",", "").strip()
+            if raw.startswith("more than"):
+                lower = int(raw.replace("more than", "").strip())
+            else:
+                lower = int(raw.split("-")[0].strip())
             return lower >= 1_000_000
         except Exception:
             return False
@@ -1237,10 +1242,13 @@ class ChipProxyFetcher:
     def _tdcc_is_large(row: dict) -> bool:
         """400張 (400,000 shares) 以上為大戶。"""
         try:
-            # FinMind HolderCountLevel 格式: "400,001-600,000" 或數字欄位
-            level = str(row.get("HolderCountLevel") or row.get("level", ""))
-            # 取下界
-            lower = int(level.replace(",", "").split("-")[0].strip())
+            # FinMind TaiwanStockHoldingSharesPer uses "HoldingSharesLevel"
+            level = str(row.get("HoldingSharesLevel") or row.get("HolderCountLevel") or row.get("level", ""))
+            raw = level.replace(",", "").strip()
+            if raw.startswith("more than"):
+                lower = int(raw.replace("more than", "").strip())
+            else:
+                lower = int(raw.split("-")[0].strip())
             return lower >= 400_000
         except Exception:
             return False
@@ -1249,8 +1257,12 @@ class ChipProxyFetcher:
     def _tdcc_is_retail(row: dict) -> bool:
         """100張 (100,000 shares) 以下為散戶。"""
         try:
-            level = str(row.get("HolderCountLevel") or row.get("level", ""))
-            parts = level.replace(",", "").split("-")
+            # FinMind TaiwanStockHoldingSharesPer uses "HoldingSharesLevel"
+            level = str(row.get("HoldingSharesLevel") or row.get("HolderCountLevel") or row.get("level", ""))
+            raw = level.replace(",", "").strip()
+            if raw.startswith("more than") or raw == "total":
+                return False
+            parts = raw.split("-")
             upper = int(parts[-1].strip()) if len(parts) > 1 else int(parts[0].strip())
             return upper <= 100_000
         except Exception:
