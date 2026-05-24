@@ -106,6 +106,12 @@ class TWSEChipProxy(BaseModel):
     margin_decline_streak: int = 0             # 融資餘額連跌天數（讀歷史 parquet 快取）
     holder_count_chg_weekly: int | None = None  # 總股東人數週變化（負=人頭減少=籌碼集中）
     holder_count_decline_weeks: int = 0        # 股東人數連續下降週數
+    # Gate 0 flags — populated by PaidDataFetcher (require FINMIND_API_KEY)
+    is_disposal: bool = False             # 公布處置有價證券 → SKIP
+    is_trading_halt: bool = False         # 暫停交易 → SKIP
+    is_limit_up: bool = False             # 漲停收盤（標記，非跳過）
+    is_daytrade_restricted: bool = False  # 暫停先賣後買（量能閾值調整）
+
     is_available: bool = False
     data_quality_flags: list[str] = Field(default_factory=list)
 
