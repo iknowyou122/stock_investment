@@ -552,9 +552,41 @@ class TripleConfirmationEngine:
         self._taiex_history = taiex_history or []
         self._taifex_context = taifex_context or {}
         self._market = market if market in _LIQUIDITY_THRESHOLDS else _DEFAULT_MARKET
+
+        # Gate 0: hard reject before any scoring (disposal / trading halt)
+        if twse_proxy is not None:
+            if twse_proxy.is_disposal or twse_proxy.is_trading_halt:
+                gate_flag = "GATE0_DISPOSAL" if twse_proxy.is_disposal else "GATE0_HALT"
+                plan = self._make_execution_plan(ohlcv, volume_profile)
+                return (
+                    SignalOutput(
+                        ticker=ohlcv.ticker,
+                        date=ohlcv.trade_date,
+                        action="CAUTION",
+                        confidence=0,
+                        reasoning=Reasoning(),
+                        execution_plan=plan,
+                        halt_flag=False,
+                        data_quality_flags=[gate_flag],
+                    ),
+                    _ScoreBreakdown(),
+                    _AnalysisHints(),
+                )
+
         breakdown = self._compute(ohlcv, ohlcv_history, chip_report, volume_profile, twse_proxy)
         hints = self._compute_hints(ohlcv, ohlcv_history, twse_proxy=twse_proxy)
         signal = self._build_signal(ohlcv, breakdown, volume_profile, chip_report)
+
+        # Gate 0 non-blocking flags (limit up / daytrade restricted)
+        if twse_proxy is not None:
+            extra_flags = list(signal.data_quality_flags)
+            if twse_proxy.is_limit_up:
+                extra_flags.append("LIMIT_UP_CLOSE")
+            if twse_proxy.is_daytrade_restricted:
+                extra_flags.append("DAYTRADE_RESTRICTED")
+            if extra_flags != list(signal.data_quality_flags):
+                signal = signal.model_copy(update={"data_quality_flags": extra_flags})
+
         return signal, breakdown, hints
 
     # ------------------------------------------------------------------

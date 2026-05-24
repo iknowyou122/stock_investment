@@ -44,11 +44,11 @@ class ChipReport(BaseModel):
     ticker: str
     report_date: date
     # top-15 branches by buy volume, each annotated with label
-    top_buyers: list[BrokerWithLabel]
-    concentration_top15: float      # top-15 buy vol / total buy vol (0–1)
-    net_buyer_count_diff: int       # sum over last 3 days of (buying_branches - selling_branches)
-    risk_flags: list[str]           # e.g. ['隔日沖_TOP3']
-    active_branch_count: int        # number of branches with buy_volume > 0 today
+    top_buyers: list[BrokerWithLabel] = Field(default_factory=list)
+    concentration_top15: float = 0.0   # top-15 buy vol / total buy vol (0–1)
+    net_buyer_count_diff: int = 0      # sum over last 3 days of (buying_branches - selling_branches)
+    risk_flags: list[str] = Field(default_factory=list)  # e.g. ['隔日沖_TOP3']
+    active_branch_count: int = 0       # number of branches with buy_volume > 0 today
     # v2 field: historical top-5 buyer lists for continuity scoring
     # index 0 = yesterday, 1 = 2 days ago, etc.
     historical_top5_buyers: list[list[BrokerWithLabel]] = Field(default_factory=list)
@@ -125,7 +125,7 @@ class VolumeProfile(BaseModel):
     to prevent target < entry when poc_proxy is depressed by panic selloff days.
     """
     ticker: str
-    period_end: date
+    period_end: date | None = None
     poc_proxy: float          # highest-volume day's close in last 20 sessions
     twenty_day_high: float
     twenty_day_sessions: int  # actual sessions counted (may be <20 near listing or holidays)
