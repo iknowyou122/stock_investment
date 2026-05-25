@@ -560,6 +560,30 @@ def _precompute_today_snapshot(
     return snapshot
 
 
+def _print_score_health(scores: list[int], label: str = "信心分數分布") -> None:
+    """Print P25/P50/P75/P95 and warn if top-quartile spread < 10 pts (clustering risk)."""
+    if len(scores) < 5:
+        return
+    s = sorted(scores)
+    n = len(s)
+    def _p(pct): return s[min(n - 1, int(pct / 100 * n))]
+    p25, p50, p75, p95 = _p(25), _p(50), _p(75), _p(95)
+    spread = p95 - p75
+    ok = spread >= 10
+    color = "green" if ok else "red"
+    status = "✅" if ok else "⚠ 頂端聚集"
+    _console.print(
+        f"  [dim]📊 {label}  "
+        f"P25=[cyan]{p25}[/cyan]  P50=[cyan]{p50}[/cyan]  "
+        f"P75=[cyan]{p75}[/cyan]  P95=[cyan]{p95}[/cyan]  │  "
+        f"頂端壓縮 [{color}]{spread}pts {status}[/{color}][/dim]"
+    )
+    if not ok:
+        _console.print(
+            "  [yellow]  → P75–P95 差距 < 10pts，因子可能過度聚集，建議 make surge-factor 重新校準[/yellow]"
+        )
+
+
 def _print_surge_table(results: list[dict], scan_date: str, name_map: dict[str, str]) -> None:
     _console.rule(f"[bold red]噴發雷達 {scan_date}[/bold red]")
     if not results:
@@ -1592,6 +1616,10 @@ def run_surge_scan(
         _console.print(f"  [dim]Gate 0 過濾：{total_g0} 支（{' / '.join(parts)}）[/dim]")
 
     _print_surge_table(results, scan_date, name_map)
+    _print_score_health(
+        [int(r.get("score", 0)) for r in results],
+        label="爆量信號分數分布",
+    )
 
     # ── Write to DB ──────────────────────────────────────────────────────────
     if results and os.environ.get("DATABASE_URL"):

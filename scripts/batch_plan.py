@@ -422,6 +422,30 @@ def _apply_growth_bonus(results: list[dict], growth_index: dict[str, dict]) -> i
     return boosted
 
 
+def _print_score_health(scores: list[int], label: str = "信心分數分布") -> None:
+    """Print P25/P50/P75/P95 and warn if top-quartile spread < 10 pts (clustering risk)."""
+    if len(scores) < 5:
+        return
+    s = sorted(scores)
+    n = len(s)
+    def _p(pct): return s[min(n - 1, int(pct / 100 * n))]
+    p25, p50, p75, p95 = _p(25), _p(50), _p(75), _p(95)
+    spread = p95 - p75
+    ok = spread >= 10
+    color = "green" if ok else "red"
+    status = "✅" if ok else "⚠ 頂端聚集"
+    _console.print(
+        f"  [dim]📊 {label}  "
+        f"P25=[cyan]{p25}[/cyan]  P50=[cyan]{p50}[/cyan]  "
+        f"P75=[cyan]{p75}[/cyan]  P95=[cyan]{p95}[/cyan]  │  "
+        f"頂端壓縮 [{color}]{spread}pts {status}[/{color}][/dim]"
+    )
+    if not ok:
+        _console.print(
+            "  [yellow]  → P75–P95 差距 < 10pts，因子可能過度聚集，建議 make factor-report 重新校準[/yellow]"
+        )
+
+
 def _apply_catalyst_filter(
     results: list[dict],
     industry_map: dict[str, str],
@@ -1307,6 +1331,12 @@ def run_batch(
             name_map=name_map,
             sort_by=sort_by,
         )
+
+    _print_score_health(
+        [r["confidence"] for r in results
+         if not r.get("halt") and r.get("error") is None
+         and r.get("action") in ("LONG", "WATCH")],
+    )
 
     html_path = (Path(__file__).resolve().parents[1] / "data" / "scans" / f"scan_{analysis_date}.html")
     _generate_plan_html(results, str(analysis_date), html_path,
