@@ -800,15 +800,17 @@ def _buy_verdict(r: dict, scan_date: str = "") -> dict:
 
 
 def _parse_llm_verdict(llm_text: str) -> dict | None:
-    """Parse 5-line structured LLM output into fields. Returns None if unstructured."""
+    """Parse structured LLM output into fields. Returns None if unstructured."""
     if not llm_text:
         return None
     fields: dict[str, str] = {}
     for line in llm_text.split("\n"):
         line = line.strip()
         for key, name in [
-            ("【判決】", "verdict"), ("【進場】", "entry"),
-            ("【止損】", "stop"),   ("【倉位】", "position"), ("【風險】", "risk"),
+            ("【判決】", "verdict"), ("【技術解讀】", "analysis"),
+            ("【進場】", "entry"),   ("【止損】", "stop"),
+            ("【倉位】", "position"), ("【風險】", "risk"),
+            ("【關鍵注意】", "note"),
         ]:
             if line.startswith(key):
                 fields[name] = line[len(key):].strip()
@@ -863,6 +865,57 @@ def _generate_html_report(
 
 
     _ind_map = industry_map or {}
+
+    # Collect unique industries for dropdown
+    unique_inds = sorted({
+        (r.get("industry") or _ind_map.get(r.get("ticker", ""), "")).strip()
+        for r in sorted_r
+        if (r.get("industry") or _ind_map.get(r.get("ticker", ""), "")).strip()
+    })
+
+    _FLAG_MAP: list[tuple[str, str, str]] = [
+        # (flag_prefix_or_exact, display, color_class)
+        ("BB_SQUEEZE_BREAK", "BB突破", "f-blue"),
+        ("POCKET_PIVOT", "Pocket Pivot", "f-blue"),
+        ("BREAKOUT_20D", "20日突破", "f-blue"),
+        ("INTL_TAIL", "美股順風", "f-green"),
+        ("GROWTH_HIGH", "月收成長★", "f-green"),
+        ("GROWTH_MID", "月收成長", "f-green"),
+        ("MARGIN_DECLINING", "融資減少", "f-green"),
+        ("IND_HEAT_HOT", "產業熱", "f-green"),
+        ("IND_ACCEL", "產業加速", "f-green"),
+        ("CONCEPT_HOT", "熱門概念", "f-purple"),
+        ("COILING_PRIME", "強蓄積", "f-purple"),
+        ("COILING", "蓄積", "f-purple"),
+        ("EMERGING_SETUP", "蓄積中", "f-purple"),
+        ("MA5_WALK", "MA5上升", "f-cyan"),
+        ("BB_UPPER_COIL", "BB上軌貼行", "f-cyan"),
+        ("MOMENTUM_WALK", "動能延伸", "f-cyan"),
+        ("IND_HEAT_WARM", "產業溫", "f-cyan"),
+        ("LIMIT_UP_CLOSE", "漲停收", "f-yellow"),
+        ("DAYTRADE_RESTRICTED", "限當沖", "f-orange"),
+        ("MARKET_MARGIN_STRESS", "融資壓力", "f-orange"),
+        ("VOL_SURGE", "爆量>5x", "f-orange"),
+        ("MARKET_MARGIN_CRISIS", "融資危機", "f-red"),
+        ("TAIFEX_FUTURES_BEARISH", "期貨偏空", "f-red"),
+        ("MA5_BREAK", "MA5破", "f-red"),
+        ("MARGIN_HOT", "融資過熱", "f-red"),
+        ("BB_UPPER_EXHAUSTION", "BB高位衰竭", "f-red"),
+        ("ADX_EXHAUSTION", "動能衰竭", "f-red"),
+    ]
+
+    def _flag_badges(flag_list: list) -> str:
+        seen: set[str] = set()
+        parts: list[str] = []
+        for flag in flag_list:
+            flag_str = str(flag)
+            for prefix, label, cls in _FLAG_MAP:
+                if flag_str.startswith(prefix) and prefix not in seen:
+                    seen.add(prefix)
+                    parts.append(f'<span class="flag {cls}">{label}</span>')
+                    break
+        return "".join(parts)
+
     cards: list[str] = []
 
     for i, r in enumerate(sorted_r):
@@ -889,12 +942,17 @@ def _generate_html_report(
         rsi_s    = f"{rsi:.0f}" if rsi is not None else "--"
         ind_s    = f"{ind_pct:.0f}%" if ind_pct is not None else "--"
         delay    = f"{i * 0.05:.2f}"
+        flags_list = r.get("flags") or []
+        flag_html  = _flag_badges(flags_list) if flags_list else ""
 
         llm_text   = r.get("llm_analysis", "")
         llm_parsed = _parse_llm_verdict(llm_text)
 
         if llm_parsed:
             # ── AI-driven verdict ─────────────────────────────────────────
+            analysis_html = ""
+            if llm_parsed.get("analysis"):
+                analysis_html = f'<div class="ai-analysis">{_esc(llm_parsed["analysis"])}</div>'
             trade_rows = ""
             for label, key, color in [
                 ("進場", "entry",    "#58a6ff"),
@@ -910,13 +968,18 @@ def _generate_html_report(
                         f'<span class="aip-val">{_esc(val)}</span>'
                         f'</div>'
                     )
+            note_html = ""
+            if llm_parsed.get("note"):
+                note_html = f'<div class="ai-note">⚑ {_esc(llm_parsed["note"])}</div>'
             verdict_html = f"""
       <div class="verdict {_esc(llm_parsed['vcls'])}">
         <div class="verdict-hd">
           <span class="vbadge">{_esc(llm_parsed['badge'])}</span>
           <span class="vsummary">{_esc(llm_parsed['verdict'])}</span>
         </div>
+        {analysis_html}
         <div class="ai-plan">{trade_rows}</div>
+        {note_html}
       </div>"""
             llm_html = ""
         else:
@@ -934,8 +997,14 @@ def _generate_html_report(
       </div>"""
             llm_html = ""
 
+        rsi_data  = f"{rsi:.0f}" if rsi is not None else "0"
+        ind_data  = f"{ind_pct:.0f}" if ind_pct is not None else "0"
         cards.append(f"""
-    <div class="card" style="animation-delay:{delay}s">
+    <div class="card" style="animation-delay:{delay}s"
+         data-grade="{_esc(grade)}" data-industry="{industry}"
+         data-ticker="{_esc(ticker)}" data-name="{name}"
+         data-score="{score}" data-vol="{vol:.2f}" data-chg="{chg:.2f}"
+         data-rsi="{rsi_data}" data-inst="{inst}">
       <div class="card-header">
         <div class="rank">{i+1}</div>
         <div class="info">
@@ -952,6 +1021,7 @@ def _generate_html_report(
         <div class="m"><div class="mv">{ind_s}</div><div class="ml">產業排名</div></div>
         <div class="m"><div class="mv">{inst}</div><div class="ml">法人連買</div></div>
       </div>
+      <div class="flags">{flag_html}</div>
       <div class="chart" data-ticker="{_esc(ticker)}"></div>{verdict_html}{llm_html}
       <div class="links">
         <a class="link-btn tv" href="{tv_url}" target="_blank" rel="noopener">TradingView</a>
@@ -1020,6 +1090,31 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .aip-row{{display:flex;gap:8px;font-size:11px;line-height:1.55}}
 .aip-label{{font-weight:700;min-width:26px;flex-shrink:0}}
 .aip-val{{color:#c9d1d9}}
+.ai-analysis{{font-size:11px;color:#c9d1d9;line-height:1.65;margin:8px 0 6px;padding:8px 10px;
+  background:rgba(88,166,255,.06);border-radius:6px;border-left:2px solid #388bfd}}
+.ai-note{{font-size:11px;color:#e3b341;line-height:1.5;margin-top:7px;
+  padding:4px 8px;border-left:2px solid #e3b341;background:rgba(227,179,65,.05)}}
+.flags{{display:flex;flex-wrap:wrap;gap:4px;padding:6px 16px;border-bottom:1px solid #21262d;min-height:28px}}
+.flag{{font-size:10px;font-weight:600;padding:2px 7px;border-radius:10px}}
+.f-green{{background:rgba(63,185,80,.13);color:#3fb950;border:1px solid rgba(63,185,80,.28)}}
+.f-blue{{background:rgba(88,166,255,.13);color:#58a6ff;border:1px solid rgba(88,166,255,.28)}}
+.f-cyan{{background:rgba(56,189,248,.1);color:#38bdf8;border:1px solid rgba(56,189,248,.28)}}
+.f-purple{{background:rgba(163,113,247,.13);color:#a371f7;border:1px solid rgba(163,113,247,.28)}}
+.f-yellow{{background:rgba(227,179,65,.13);color:#e3b341;border:1px solid rgba(227,179,65,.28)}}
+.f-orange{{background:rgba(240,136,62,.13);color:#f0883e;border:1px solid rgba(240,136,62,.28)}}
+.f-red{{background:rgba(248,81,73,.13);color:#f85149;border:1px solid rgba(248,81,73,.28)}}
+.filterbar{{background:#161b22;border-bottom:1px solid #21262d;padding:10px 24px;
+  display:flex;flex-wrap:wrap;gap:14px;align-items:center;position:sticky;top:0;z-index:100;
+  box-shadow:0 2px 8px rgba(0,0,0,.4)}}
+.fb-group{{display:flex;align-items:center;gap:6px;font-size:12px}}
+.fb-label{{color:#8b949e;font-size:11px;white-space:nowrap}}
+.fb-check{{display:flex;align-items:center;gap:4px;cursor:pointer;color:#e6edf3;font-size:12px}}
+.fb-check input{{cursor:pointer;accent-color:#58a6ff}}
+.fb-select,.fb-input{{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;
+  padding:5px 8px;font-size:12px;cursor:pointer}}
+.fb-input{{width:150px}}
+.fb-select:focus,.fb-input:focus{{outline:none;border-color:#58a6ff}}
+.fb-count{{margin-left:auto;color:#8b949e;font-size:12px;white-space:nowrap}}
 </style>
 </head>
 <body>
@@ -1032,7 +1127,36 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
     <div class="stat"><div class="sv" style="color:#38bdf8">{gamma}</div><div class="sl">量增</div></div>
   </div>
 </div>
-<div class="grid">
+<div class="filterbar">
+  <div class="fb-group">
+    <span class="fb-label">等級</span>
+    <label class="fb-check"><input class="grade-check" type="checkbox" value="SURGE_ALPHA" checked> 強噴★</label>
+    <label class="fb-check"><input class="grade-check" type="checkbox" value="SURGE_BETA" checked> 噴發</label>
+    <label class="fb-check"><input class="grade-check" type="checkbox" value="SURGE_GAMMA" checked> 量增</label>
+  </div>
+  <div class="fb-group">
+    <span class="fb-label">產業</span>
+    <select class="fb-select" id="ind-filter">
+      <option value="">全部</option>
+      {"".join(f'<option value="{_esc(ind)}">{_esc(ind)}</option>' for ind in unique_inds)}
+    </select>
+  </div>
+  <div class="fb-group">
+    <input class="fb-input" id="search-filter" type="text" placeholder="搜尋 ticker / 股名">
+  </div>
+  <div class="fb-group">
+    <span class="fb-label">排序</span>
+    <select class="fb-select" id="sort-filter">
+      <option value="score">分數</option>
+      <option value="vol">量比</option>
+      <option value="chg">漲幅</option>
+      <option value="rsi">RSI</option>
+      <option value="inst">法人連買</option>
+    </select>
+  </div>
+  <span class="fb-count">顯示 <span id="visible-count">{len(sorted_r)}</span> / {len(sorted_r)} 支</span>
+</div>
+<div class="grid" id="card-grid">
 {"".join(cards)}
 </div>
 <div class="footer">噴發雷達自動生成 · {_esc(scan_date)}</div>
@@ -1078,6 +1202,46 @@ const _obs = new IntersectionObserver(function(entries) {{
 }}, {{ rootMargin: "100px" }});
 
 document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.observe(el); }});
+
+// ── Filter & Sort ──────────────────────────────────────────────────────────
+var _grid = document.getElementById("card-grid");
+var _totalCount = document.querySelectorAll(".card").length;
+
+function applyAll() {{
+  var checkedGrades = new Set(
+    [].slice.call(document.querySelectorAll(".grade-check:checked")).map(function(el) {{ return el.value; }})
+  );
+  var selInd = document.getElementById("ind-filter").value;
+  var search  = document.getElementById("search-filter").value.toLowerCase().trim();
+  var sortKey = document.getElementById("sort-filter").value;
+
+  var allCards = [].slice.call(document.querySelectorAll(".card"));
+
+  // Sort all cards by selected key (descending)
+  allCards.sort(function(a, b) {{
+    return parseFloat(b.dataset[sortKey] || 0) - parseFloat(a.dataset[sortKey] || 0);
+  }});
+  allCards.forEach(function(c) {{ _grid.appendChild(c); }});
+
+  // Apply filter visibility
+  var visible = 0;
+  allCards.forEach(function(card) {{
+    var gradeOk  = checkedGrades.size === 0 || checkedGrades.has(card.dataset.grade);
+    var indOk    = !selInd || card.dataset.industry === selInd;
+    var haystack = (card.dataset.ticker + " " + card.dataset.name).toLowerCase();
+    var searchOk = !search || haystack.indexOf(search) !== -1;
+    var show = gradeOk && indOk && searchOk;
+    card.style.display = show ? "" : "none";
+    if (show) visible++;
+  }});
+
+  document.getElementById("visible-count").textContent = visible;
+}}
+
+document.querySelectorAll(".grade-check").forEach(function(el) {{ el.addEventListener("change", applyAll); }});
+document.getElementById("ind-filter").addEventListener("change", applyAll);
+document.getElementById("sort-filter").addEventListener("change", applyAll);
+document.getElementById("search-filter").addEventListener("input", applyAll);
 </script>
 </body>
 </html>"""
@@ -1130,6 +1294,19 @@ def _run_llm_analysis(results: list[dict], llm_provider, scan_date: str = "") ->
     import re as _re2
     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
 
+    _FACTOR_ZH = {
+        "vol_ratio": "爆量比", "close_strength": "收強位", "inst_buy_fresh": "法人新買",
+        "industry_strength": "產業排名", "pocket_pivot": "Pocket Pivot",
+        "breakaway_gap": "跳空突破", "relative_strength": "相對強弱",
+        "breakout_20d": "20日突破", "rsi_healthy": "RSI健康", "margin_not_hot": "融資清爽",
+        "inst_synergy": "籌碼協同", "margin_declining": "融資減少",
+        "inst_cumulative_flow": "法人累積", "ownership_concentration": "籌碼集中",
+        "bb_squeeze": "BB壓縮突破", "ma5_walk": "MA5走勢", "bb_upper_walk": "BB上軌貼行",
+        "market_heat": "市場熱度", "foreign_trend": "外資加速", "short_cover": "空頭回補",
+        "large_2w_trend": "大戶趨勢", "inst_accel_short": "法人短期加速",
+        "taifex_context": "期貨情境",
+    }
+
     def _build_prompt(r: dict) -> str:
         ticker  = r.get("ticker", "")
         name    = r.get("name") or ticker
@@ -1179,22 +1356,29 @@ def _run_llm_analysis(results: list[dict], llm_provider, scan_date: str = "") ->
             f"（突破位 {breakout_lvl} 為強支撐參考）" if breakout_lvl else ""
         )
 
+        bd = r.get("score_breakdown") or {}
+        top5 = sorted([(k, v) for k, v in bd.items() if v > 0], key=lambda x: -x[1])[:5]
+        top5_str = " / ".join(f"{_FACTOR_ZH.get(k, k)} +{v}" for k, v in top5) if top5 else "無"
+
         return (
             f"你是台灣短線交易員，策略是噴發信號出現後 T+2 日（{entry}）進場。\n"
-            "根據以下數據，給出明確的交易判斷。不要模稜兩可，不要廢話。\n\n"
+            "根據以下數據，給出明確具體的交易判斷，要有數字和邏輯，不要模稜兩可。\n\n"
             f"代號: {ticker} {name} | 產業: {r.get('industry','')} | 信號評分: {score}分（{grade}）\n"
             f"今日收盤: {close_str} | 漲幅: {r.get('day_chg_pct',0):.1f}% | 跳空: {gap_str}\n"
             f"量比: {r.get('vol_ratio',0):.1f}x | 收強: {r.get('close_strength',0):.2f} | "
             f"RSI: {rsi_val}（{rsi_state}）\n"
             f"相對強弱: {rs_str} vs 大盤 | 法人連買: {inst_days}天 | 產業排名: {ind_rank_str}\n"
             f"信號: {day} | {margin} | {ind_desc}\n"
-            f"突破位: {breakout_lvl or '--'} | 特徵: {', '.join(extras) if extras else '無特殊項'}\n\n"
-            "請嚴格按以下格式輸出 5 行，不要其他文字：\n"
+            f"突破位: {breakout_lvl or '--'} | 特徵: {', '.join(extras) if extras else '無特殊項'}\n"
+            f"主要得分因子: {top5_str}\n\n"
+            "請嚴格按以下格式輸出 7 行，不要其他文字：\n"
             f"【判決】明天買進 / 待觀察 / 不建議（選一，括號補充最關鍵理由）\n"
-            f"【進場】{entry} 開盤後站穩 XXX~XXX（根據收盤 {close_str} 估算具體數字）\n"
-            f"【止損】跌破 XXX 收盤停損{stop_hint}\n"
+            f"【技術解讀】2句話解釋為何這次信號可信（結合量比/法人/突破等具體數據，說出邏輯）\n"
+            f"【進場】{entry} 開盤後站穩 XXX~XXX（根據收盤 {close_str} 給具體數字區間）\n"
+            f"【止損】跌破 XXX 收盤停損{stop_hint}（給具體數字）\n"
             "【倉位】全倉 / 半倉 / 輕倉（選一，括號說明原因）\n"
-            "【風險】最主要一個風險（一句話）\n"
+            "【風險】最主要一個風險（要具體，有數據支撐，非泛泛而談）\n"
+            "【關鍵注意】最重要一個操作細節（例如：需開盤前15分鐘站穩 / 需縮量確認 / 注意大盤同步等）\n"
         )
 
     if not results:
@@ -1207,7 +1391,7 @@ def _run_llm_analysis(results: list[dict], llm_provider, scan_date: str = "") ->
     first_ticker = first.get("ticker", "")
     _console.print(f"  [dim]🤖 LLM 分析（先測 {first_ticker}）…[/dim]")
     try:
-        text = llm_provider.complete(_build_prompt(first), max_tokens=250).strip()
+        text = llm_provider.complete(_build_prompt(first), max_tokens=500).strip()
         ticker_map[first_ticker]["llm_analysis"] = text
         _console.print(f"  [dim]  ✓ 1/{len(results)}[/dim]")
     except Exception as e:
@@ -1223,7 +1407,7 @@ def _run_llm_analysis(results: list[dict], llm_provider, scan_date: str = "") ->
     def _one(r: dict) -> tuple[str, str]:
         ticker = r.get("ticker", "")
         try:
-            return ticker, llm_provider.complete(_build_prompt(r), max_tokens=250).strip()
+            return ticker, llm_provider.complete(_build_prompt(r), max_tokens=500).strip()
         except Exception as e:
             return ticker, f"（LLM 分析失敗: {e}）"
 
