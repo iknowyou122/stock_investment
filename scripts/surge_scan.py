@@ -659,15 +659,35 @@ def _fetch_chart_candles(ticker: str, market: str) -> dict:
         finally:
             _yfl.setLevel(_prev)
         rows = []
+        last_nan_date = None
         for idx, row in hist.iterrows():
             try:
                 o, h, l, c = float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"])
                 if any(pd.isna(v) for v in [o, h, l, c]):
+                    last_nan_date = idx.date()
                     continue
                 rows.append({"time": str(idx.date()), "open": round(o, 2),
                              "high": round(h, 2), "low": round(l, 2), "close": round(c, 2)})
             except Exception:
                 continue
+
+        if last_nan_date is not None and (not rows or str(last_nan_date) > rows[-1]["time"]):
+            try:
+                from datetime import timedelta as _td
+                single = yf.Ticker(f"{ticker}{suffix}").history(
+                    start=str(last_nan_date),
+                    end=str(last_nan_date + _td(days=1)),
+                    auto_adjust=True,
+                )
+                if not single.empty:
+                    for idx2, row2 in single.iterrows():
+                        o2, h2, l2, c2 = float(row2["Open"]), float(row2["High"]), float(row2["Low"]), float(row2["Close"])
+                        if not any(pd.isna(v) for v in [o2, h2, l2, c2]):
+                            rows.append({"time": str(idx2.date()), "open": round(o2, 2),
+                                         "high": round(h2, 2), "low": round(l2, 2), "close": round(c2, 2)})
+            except Exception:
+                pass
+
         if len(rows) < period:
             return empty
         # Bollinger Bands (period=20, multiplier=2) — computed on full history
