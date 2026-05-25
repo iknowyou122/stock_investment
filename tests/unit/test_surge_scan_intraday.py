@@ -196,3 +196,103 @@ class TestPrecomputeSnapshotIntraday:
         assert abs(snapshot["2330"]["vol_ratio"] - 8.0) < 0.1
         # day_chg_pct = (110 / 100 - 1) * 100 = 10.0
         assert abs(snapshot["2330"]["day_chg_pct"] - 10.0) < 0.1
+
+
+# ---------------------------------------------------------------------------
+# _scan_one_surge — intraday Gate 0: limit_up and daytrade_restricted
+# ---------------------------------------------------------------------------
+
+def _make_proxy(**kwargs):
+    from taiwan_stock_agent.domain.models import TWSEChipProxy
+    defaults = dict(
+        ticker="2330",
+        trade_date=date(2026, 5, 4),
+        is_available=True,
+        is_disposal=False,
+        is_trading_halt=False,
+        is_limit_up=False,
+        is_daytrade_restricted=False,
+        foreign_net_buy=0,
+        trust_net_buy=0,
+        dealer_net_buy=0,
+        margin_balance=0,
+        margin_balance_chg=0,
+        short_balance=0,
+        short_balance_chg=0,
+        margin_utilization_rate=0.0,
+        foreign_consecutive_buy_days=0,
+        trust_consecutive_buy_days=0,
+        inst_buy_pct=0.0,
+        foreign_and_trust_both_buy=False,
+        foreign_trend_accel=0.0,
+        short_cover_rate=0.0,
+        inst_accel_3d_10d=0.0,
+    )
+    defaults.update(kwargs)
+    return TWSEChipProxy(**defaults)
+
+
+class TestIntradayGate0Extra:
+    """Intraday-specific Gate 0: limit_up and daytrade_restricted → skip."""
+
+    def _make_intraday_bar(self, today):
+        return DailyOHLCV(
+            ticker="2330", trade_date=today,
+            open=102.0, high=110.0, low=101.0, close=108.0, volume=2_000_000,
+        )
+
+    def test_limit_up_skipped_in_intraday(self):
+        today = date(2026, 5, 5)
+        prior = _make_history(25)
+        mock_finmind = MagicMock()
+        mock_finmind.fetch_ohlcv.return_value = _history_df(prior)
+        proxy = _make_proxy(is_limit_up=True)
+        mock_chip = MagicMock()
+        mock_chip.fetch.return_value = proxy
+
+        result = _scan_one_surge(
+            ticker="2330", analysis_date=today,
+            finmind=mock_finmind, chip_fetcher=mock_chip,
+            market="TSE", taiex_history=prior, industry_rank_pct=50.0,
+            intraday_bar=self._make_intraday_bar(today),
+            intraday=True,
+        )
+        assert result is None
+
+    def test_limit_up_not_skipped_in_eod_mode(self):
+        """In end-of-day mode, limit_up is a flag (non-blocking) — not skipped."""
+        today = date(2026, 5, 5)
+        prior = _make_history(25)
+        mock_finmind = MagicMock()
+        mock_finmind.fetch_ohlcv.return_value = _history_df(prior)
+        proxy = _make_proxy(is_limit_up=True)
+        mock_chip = MagicMock()
+        mock_chip.fetch.return_value = proxy
+
+        # Just verify chip_fetcher.fetch was called (not skipped at gate0)
+        _scan_one_surge(
+            ticker="2330", analysis_date=today,
+            finmind=mock_finmind, chip_fetcher=mock_chip,
+            market="TSE", taiex_history=prior, industry_rank_pct=50.0,
+            intraday_bar=None,  # EOD mode
+            intraday=False,
+        )
+        assert mock_chip.fetch.called
+
+    def test_daytrade_restricted_skipped_in_intraday(self):
+        today = date(2026, 5, 5)
+        prior = _make_history(25)
+        mock_finmind = MagicMock()
+        mock_finmind.fetch_ohlcv.return_value = _history_df(prior)
+        proxy = _make_proxy(is_daytrade_restricted=True)
+        mock_chip = MagicMock()
+        mock_chip.fetch.return_value = proxy
+
+        result = _scan_one_surge(
+            ticker="2330", analysis_date=today,
+            finmind=mock_finmind, chip_fetcher=mock_chip,
+            market="TSE", taiex_history=prior, industry_rank_pct=50.0,
+            intraday_bar=self._make_intraday_bar(today),
+            intraday=True,
+        )
+        assert result is None

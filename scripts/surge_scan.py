@@ -49,6 +49,7 @@ from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
 
 _console = Console()
 _lock = Lock()
+_gate0_stats: dict[str, int] = {"disposal": 0, "halt": 0, "limit_up": 0, "daytrade": 0}
 
 _ROOT_PATH = Path(__file__).resolve().parents[1]
 _SHARES_CACHE = _ROOT_PATH / "data" / "_shares_cache.json"
@@ -395,6 +396,8 @@ def _scan_one_surge(
     industry_rank_pct: float | None,
     intraday_bar: DailyOHLCV | None = None,
     heat_context: dict | None = None,
+    intraday: bool = False,
+    market_margin_rate: float | None = None,
 ) -> dict | None:
     """Full surge scoring for a single ticker."""
     try:
@@ -420,11 +423,26 @@ def _scan_one_surge(
 
         proxy = chip_fetcher.fetch(ticker, chip_date, today_volume=ohlcv.volume)
 
-        # Gate 0: 處置股 / 暫停交易 → 直接跳過
+        # Gate 0: 處置股 / 暫停交易 → 直接跳過（所有模式）
         if proxy is not None and proxy.is_disposal:
+            with _lock:
+                _gate0_stats["disposal"] += 1
             return None
         if proxy is not None and proxy.is_trading_halt:
+            with _lock:
+                _gate0_stats["halt"] += 1
             return None
+
+        # Gate 0 盤中額外過濾：漲停（無法成交）+ 當沖限制（強平假量）
+        if intraday:
+            if proxy is not None and proxy.is_limit_up:
+                with _lock:
+                    _gate0_stats["limit_up"] += 1
+                return None
+            if proxy is not None and proxy.is_daytrade_restricted:
+                with _lock:
+                    _gate0_stats["daytrade"] += 1
+                return None
 
         # TAIEX regime
         taiex_closes = [b.close for b in sorted(taiex_history, key=lambda x: x.trade_date)]
@@ -442,11 +460,16 @@ def _scan_one_surge(
 
         eng = SurgeRadar(market=market)
 
-        # Gate 0d: 當沖限制 → volume ratio 門檻上調 20%
-        if proxy is not None and proxy.is_daytrade_restricted:
+        # 收盤模式：當沖限制 → volume ratio 門檻上調 20%（盤中已在 Gate 0 跳過）
+        if not intraday and proxy is not None and proxy.is_daytrade_restricted:
             gates = eng._params.setdefault("gates", {})
             base = gates.get("vol_ratio_min", 1.5)
             gates["vol_ratio_min"] = base * 1.2
+
+        # 大盤融資維持率注入 heat_context（SurgeRadar macro gate）
+        if market_margin_rate is not None:
+            heat_context = dict(heat_context) if heat_context else {}
+            heat_context["margin_maintenance_rate"] = market_margin_rate
 
         result = eng.score_full(
             ohlcv=ohlcv,
@@ -1236,10 +1259,27 @@ def run_surge_scan(
     name_map = name_map or {}
     industry_map = industry_map or {}
 
+    global _gate0_stats
+    _gate0_stats = {"disposal": 0, "halt": 0, "limit_up": 0, "daytrade": 0}
+
     finmind = FinMindClient()
     paid_fetcher = PaidDataFetcher()
     chip_fetcher = ChipProxyFetcher(paid_fetcher=paid_fetcher)
     chip_fetcher.shares_map = _load_shares_map()
+
+    # 大盤融資維持率（macro gate）
+    market_margin_rate: float | None = None
+    try:
+        market_margin_rate = paid_fetcher.fetch_market_margin_maintenance(analysis_date)
+        if market_margin_rate is not None:
+            stress = ""
+            if market_margin_rate < 120:
+                stress = " [red]⚠ MARGIN_CRISIS[/red]"
+            elif market_margin_rate < 130:
+                stress = " [yellow]⚠ MARGIN_STRESS[/yellow]"
+            _console.print(f"  [dim]大盤融資維持率：{market_margin_rate:.1f}%{stress}[/dim]")
+    except Exception:
+        pass
 
     # Shared TAIEX history
     try:
@@ -1328,6 +1368,8 @@ def run_surge_scan(
                         ind_rank,
                         intraday_bars.get(ticker),  # None = use FinMind bar (normal mode)
                         heat_lookup.get(ticker),    # market heat context (optional)
+                        intraday,
+                        market_margin_rate,
                     )
                 ] = ticker
             for future in as_completed(futures):
@@ -1350,6 +1392,20 @@ def run_surge_scan(
             results.sort(key=lambda x: x.get("score", 0), reverse=True)
     except Exception:
         pass
+
+    # Gate 0 過濾統計
+    total_g0 = sum(_gate0_stats.values())
+    if total_g0:
+        parts = []
+        if _gate0_stats["disposal"]:
+            parts.append(f"處置 {_gate0_stats['disposal']}")
+        if _gate0_stats["halt"]:
+            parts.append(f"暫停 {_gate0_stats['halt']}")
+        if _gate0_stats["limit_up"]:
+            parts.append(f"漲停 {_gate0_stats['limit_up']}")
+        if _gate0_stats["daytrade"]:
+            parts.append(f"當沖限制 {_gate0_stats['daytrade']}")
+        _console.print(f"  [dim]Gate 0 過濾：{total_g0} 支（{' / '.join(parts)}）[/dim]")
 
     _print_surge_table(results, scan_date, name_map)
 

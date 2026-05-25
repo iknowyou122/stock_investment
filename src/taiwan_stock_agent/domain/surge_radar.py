@@ -693,12 +693,22 @@ class SurgeRadar:
     def _score_taifex_context(
         self, heat_context: dict | None
     ) -> tuple[int, list[str]]:
-        """Factor E: 台指期外資淨多單 — 期貨空頭壓力懲罰 (-5 to 0)."""
+        """Factor E: 台指期外資淨多單 + 大盤融資維持率壓力懲罰."""
         if not heat_context:
             return 0, []
+        pts, flags = 0, []
         if heat_context.get("taifex_bearish") or heat_context.get("futures_bearish"):
-            return -5, ["TAIFEX_FUTURES_BEARISH"]
-        return 0, []
+            pts -= 5
+            flags.append("TAIFEX_FUTURES_BEARISH")
+        margin_rate = heat_context.get("margin_maintenance_rate")
+        if margin_rate is not None:
+            if margin_rate < 120.0:
+                pts -= 15
+                flags.append("MARKET_MARGIN_CRISIS")
+            elif margin_rate < 130.0:
+                pts -= 7
+                flags.append("MARKET_MARGIN_STRESS")
+        return pts, flags
 
     def _score_market_heat(self, ctx: dict | None) -> tuple[int, list[str]]:
         """Bonus from overnight market heat snapshot (industry 5d trend + concepts + intl).

@@ -577,3 +577,46 @@ class TestSurgeBbUpperWalk:
         hist = _rising_history(10)
         pts, _ = SurgeRadar()._score_bb_upper_walk(hist, surge_day=1)
         assert pts == 0
+
+
+class TestTaifexContextMacroGate:
+    def test_no_context_returns_zero(self):
+        pts, flags = SurgeRadar()._score_taifex_context(None)
+        assert pts == 0 and flags == []
+
+    def test_futures_bearish_deducts_5(self):
+        pts, flags = SurgeRadar()._score_taifex_context({"taifex_bearish": True})
+        assert pts == -5
+        assert "TAIFEX_FUTURES_BEARISH" in flags
+
+    def test_margin_stress_deducts_7(self):
+        pts, flags = SurgeRadar()._score_taifex_context({"margin_maintenance_rate": 125.0})
+        assert pts == -7
+        assert "MARKET_MARGIN_STRESS" in flags
+
+    def test_margin_crisis_deducts_15(self):
+        pts, flags = SurgeRadar()._score_taifex_context({"margin_maintenance_rate": 118.0})
+        assert pts == -15
+        assert "MARKET_MARGIN_CRISIS" in flags
+
+    def test_healthy_margin_no_penalty(self):
+        pts, flags = SurgeRadar()._score_taifex_context({"margin_maintenance_rate": 145.0})
+        assert pts == 0
+        assert flags == []
+
+    def test_futures_bearish_and_margin_stress_accumulate(self):
+        ctx = {"taifex_bearish": True, "margin_maintenance_rate": 128.0}
+        pts, flags = SurgeRadar()._score_taifex_context(ctx)
+        assert pts == -12  # -5 (futures) + -7 (stress)
+        assert "TAIFEX_FUTURES_BEARISH" in flags
+        assert "MARKET_MARGIN_STRESS" in flags
+
+    def test_margin_boundary_130_is_stress(self):
+        pts, flags = SurgeRadar()._score_taifex_context({"margin_maintenance_rate": 129.9})
+        assert pts == -7
+        assert "MARKET_MARGIN_STRESS" in flags
+
+    def test_margin_boundary_120_is_crisis(self):
+        pts, flags = SurgeRadar()._score_taifex_context({"margin_maintenance_rate": 119.9})
+        assert pts == -15
+        assert "MARKET_MARGIN_CRISIS" in flags
