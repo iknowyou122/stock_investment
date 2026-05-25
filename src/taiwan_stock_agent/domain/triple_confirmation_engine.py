@@ -80,7 +80,7 @@ Score breakdown (max 100 pts before risk deductions):
     WATCH: score ≥ 45
     CAUTION: score < 45
 
-  Final: confidence = max(0, min(100, score))
+  Final: confidence = max(0, score)  — no upper cap; scores above 100 indicate exceptional setups
   scoring_version: "v2"
 
 Extensibility guide:
@@ -326,7 +326,7 @@ class _ScoreBreakdown:
             + self.dmi_divergence_deduction
             + self.vol_consecutive_surge
         )
-        return max(0, min(100, p1 + p2 + p3 + p4 - risk))
+        return max(0, p1 + p2 + p3 + p4 - risk)
 
     @property
     def chip_pts(self) -> int:

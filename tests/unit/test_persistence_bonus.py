@@ -92,12 +92,13 @@ class TestPersistenceBonus:
         assert results[0]["confidence"] == 55 + 5
         assert any("PERSIST_STABLE" in f for f in results[0]["flags"])
 
-    def test_capped_at_100(self):
+    def test_bonus_exceeds_100(self):
+        """Scores are allowed to exceed 100 — no cap applied."""
         recent = [{"2330": 90}, {"2330": 91}, {"2330": 92}]
         with patch("batch_plan._load_recent_db", return_value=recent):
             results = [_make_result("2330", 97)]
             _apply_persistence_bonus(results, date(2026, 4, 10), _DATA_DIR)
-        assert results[0]["confidence"] == 100
+        assert results[0]["confidence"] == 104  # 97 + 7 (PERSIST_RISING, trend 90→91→92)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -136,11 +137,12 @@ class TestNearHighFirstDay:
             n = _apply_near_high_first_day(results, date(2026, 4, 13), _DATA_DIR)
         assert n == 0
 
-    def test_capped_at_100(self):
+    def test_bonus_exceeds_100(self):
+        """Scores are allowed to exceed 100 — no cap applied."""
         with patch("batch_plan._load_recent_db", return_value=[]):
             results = [_make_result("6173", 98, proximity_pts=12)]
             _apply_near_high_first_day(results, date(2026, 4, 13), _DATA_DIR)
-        assert results[0]["confidence"] == 100
+        assert results[0]["confidence"] == 102  # 98 + 4 (NEAR_HIGH_COIL)
 
     def test_no_proximity_key_no_bonus(self):
         with patch("batch_plan._load_recent_db", return_value=[]):

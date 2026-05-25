@@ -1088,19 +1088,22 @@ class TestBreakdownTotal:
         # All deductions, no positive pts
         assert bd.total == 0
 
-    def test_total_clamped_above_100(self):
-        """Inflating all three pillars beyond their caps — total must still cap at 100."""
+    def test_total_above_100_allowed(self):
+        """Scores above 100 are allowed — per-pillar caps prevent single-pillar dominance
+        but the sum of all pillars + P4 bonuses can exceed 100 for exceptional setups."""
+        from src.taiwan_stock_agent.domain.triple_confirmation_engine import (
+            _PILLAR1_MAX, _PILLAR2_FREE_MAX, _PILLAR3_MAX,
+        )
         bd = _ScoreBreakdown()
-        # P1: inflate far beyond _PILLAR1_MAX=35
-        bd.volume_ratio_pts = 50
-        bd.price_direction_pts = 50
-        # P2 (chip): inflate far beyond _PILLAR2_FREE_MAX=40
-        bd.foreign_strength_pts = 50
-        bd.trust_strength_pts = 50
-        # P3: inflate far beyond _PILLAR3_MAX=35
-        bd.proximity_pts = 50
-        bd.ma_alignment_pts = 50
-        assert bd.total == 100
+        # Max out all three pillars
+        bd.volume_ratio_pts = 999   # capped at _PILLAR1_MAX
+        bd.foreign_strength_pts = 999  # capped at _PILLAR2_FREE_MAX
+        bd.proximity_pts = 999      # capped at _PILLAR3_MAX
+        # P4 bonus
+        bd.emerging_setup_pts = 10
+        expected = _PILLAR1_MAX + _PILLAR2_FREE_MAX + _PILLAR3_MAX + 10
+        assert bd.total == expected
+        assert bd.total > 100
 
     def test_pillar1_cap_enforced(self):
         """P1 alone capped at _PILLAR1_MAX even when factors sum higher."""

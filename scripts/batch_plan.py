@@ -350,7 +350,7 @@ def _apply_sector_ranks(results: list[dict], industry_map: dict[str, str]) -> in
                 bonus = 7
             else:
                 bonus = 5
-            r["confidence"] = min(100, r["confidence"] + bonus)
+            r["confidence"] = r["confidence"] + bonus
             r["flags"] = list(r.get("flags") or []) + [f"SECTOR_RANK:{rank}/{total}"]
             boosted += 1
 
@@ -409,7 +409,7 @@ def _apply_growth_bonus(results: list[dict], growth_index: dict[str, dict]) -> i
         consecutive = rec.get("consecutive", 0) or 0
         consec_bonus = 2 if consecutive >= 3 else 0
 
-        r["confidence"] = min(100, r["confidence"] + bonus + consec_bonus)
+        r["confidence"] = r["confidence"] + bonus + consec_bonus
         flags = list(r.get("flags") or [])
         flags.append(f"{flag}:YoY{yoy:.0f}%")
         if consec_bonus:
@@ -577,7 +577,7 @@ def _apply_persistence_bonus(
             bonus = 5
             flag = f"PERSIST_STABLE:{yesterday}"
 
-        r["confidence"] = min(100, r["confidence"] + bonus)
+        r["confidence"] = r["confidence"] + bonus
         r["flags"] = list(r.get("flags") or []) + [flag]
         boosted += 1
 
@@ -606,7 +606,7 @@ def _apply_near_high_first_day(
         if r["ticker"] in yesterday_tickers:
             continue
         if r.get("proximity_pts", 0) == 12:  # 12 = max proximity band (92-99% of 20d high); see _proximity_score()
-            r["confidence"] = min(100, r["confidence"] + 4)
+            r["confidence"] = r["confidence"] + 4
             r["flags"] = list(r.get("flags") or []) + ["NEAR_HIGH_COIL"]
             boosted += 1
 
@@ -667,7 +667,7 @@ def _apply_concept_heat_bonus(results: list[dict]) -> int:
         if count == 0:
             continue
         bonus = 5 if count >= 2 else 3
-        r["confidence"] = min(100, r["confidence"] + bonus)
+        r["confidence"] = r["confidence"] + bonus
         tag = f"+{bonus}({'2題材+' if count >= 2 else '1題材'})"
         r["flags"] = list(r.get("flags") or []) + [f"CONCEPT_HEAT:{tag}"]
         n += 1
@@ -1966,7 +1966,7 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
   </div>
   <div class="fb-group">
     <span class="fb-label">信心 ≥</span>
-    <input type="range" class="fb-slider" id="confSlider" min="{min_confidence}" max="100" value="{min_confidence}" step="5">
+    <input type="range" class="fb-slider" id="confSlider" min="{min_confidence}" max="150" value="{min_confidence}" step="5">
     <span class="fb-val" id="confVal">{min_confidence}</span>
   </div>
   <div class="fb-group">
