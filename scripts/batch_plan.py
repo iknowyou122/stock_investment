@@ -1706,6 +1706,15 @@ def _generate_plan_html(
             if _extras:
                 ticker_concepts[_t] = list(ticker_concepts.get(_t, [])) + _extras
 
+    # Collect unique industries for filter dropdown
+    unique_industries: list[str] = []
+    _seen_inds: set[str] = set()
+    for r in filtered:
+        ind = industry_map.get(r["ticker"], "")
+        if ind and ind not in _seen_inds:
+            _seen_inds.add(ind)
+            unique_industries.append(ind)
+
     cards: list[str] = []
     for i, r in enumerate(filtered):
         ticker = r["ticker"]
@@ -1768,8 +1777,9 @@ def _generate_plan_html(
             "</div>"
         ) if ctags_sorted else ""
 
+        raw_industry = industry_map.get(ticker, "")
         cards.append(f"""
-    <div class="card" style="animation-delay:{delay}s">
+    <div class="card" data-action="{action}" data-conf="{conf}" data-industry="{_esc(raw_industry)}" style="animation-delay:{delay}s">
       <div class="card-header">
         <div class="rank">{i+1}</div>
         <div class="info">
@@ -1920,6 +1930,21 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .rec-chip-label,.rec-risk-label{{font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap;flex-shrink:0}}
 .rec-chip-label{{background:rgba(139,148,158,.15);color:#8b949e}}
 .rec-risk-label{{background:rgba(210,153,34,.15);color:#e3a008}}
+.filter-bar{{position:sticky;top:0;z-index:100;background:#0d1117cc;backdrop-filter:blur(12px);
+  border-bottom:1px solid #21262d;padding:10px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}}
+.fb-group{{display:flex;align-items:center;gap:8px}}
+.fb-label{{font-size:11px;color:#8b949e;white-space:nowrap}}
+.fb-pill{{font-size:12px;font-weight:600;padding:5px 14px;border-radius:20px;border:1px solid #30363d;
+  background:transparent;color:#8b949e;cursor:pointer;transition:all .15s;white-space:nowrap}}
+.fb-pill.active{{border-color:#388bfd;background:rgba(56,139,253,.15);color:#58a6ff}}
+.fb-pill:hover:not(.active){{border-color:#484f58;color:#c9d1d9}}
+.fb-slider{{width:100px;accent-color:#58a6ff;cursor:pointer}}
+.fb-val{{font-size:12px;font-weight:700;color:#58a6ff;min-width:22px;text-align:right}}
+.fb-select{{background:#161b22;border:1px solid #30363d;color:#c9d1d9;font-size:12px;
+  padding:5px 10px;border-radius:8px;cursor:pointer;outline:none;max-width:150px}}
+.fb-count{{margin-left:auto;font-size:12px;color:#8b949e}}
+.fb-count span{{color:#e6edf3;font-weight:700}}
+.card.hidden{{display:none}}
 </style>
 </head>
 <body>
@@ -1932,7 +1957,28 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
   </div>
   {radar_html}
 </div>
-<div class="grid">
+<div class="filter-bar" id="filterBar">
+  <div class="fb-group">
+    <span class="fb-label">類型</span>
+    <button class="fb-pill active" data-filter-action="ALL">全部</button>
+    <button class="fb-pill" data-filter-action="LONG">突破進場</button>
+    <button class="fb-pill" data-filter-action="WATCH">等待確認</button>
+  </div>
+  <div class="fb-group">
+    <span class="fb-label">信心 ≥</span>
+    <input type="range" class="fb-slider" id="confSlider" min="{min_confidence}" max="100" value="{min_confidence}" step="5">
+    <span class="fb-val" id="confVal">{min_confidence}</span>
+  </div>
+  <div class="fb-group">
+    <span class="fb-label">產業</span>
+    <select class="fb-select" id="indSelect">
+      <option value="">全部</option>
+      {"".join(f'<option value="{_esc(ind)}">{_esc(ind)}</option>' for ind in unique_industries)}
+    </select>
+  </div>
+  <div class="fb-count">顯示 <span id="visCount">{len(filtered)}</span> / {len(filtered)} 支</div>
+</div>
+<div class="grid" id="cardGrid">
 {"".join(cards)}
 </div>
 <div class="footer">預突破掃描自動生成 · {_esc(scan_date)}</div>
@@ -1972,6 +2018,50 @@ const _obs = new IntersectionObserver(function(entries) {{
   }});
 }}, {{ rootMargin: "100px" }});
 document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.observe(el); }});
+
+// --- Filter bar ---
+(function() {{
+  var activeAction = "ALL";
+  var minConf = {min_confidence};
+  var activeInd = "";
+
+  function applyFilters() {{
+    var cards = document.querySelectorAll("#cardGrid .card");
+    var visible = 0;
+    cards.forEach(function(c) {{
+      var a = c.dataset.action;
+      var conf = parseInt(c.dataset.conf, 10);
+      var ind = c.dataset.industry;
+      var show = (activeAction === "ALL" || a === activeAction)
+               && conf >= minConf
+               && (activeInd === "" || ind === activeInd);
+      c.classList.toggle("hidden", !show);
+      if (show) visible++;
+    }});
+    document.getElementById("visCount").textContent = visible;
+  }}
+
+  document.querySelectorAll("[data-filter-action]").forEach(function(btn) {{
+    btn.addEventListener("click", function() {{
+      document.querySelectorAll("[data-filter-action]").forEach(function(b) {{ b.classList.remove("active"); }});
+      btn.classList.add("active");
+      activeAction = btn.dataset.filterAction;
+      applyFilters();
+    }});
+  }});
+
+  var slider = document.getElementById("confSlider");
+  slider.addEventListener("input", function() {{
+    minConf = parseInt(this.value, 10);
+    document.getElementById("confVal").textContent = minConf;
+    applyFilters();
+  }});
+
+  document.getElementById("indSelect").addEventListener("change", function() {{
+    activeInd = this.value;
+    applyFilters();
+  }});
+}})();
 </script>
 </body>
 </html>"""
