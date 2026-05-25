@@ -965,6 +965,10 @@ class TestMapActionProximityThreshold:
     def _make_bd_with_proximity(self, proximity: int) -> _ScoreBreakdown:
         bd = _ScoreBreakdown()
         bd.proximity_pts = proximity
+        # Satisfy cross-pillar minimums so tests focus on threshold logic only
+        bd.volume_ratio_pts = 12        # P1 >= 12
+        bd.foreign_strength_pts = 10   # P2 >= 10
+        bd.ma_alignment_pts = 12       # P3 >= 12
         return bd
 
     def _make_taiex_history(self, rising: bool, n: int = 30):
@@ -2724,3 +2728,145 @@ class TestTrendContinuationTrack:
             twse_proxy=None,
         )
         assert "TREND_CONT" not in signal.data_quality_flags
+
+
+# ---------------------------------------------------------------------------
+# Cross-pillar minimum + new risk factors
+# ---------------------------------------------------------------------------
+
+class TestCrossPillarMinimum:
+    """Total score >= LONG threshold but a weak pillar caps action at WATCH."""
+
+    def _make_full_bd(self, p1: int, p2: int, p3: int, total_score: int) -> _ScoreBreakdown:
+        bd = _ScoreBreakdown()
+        bd.volume_ratio_pts = p1
+        bd.foreign_strength_pts = p2
+        bd.proximity_pts = p3
+        # Pad total via Pillar 4 (not counted in P1/P2/P3 caps) so total reaches requested score
+        padding = max(0, total_score - (p1 + p2 + p3))
+        bd.emerging_setup_pts = padding
+        return bd
+
+    def test_all_pillars_strong_gives_long(self):
+        eng = TripleConfirmationEngine()
+        bd = self._make_full_bd(p1=15, p2=15, p3=15, total_score=68)
+        action = eng._map_action(68, bd=bd)
+        assert action == "LONG"
+
+    def test_weak_p1_caps_at_watch(self):
+        """P1=8 (< 12) → WATCH even if total score >= LONG threshold."""
+        eng = TripleConfirmationEngine()
+        bd = self._make_full_bd(p1=8, p2=15, p3=15, total_score=70)
+        action = eng._map_action(70, bd=bd)
+        assert action == "WATCH"
+        assert any("CROSS_PILLAR_WEAK" in f for f in bd.flags)
+
+    def test_weak_p2_caps_at_watch(self):
+        """P2=5 (< 10) → WATCH even if total score >= LONG threshold."""
+        eng = TripleConfirmationEngine()
+        bd = self._make_full_bd(p1=15, p2=5, p3=15, total_score=70)
+        action = eng._map_action(70, bd=bd)
+        assert action == "WATCH"
+        assert any("CROSS_PILLAR_WEAK" in f for f in bd.flags)
+
+    def test_weak_p3_caps_at_watch(self):
+        """P3=8 (< 12) → WATCH even if total score >= LONG threshold."""
+        eng = TripleConfirmationEngine()
+        bd = self._make_full_bd(p1=15, p2=15, p3=8, total_score=70)
+        action = eng._map_action(70, bd=bd)
+        assert action == "WATCH"
+
+    def test_weak_pillar_below_watch_gives_caution(self):
+        """Weak P1 + total score < WATCH threshold → CAUTION."""
+        eng = TripleConfirmationEngine()
+        bd = self._make_full_bd(p1=5, p2=5, p3=5, total_score=30)
+        action = eng._map_action(30, bd=bd)
+        assert action == "CAUTION"
+
+
+class TestRecentAdvanceDeduction:
+    """Near-20d advance > 25% or > 40% triggers deduction."""
+
+    def _make_hist(self, low_close: float, n: int = 20) -> list[DailyOHLCV]:
+        return _make_history(n, base_close=low_close, flat=True)
+
+    def test_no_deduction_below_25pct(self):
+        hist = self._make_hist(100.0)
+        ohlcv = _make_ohlcv(close=120.0)  # +20% < 25%
+        pts, flag = TripleConfirmationEngine._recent_advance_deduction(ohlcv, hist)
+        assert pts == 0
+        assert flag is None
+
+    def test_moderate_deduction_25_to_40pct(self):
+        hist = self._make_hist(100.0)
+        ohlcv = _make_ohlcv(close=130.0)  # +30%
+        pts, flag = TripleConfirmationEngine._recent_advance_deduction(ohlcv, hist)
+        assert pts == 5
+        assert flag is not None and "MOD_BASE_RISK" in flag
+
+    def test_high_deduction_above_40pct(self):
+        hist = self._make_hist(100.0)
+        ohlcv = _make_ohlcv(close=145.0)  # +45%
+        pts, flag = TripleConfirmationEngine._recent_advance_deduction(ohlcv, hist)
+        assert pts == 10
+        assert flag is not None and "HIGH_BASE_RISK" in flag
+
+    def test_no_deduction_short_history(self):
+        hist = _make_history(3, base_close=100.0, flat=True)
+        ohlcv = _make_ohlcv(close=150.0)
+        pts, flag = TripleConfirmationEngine._recent_advance_deduction(ohlcv, hist)
+        assert pts == 0
+
+
+class TestOBVDistributionDeduction:
+    """Negative OBV slope → -3 pts with OBV_DIST flag."""
+
+    def _make_declining_obv_hist(self, n: int = 25) -> list[DailyOHLCV]:
+        """Declining prices = OBV goes negative (all down days)."""
+        bars = []
+        base = date(2025, 1, 2)
+        for i in range(n):
+            close = 110.0 - i * 0.5  # steadily declining
+            bars.append(DailyOHLCV(
+                ticker="TEST", trade_date=base + timedelta(days=i),
+                open=close + 0.5, high=close + 1, low=close - 1,
+                close=close, volume=50_000,
+            ))
+        return bars
+
+    def test_declining_obv_gives_negative_pts(self):
+        hist = self._make_declining_obv_hist(25)
+        ohlcv = _make_ohlcv(close=97.0, high=98.0, low=96.0, volume=50_000)
+        pts, flag = TripleConfirmationEngine._obv_accumulation_score(ohlcv, hist)
+        assert pts < 0
+        assert flag == "OBV_DIST"
+
+
+class TestVolAsymmetryDeduction:
+    """Down-day volume >> up-day volume → negative pts."""
+
+    def _make_down_heavy_hist(self, n: int = 25) -> list[DailyOHLCV]:
+        """Alternating up/down but down days have 3x the volume."""
+        bars = []
+        base = date(2025, 1, 2)
+        close = 100.0
+        for i in range(n):
+            if i % 2 == 0:  # up day, thin volume
+                close += 0.5
+                vol = 10_000
+            else:  # down day, heavy volume
+                close -= 0.5
+                vol = 60_000
+            bars.append(DailyOHLCV(
+                ticker="TEST", trade_date=base + timedelta(days=i),
+                open=close, high=close + 0.5, low=close - 0.5,
+                close=close, volume=vol,
+            ))
+        return bars
+
+    def test_down_heavy_volume_gives_negative_pts(self):
+        hist = self._make_down_heavy_hist(25)
+        ohlcv = _make_ohlcv(close=101.0, volume=10_000)
+        pts, flag = TripleConfirmationEngine._vol_asymmetry_score(ohlcv, hist)
+        assert pts < 0
+        assert flag is not None and "VOL_ASYM_WEAK" in flag

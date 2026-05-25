@@ -251,8 +251,8 @@ class _ScoreBreakdown:
     inst_synergy_pts: int = 0             # 0/5/11 — 土洋合作 + 法人買超佔比
     margin_declining_pts: int = 0         # 0/3 — 融資餘額今日下降（浮額洗盤）
     ownership_concentration_pts: int = 0  # -10/0/8 — 集保大戶增/散戶退
-    obv_accumulation_pts: int = 0         # 0/2/3/5 — OBV 20d 斜率向上（暗吸）
-    vol_asymmetry_pts: int = 0            # 0/2/4 — 上漲日均量 > 下跌日均量
+    obv_accumulation_pts: int = 0         # -3/0/2/3/5 — OBV 20d 斜率（暗吸+/出貨-）
+    vol_asymmetry_pts: int = 0            # -4/-2/0/2/4 — 上漲/下跌日均量比值
     dual_inst_flow_pts: int = 0           # 0/3/5 — 外資+投信雙向 20D 累積
     chip_cleanliness_pts: int = 0         # 0/4/7/10 — 籌碼乾淨度 K-of-6 複合分
     super_large_pts: int = 0             # -4/0/+4/+8 — 千張大戶動向（持股比例+人數週變化）
@@ -300,6 +300,7 @@ class _ScoreBreakdown:
     adx_exhaustion_deduction: int = 0   # 0 or 6 — ADX > 55
     dmi_divergence_deduction: int = 0   # 0 or 4 — +DI falling while -DI rising
     vol_consecutive_surge: int = 0      # 0 or 5 — 3+ consecutive vol surge days (框架第3根不追)
+    recent_advance_deduction: int = 0   # 0/5/10 — 近20日從低點漲幅過大（高基期追高懲罰）
 
     flags: list[str] = field(default_factory=list)
 
@@ -325,6 +326,7 @@ class _ScoreBreakdown:
             + self.adx_exhaustion_deduction
             + self.dmi_divergence_deduction
             + self.vol_consecutive_surge
+            + self.recent_advance_deduction
         )
         return max(0, p1 + p2 + p3 + p4 - risk)
 
@@ -1045,6 +1047,9 @@ class TripleConfirmationEngine:
             return (5, "OBV_ACCUM_PRIME") if in_consolidation else (3, "OBV_ACCUM")
         if normalized_slope > 0.02:
             return 2, "OBV_ACCUM"
+        # 明顯出貨：OBV 斜率大幅負值 → 扣分
+        if normalized_slope < -0.05:
+            return -3, "OBV_DIST"
         return 0, None
 
     @staticmethod
@@ -1083,6 +1088,11 @@ class TripleConfirmationEngine:
             return 4, f"VOL_ASYM:{ratio:.1f}x"
         if ratio >= 1.2:
             return 2, f"VOL_ASYM:{ratio:.1f}x"
+        # 下跌日量能明顯大於上漲日 → 賣壓沉重
+        if ratio < 0.5:
+            return -4, f"VOL_ASYM_WEAK:{ratio:.1f}x"
+        if ratio < 0.7:
+            return -2, f"VOL_ASYM_WEAK:{ratio:.1f}x"
         return 0, None
 
     @staticmethod
@@ -2224,6 +2234,42 @@ class TripleConfirmationEngine:
             bd.vol_consecutive_surge = 5
             bd.flags.append(f"VOL_DAY{consec}_NO_CHASE")
 
+        # 9. 追高懲罰：近20日從最低收盤價漲幅過大
+        adv_pts, adv_flag = self._recent_advance_deduction(ohlcv, history)
+        bd.recent_advance_deduction = adv_pts
+        if adv_flag:
+            bd.flags.append(adv_flag)
+
+    @staticmethod
+    def _recent_advance_deduction(
+        ohlcv: DailyOHLCV, history: list[DailyOHLCV]
+    ) -> tuple[int, str | None]:
+        """追高懲罰：近20日從最低收盤漲幅過大 → 高基期風險。
+
+        > 40% → 扣 10 分，HIGH_BASE_RISK
+        > 25% → 扣 5 分，MOD_BASE_RISK
+        否則 → 0
+
+        邏輯：使用近20日歷史+今日的最低收盤價作為基期，
+        衡量目前股價距底部的漲幅。不懲罰健康蓄積的股票，
+        只懲罰「已在山頂再加倉」的場景。
+        """
+        sorted_h = sorted(history, key=lambda x: x.trade_date)
+        recent = sorted_h[-20:] if len(sorted_h) >= 20 else sorted_h
+        if len(recent) < 5:
+            return 0, None
+
+        low_close = min(b.close for b in recent)
+        if low_close <= 0:
+            return 0, None
+
+        advance_pct = (ohlcv.close - low_close) / low_close
+        if advance_pct >= 0.40:
+            return 10, f"HIGH_BASE_RISK:{advance_pct:.0%}"
+        if advance_pct >= 0.25:
+            return 5, f"MOD_BASE_RISK:{advance_pct:.0%}"
+        return 0, None
+
     # ------------------------------------------------------------------
     # Signal building
     # ------------------------------------------------------------------
@@ -2263,6 +2309,20 @@ class TripleConfirmationEngine:
 
         if bd is not None and bd.proximity_pts == 12 and regime != "downtrend":
             long_threshold = max(long_threshold - 5, _WATCH_MIN + 1)
+
+        # Cross-pillar minimum: 任一 Pillar 過弱 → 最高只能 WATCH
+        # 即使總分達 LONG 門檻，缺乏某個維度的支撐仍是低品質訊號
+        if bd is not None:
+            p1 = min(_PILLAR1_MAX, bd.momentum_pts)
+            p2 = min(_PILLAR2_FREE_MAX, bd.chip_pts)
+            p3 = min(_PILLAR3_MAX, bd.structure_pts)
+            if p1 < 12 or p2 < 10 or p3 < 12:
+                if confidence >= _WATCH_MIN:
+                    bd.flags.append(
+                        f"CROSS_PILLAR_WEAK:P1={p1}/P2={p2}/P3={p3}"
+                    )
+                    return "WATCH"
+                return "CAUTION"
 
         if confidence >= long_threshold:
             return "LONG"
