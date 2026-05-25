@@ -1313,7 +1313,8 @@ def run_batch(
                         name_map=name_map or {}, industry_map=industry_map or {},
                         market_map=market_map or {},
                         heat_summary=_load_heat_summary(),
-                        llm_provider=llm_provider)
+                        llm_provider=llm_provider,
+                        min_confidence=min_confidence)
     _console.print(f"  [dim cyan]📄 HTML: file://{html_path.resolve()}[/dim cyan]")
     import subprocess, sys as _sys
     if _sys.platform == "darwin":
@@ -1583,12 +1584,13 @@ def _generate_plan_html(
     market_map: dict[str, str],
     heat_summary: dict | None = None,
     llm_provider=None,
+    min_confidence: int = 50,
 ) -> None:
     """Dark-themed HTML report for plan scan results (LONG + actionable WATCH only)."""
     import json as _json
     from html import escape as _esc
 
-    # Filter: LONG stocks + WATCH stocks that are NOT in consolidation
+    # Filter: LONG stocks + WATCH stocks that are NOT in consolidation, above min_confidence
     def _is_consolidating(r: dict) -> bool:
         flags = set(r.get("flags") or [])
         return bool(flags & _WATCH_FLAGS_CONSOLIDATING)
@@ -1597,6 +1599,7 @@ def _generate_plan_html(
         r for r in results
         if not r.get("halt") and r.get("error") is None
         and r.get("action") in ("LONG", "WATCH")
+        and r.get("confidence", 0) >= min_confidence
         and not (r.get("action") == "WATCH" and _is_consolidating(r))
     ]
     filtered.sort(key=lambda r: (r.get("confidence", 0), r.get("trend_score", 0)), reverse=True)
