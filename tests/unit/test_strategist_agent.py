@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from taiwan_stock_agent.agents.strategist_agent import StrategistAgent
+from taiwan_stock_agent.agents.strategist_agent import StrategistAgent, _LLM_DISABLED
 from taiwan_stock_agent.domain.models import BrokerLabel, DailyOHLCV, Reasoning, TWSEChipProxy
 from taiwan_stock_agent.domain.triple_confirmation_engine import _AnalysisHints
 
@@ -59,16 +59,22 @@ def _make_mock_ohlcv_df(
     base_date: date = _BASE_DATE,
     analysis_date: date = _ANALYSIS_DATE,
 ) -> pd.DataFrame:
-    """Generate n rows of ascending OHLCV with the last row set to analysis_date.
+    """Generate n rows of OHLCV that rises then consolidates near the top.
 
-    The last row (analysis_date) has volume 3x the 20-day average to ensure the
-    volume-surge pillar fires. Baseline volume is set high enough that
-    turnover (close × volume) clears the v2.2a liquidity gate (TSE 20M NT$).
+    Design:
+    - First (n-5) rows ascend from 100 to ~110 — establishes the 20d high
+    - Last 5 rows consolidate at ~107 (97% of peak 110.5) — satisfies G1 85-99% zone
+    - Baseline volume gives turnover ≈ 32M NT$ > 15M TSE liquidity gate
+    - Last row gets 3x volume surge so momentum pillars fire
     """
+    peak_idx = n - 5  # index where price peaks before consolidation
     rows = []
     for i in range(n):
         d = base_date + timedelta(days=i)
-        close = 100.0 + i * 0.5
+        if i < peak_idx:
+            close = 100.0 + i * 0.5          # ascend: 100 → ~107.5
+        else:
+            close = 107.0                     # consolidate at ~97% of peak
         rows.append(
             {
                 "trade_date": d,
@@ -77,17 +83,14 @@ def _make_mock_ohlcv_df(
                 "high": close + 1,
                 "low": close - 2,
                 "close": close,
-                "volume": 300_000,  # turnover ≈ 30M NT$ > 20M liquidity gate
+                "volume": 300_000,            # turnover ≈ 32M > 15M TSE threshold
             }
         )
-    # Last row: analysis_date with volume surge (3x avg) and close at 20d high
-    last_close = 100.0 + (n - 1) * 0.5
+    # Last row: analysis_date with volume surge (3x avg)
     rows[-1].update(
         {
             "trade_date": analysis_date,
-            "close": last_close,
-            "high": last_close + 1,
-            "volume": 900_000,  # 3x > 1.5x threshold
+            "volume": 900_000,                # 3x > 1.5x threshold
         }
     )
     return pd.DataFrame(rows)
@@ -127,8 +130,13 @@ def _make_agent(
     ohlcv_df: pd.DataFrame | None = None,
     broker_df: pd.DataFrame | None = None,
     anthropic_api_key: str = "",
+    disable_llm: bool = True,
 ) -> tuple[StrategistAgent, MagicMock]:
-    """Return (agent, mock_finmind) pair pre-configured with the given DataFrames."""
+    """Return (agent, mock_finmind) pair pre-configured with the given DataFrames.
+
+    LLM is disabled by default so tests don't make real API calls or pick up
+    env keys (GEMINI_API_KEY etc.) unintentionally.
+    """
     if ohlcv_df is None:
         ohlcv_df = _make_mock_ohlcv_df()
     if broker_df is None:
@@ -139,7 +147,12 @@ def _make_agent(
     mock_finmind.fetch_broker_trades.return_value = broker_df
 
     repo = _InMemoryRepo()
-    agent = StrategistAgent(mock_finmind, repo, anthropic_api_key=anthropic_api_key)
+    llm = _LLM_DISABLED if disable_llm else None
+    agent = StrategistAgent(
+        mock_finmind, repo,
+        anthropic_api_key=anthropic_api_key,
+        llm_provider=llm,
+    )
     return agent, mock_finmind
 
 
@@ -378,7 +391,7 @@ class TestStrategistChipProxyInjection:
             return Reasoning()
 
         with patch.object(StrategistAgent, "_generate_reasoning", side_effect=_capture_hints):
-            agent, _ = _make_agent(anthropic_api_key="test-key")
+            agent, _ = _make_agent(anthropic_api_key="test-key", disable_llm=False)
             agent.run("9999", _ANALYSIS_DATE)
 
         assert len(captured) == 1, "_generate_reasoning should have been called once"

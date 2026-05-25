@@ -314,8 +314,9 @@ class TestStrategistAgentLLMProvider:
         mock_provider.complete.assert_called_once()
 
     def test_no_llm_when_provider_none(self):
-        """llm_provider=None → reasoning fields are empty."""
-        agent = self._make_agent_with_provider(None)
+        """llm_provider=_LLM_DISABLED → reasoning fields are empty."""
+        from taiwan_stock_agent.agents.strategist_agent import _LLM_DISABLED
+        agent = self._make_agent_with_provider(_LLM_DISABLED)
         from datetime import date
         signal = agent.run("9999", date(2025, 2, 5))
 

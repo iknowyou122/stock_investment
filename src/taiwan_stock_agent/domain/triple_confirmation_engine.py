@@ -143,8 +143,8 @@ _MA20_SLOPE_DIFF_DAYS = 5       # compare MA20 today vs 5 sessions ago
 # Amount-based instead of share-count so high-priced stocks aren't over-filtered
 # and low-priced stocks aren't under-filtered.
 _LIQUIDITY_THRESHOLDS: dict[str, float] = {
-    "TSE":  40_000_000.0,   # NT$ 40M/day — filters thin stocks, still reachable by mid-cap
-    "TPEx": 15_000_000.0,   # NT$ 15M/day — TPEx boards are thinner, but still need tradable depth
+    "TSE":  15_000_000.0,   # NT$ 15M/day — viable for early position building; 40M was too strict for small-caps
+    "TPEx":  8_000_000.0,   # NT$ 8M/day — TPEx minimum for position building
 }
 _DEFAULT_MARKET = "TSE"
 
@@ -2636,10 +2636,13 @@ class TripleConfirmationEngine:
         (which requires a single strong day), this track fires on multi-day institutional
         conviction even if each individual day is unremarkable.
 
+        Aligned with make-plan's 2–12 week position-building strategy: 3 consecutive
+        buy days is sufficient early-stage conviction; 5 days was too late for entry.
+
         Activates when ALL of:
           - G2 is the ONLY gate failure (G1, G3, G4, G5 all passed/skipped)
           - Proximity ≥ 85% of 20D high (wider than momentum_breakout's 92%)
-          - Foreign OR Trust consecutive buy ≥ 5 days (sustained, not one-off)
+          - Foreign OR Trust consecutive buy ≥ 3 days
         """
         failures = [f for f in gate_flags if f.startswith("GATE_FAIL:")]
         if len(failures) != 1 or not failures[0].startswith("GATE_FAIL:G2"):
@@ -2654,8 +2657,8 @@ class TripleConfirmationEngine:
             return False
 
         return (
-            twse_proxy.foreign_consecutive_buy_days >= 5
-            or twse_proxy.trust_consecutive_buy_days >= 5
+            twse_proxy.foreign_consecutive_buy_days >= 3
+            or twse_proxy.trust_consecutive_buy_days >= 3
         )
 
     @staticmethod

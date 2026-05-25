@@ -1443,8 +1443,8 @@ def _history_with_turnover(avg_turnover: float, n: int = 70) -> list[DailyOHLCV]
 class TestLiquidityGate:
     def test_tse_below_threshold_triggers_low_liquidity(self):
         engine = TripleConfirmationEngine()
-        history = _history_with_turnover(avg_turnover=30_000_000)  # 3000萬 < 4000萬
-        today = _make_ohlcv(close=50.0, volume=600_000, trade_date=date(2025, 3, 13))
+        history = _history_with_turnover(avg_turnover=10_000_000)  # 1000萬 < 1500萬 TSE threshold
+        today = _make_ohlcv(close=50.0, volume=200_000, trade_date=date(2025, 3, 13))
         signal = engine.score(
             ohlcv=today, ohlcv_history=history,
             chip_report=_make_chip_report(), volume_profile=_make_volume_profile(),
@@ -1456,8 +1456,8 @@ class TestLiquidityGate:
 
     def test_tse_above_threshold_passes_liquidity_gate(self):
         engine = TripleConfirmationEngine()
-        history = _history_with_turnover(avg_turnover=60_000_000)  # 6000萬 > 4000萬
-        today = _make_ohlcv(close=50.0, volume=1_200_000, trade_date=date(2025, 3, 13))
+        history = _history_with_turnover(avg_turnover=20_000_000)  # 2000萬 > 1500萬 TSE threshold
+        today = _make_ohlcv(close=50.0, volume=400_000, trade_date=date(2025, 3, 13))
         _, breakdown = engine.score_with_breakdown(
             ohlcv=today, ohlcv_history=history,
             chip_report=_make_chip_report(), volume_profile=_make_volume_profile(),
@@ -1466,11 +1466,11 @@ class TestLiquidityGate:
         assert not any("LOW_LIQUIDITY" in f for f in breakdown.flags)
 
     def test_tpex_lower_threshold_applied(self):
-        """TPEx 1500萬 threshold — 1000萬 fails, 2000萬 passes."""
+        """TPEx 800萬 threshold — 500萬 fails, 1000萬 passes."""
         engine = TripleConfirmationEngine()
-        # Below TPEx threshold (1000萬 < 1500萬)
-        history_fail = _history_with_turnover(avg_turnover=10_000_000)
-        today = _make_ohlcv(close=50.0, volume=200_000, trade_date=date(2025, 3, 13))
+        # Below TPEx threshold (500萬 < 800萬)
+        history_fail = _history_with_turnover(avg_turnover=5_000_000)
+        today = _make_ohlcv(close=50.0, volume=100_000, trade_date=date(2025, 3, 13))
         signal = engine.score(
             ohlcv=today, ohlcv_history=history_fail,
             chip_report=_make_chip_report(), volume_profile=_make_volume_profile(),
@@ -1479,8 +1479,8 @@ class TestLiquidityGate:
         assert "NO_SETUP" in signal.data_quality_flags
         assert any("LOW_LIQUIDITY" in f for f in signal.data_quality_flags)
 
-        # Above TPEx threshold (2000萬 > 1500萬) — would still fail TSE (< 4000萬)
-        history_pass = _history_with_turnover(avg_turnover=20_000_000)
+        # Above TPEx threshold (1000萬 > 800萬)
+        history_pass = _history_with_turnover(avg_turnover=10_000_000)
         _, bd = engine.score_with_breakdown(
             ohlcv=today, ohlcv_history=history_pass,
             chip_report=_make_chip_report(), volume_profile=_make_volume_profile(),
@@ -2135,7 +2135,7 @@ class TestMomentumBreakoutTrack:
     # --- integration: full engine ---
 
     def test_momentum_track_gives_watch_not_caution(self):
-        # base_vol=600_000 → avg turnover 600k×80=48M > 40M TSE threshold (G3 passes)
+        # base_vol=600_000 → avg turnover 600k×80=48M > 15M TSE threshold (G3 passes)
         history = _make_volatile_history(65, base_close=80.0, base_vol=600_000)
         ohlcv = _make_ohlcv(close=95.0, high=97.0, low=90.0, volume=1_000_000)
         vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=108.0, sixty_day_sessions=60)
@@ -2226,10 +2226,18 @@ class TestInstMomentumTrack:
         flags = self._gate_flags()
         assert TripleConfirmationEngine._is_inst_momentum(ohlcv, vp, flags, proxy)
 
-    def test_does_not_fire_when_consec_only_4d(self):
+    def test_fires_when_consec_3d(self):
+        # 3 days is the minimum threshold (aligned with make-plan 2-12 week strategy)
         ohlcv = self._ohlcv(close=87.0)
         vp = self._vp(twenty_day_high=100.0)
-        proxy = self._proxy(foreign_consec=4, trust_consec=0)
+        proxy = self._proxy(foreign_consec=3, trust_consec=0)
+        flags = self._gate_flags()
+        assert TripleConfirmationEngine._is_inst_momentum(ohlcv, vp, flags, proxy)
+
+    def test_does_not_fire_when_consec_only_2d(self):
+        ohlcv = self._ohlcv(close=87.0)
+        vp = self._vp(twenty_day_high=100.0)
+        proxy = self._proxy(foreign_consec=2, trust_consec=0)
         flags = self._gate_flags()
         assert not TripleConfirmationEngine._is_inst_momentum(ohlcv, vp, flags, proxy)
 
@@ -2320,12 +2328,12 @@ class TestInstMomentumTrack:
         )
         assert signal.action != "CAUTION", f"Expected WATCH/LONG, got CAUTION (conf={signal.confidence})"
 
-    def test_inst_momentum_flag_not_set_when_only_4d(self):
+    def test_inst_momentum_flag_not_set_when_only_2d(self):
         history = self._make_wide_bb_history()
         ohlcv = _make_ohlcv(close=87.0, high=89.0, low=85.0, volume=600_000)
         vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=108.0, sixty_day_sessions=60)
         proxy = _make_twse_proxy(
-            foreign_consecutive_buy_days=4,
+            foreign_consecutive_buy_days=2,
             is_available=True,
         )
 
