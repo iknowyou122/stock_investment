@@ -106,10 +106,11 @@ def main(quiet: bool = False) -> int:
 
     # Rotation radar — runs after heat + concept snapshots are saved
     try:
-        import importlib.util, os
+        import importlib.util
         _tracker_path = Path(__file__).resolve().parent / "rotation_tracker.py"
         spec = importlib.util.spec_from_file_location("rotation_tracker", _tracker_path)
         rt = importlib.util.module_from_spec(spec)
+        sys.modules["rotation_tracker"] = rt  # register before exec so @dataclass resolves module
         spec.loader.exec_module(rt)
         rt.run(quiet=quiet)
     except Exception as e:
