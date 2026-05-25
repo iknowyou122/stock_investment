@@ -738,8 +738,11 @@ class SurgeRadar:
 
         hot_concepts = ctx.get("hot_concepts") or []
         if hot_concepts:
-            pts += f.get("heat_concept", 3)
-            flags.append(f"CONCEPT_HOT:{hot_concepts[0]}")
+            base = f.get("heat_concept", 8)
+            bonus = f.get("heat_concept_multi", 5) if len(hot_concepts) >= 2 else 0
+            pts += base + bonus
+            label = f"{hot_concepts[0]}" + (f"+{len(hot_concepts)-1}more" if len(hot_concepts) > 1 else "")
+            flags.append(f"CONCEPT_HOT:{label}")
 
         intl = ctx.get("intl_tailwind", 0) or 0
         if intl > 0:

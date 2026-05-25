@@ -409,6 +409,8 @@ async def _run_subprocess_async(cmd: list[str], **_) -> tuple[int, str]:
 # ── Telegram helpers ─────────────────────────────────────────────────────────
 
 async def _send(text: str) -> None:
+    if not _state.get("app"):
+        return
     try:
         await _state["app"].bot.send_message(
             chat_id=_state["chat_id"],
@@ -1543,9 +1545,10 @@ async def main_async(llm: str) -> None:
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
-    if not token or not chat_id:
-        _console.print("[red]❌ 請先執行 make bot-setup 設定 Telegram[/red]")
-        sys.exit(1)
+    telegram_enabled = bool(token and chat_id)
+    if not telegram_enabled:
+        _console.print("[yellow]⚠️  Telegram 未設定，以本地儀表板模式執行（無推播）[/yellow]")
+        _console.print("[dim]如需推播，執行 make bot-setup 設定 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID[/dim]")
     _state["chat_id"] = chat_id
     _try_preload_shortlist()
     surge_signals = _query_surge_signals_db()
@@ -1553,22 +1556,24 @@ async def main_async(llm: str) -> None:
         _state["surge_signals"] = surge_signals
         _state["surge_updated_at"] = datetime.now()
         logger.info("startup: preloaded surge signals n=%d from DB", len(surge_signals))
-    logger.info("Bot START llm=%s chat_id=%s log=%s", llm, chat_id, _LOG_PATH)
+    logger.info("Bot START llm=%s telegram=%s log=%s", llm, telegram_enabled, _LOG_PATH)
 
-    app = Application.builder().token(token).build()
-    _state["app"] = app
-    app.add_error_handler(_error_handler)
+    app = None
+    if telegram_enabled:
+        app = Application.builder().token(token).build()
+        _state["app"] = app
+        app.add_error_handler(_error_handler)
 
-    for cmd_name, handler in [
-        ("top", cmd_top), ("status", cmd_status),
-        ("pause", cmd_pause), ("resume", cmd_resume),
-        ("params", cmd_params), ("optimize", cmd_optimize),
-        ("approve", cmd_approve), ("rollback", cmd_rollback),
-        ("plan", cmd_plan), ("surge", cmd_surge), ("report", cmd_report),
-        ("growth", cmd_growth),
-        ("test", cmd_test), ("help", cmd_help),
-    ]:
-        app.add_handler(CommandHandler(cmd_name, handler))
+        for cmd_name, handler in [
+            ("top", cmd_top), ("status", cmd_status),
+            ("pause", cmd_pause), ("resume", cmd_resume),
+            ("params", cmd_params), ("optimize", cmd_optimize),
+            ("approve", cmd_approve), ("rollback", cmd_rollback),
+            ("plan", cmd_plan), ("surge", cmd_surge), ("report", cmd_report),
+            ("growth", cmd_growth),
+            ("test", cmd_test), ("help", cmd_help),
+        ]:
+            app.add_handler(CommandHandler(cmd_name, handler))
 
     scheduler = AsyncIOScheduler()
     # 09:05 opening scan (Mon–Fri)
@@ -1588,9 +1593,10 @@ async def main_async(llm: str) -> None:
     scheduler.add_job(_job_growth_scan, "cron", day=11, hour=22, minute=0)
     scheduler.start()
 
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
+    if telegram_enabled and app is not None:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
 
     # Start background market data refresh
     market_task = asyncio.create_task(_refresh_market_loop())
@@ -1635,9 +1641,10 @@ async def main_async(llm: str) -> None:
     finally:
         market_task.cancel()
         scheduler.shutdown(wait=False)
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+        if telegram_enabled and app is not None:
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
 
 
 def main() -> None:

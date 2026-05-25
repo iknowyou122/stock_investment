@@ -1089,14 +1089,32 @@ class TestBreakdownTotal:
         assert bd.total == 0
 
     def test_total_clamped_above_100(self):
-        """Artificially inflate all fields — total must cap at 100."""
+        """Inflating all three pillars beyond their caps — total must still cap at 100."""
         bd = _ScoreBreakdown()
-        bd.volume_ratio_pts = 35
-        bd.price_direction_pts = 35
-        bd.close_strength_pts = 35
-        bd.vwap_advantage_pts = 35
-        bd.proximity_pts = 35
+        # P1: inflate far beyond _PILLAR1_MAX=35
+        bd.volume_ratio_pts = 50
+        bd.price_direction_pts = 50
+        # P2 (chip): inflate far beyond _PILLAR2_FREE_MAX=40
+        bd.foreign_strength_pts = 50
+        bd.trust_strength_pts = 50
+        # P3: inflate far beyond _PILLAR3_MAX=35
+        bd.proximity_pts = 50
+        bd.ma_alignment_pts = 50
         assert bd.total == 100
+
+    def test_pillar1_cap_enforced(self):
+        """P1 alone capped at _PILLAR1_MAX even when factors sum higher."""
+        from src.taiwan_stock_agent.domain.triple_confirmation_engine import _PILLAR1_MAX
+        bd = _ScoreBreakdown()
+        bd.volume_ratio_pts = 999
+        assert bd.total == _PILLAR1_MAX
+
+    def test_chip_pillar_cap_enforced(self):
+        """Chip pillar alone capped at _PILLAR2_FREE_MAX even when factors sum higher."""
+        from src.taiwan_stock_agent.domain.triple_confirmation_engine import _PILLAR2_FREE_MAX
+        bd = _ScoreBreakdown()
+        bd.foreign_strength_pts = 999
+        assert bd.total == _PILLAR2_FREE_MAX
 
     def test_chip_pts_property(self):
         """chip_pts includes both paid and free paths but not Pillar 1 or 3."""

@@ -4,7 +4,7 @@
     "SURGE_BETA": 40,
     "SURGE_GAMMA": 40
   },
-  "raw_max_pts": 127,
+  "raw_max_pts": 155,
   "gates": {
     "min_turnover_tse": 20000000,
     "min_turnover_tpex": 8000000,
@@ -41,7 +41,8 @@
     "heat_ind_hot": 3,
     "heat_ind_warm": 2,
     "heat_ind_accel": 2,
-    "heat_concept": 3,
+    "heat_concept": 8,
+    "heat_concept_multi": 5,
     "heat_intl_max": 2,
     "inst_synergy_both": 5,
     "inst_pct_high": 6,

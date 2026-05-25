@@ -9,7 +9,7 @@ Score breakdown (max 100 pts before risk deductions):
     Cond 4: 5d_stock_return > 5d_taiex_return  (only when taiex data available)
     Fail: action=CAUTION, confidence=0, data_quality_flags=["NO_SETUP"]
 
-  Pillar 1: Momentum (max 39 pts)
+  Pillar 1: Momentum (max 35 pts — capped)
     volume_ratio_pts:     0/4/5/8 — vol/20d_avg: <1.2→0, 1.2-2.0→4, 2.0-3.0→8, ≥3.0→5+VOL_EXHAUSTION_RISK
     price_direction_pts:  0/3     — close >= prev_close → +3
     close_strength_pts:  -2/0/2/4 — (close-low)/(high-low): ≥0.8→4, 0.6-0.8→2, 0.4-0.6→0, <0.4→-2+CLOSE_WEAK_OUT_PATTERN
@@ -48,7 +48,7 @@ Score breakdown (max 100 pts before risk deductions):
     short_squeeze_setup_pts: 0/3/5    — 券資比>0.25+回補>8%→3; 券資比>0.40+回補>15%→5
     stealth_accum_composite_pts: 0/6/10 — K-of-6 隱蔽吸籌複合（4/6→STEALTH_ACCUM; 5-6/6→PRIME）
 
-  Pillar 3: Structure/Space (max 38 pts)
+  Pillar 3: Structure/Space (max 35 pts — capped)
     breakout_20d_pts:     0/8    — close ≥ twenty_day_high × 0.99 (only when > 0) → +8
     breakout_60d_pts:     0/5    — close ≥ sixty_day_high × 0.99 → +5 (≥40 sessions)
     breakout_quality_pts: 0/2    — breakout + close_strength ≥ 0.7 → +2
@@ -217,7 +217,7 @@ class _ScoreBreakdown:
     """
     scoring_version: str = "v2"
 
-    # --- Pillar 1: Momentum (max _PILLAR1_MAX = 39) ---
+    # --- Pillar 1: Momentum (max _PILLAR1_MAX = 35) ---
     volume_ratio_pts: int = 0         # 0/4/8
     price_direction_pts: int = 0      # 0/3
     close_strength_pts: int = 0       # 0/2/4
@@ -237,7 +237,7 @@ class _ScoreBreakdown:
     daytrade_filter_pts: int = 0      # 0/7
     foreign_broker_pts: int = 0       # 0/3/5
 
-    # --- Pillar 2B: Chip free (max _PILLAR2_FREE_MAX = 54) ---
+    # --- Pillar 2B: Chip free (max _PILLAR2_FREE_MAX = 40) ---
     foreign_strength_pts: int = 0         # 0/4/8/12
     trust_strength_pts: int = 0           # 0/3/6/8
     dealer_strength_pts: int = 0          # 0/2/4
@@ -269,7 +269,7 @@ class _ScoreBreakdown:
     short_squeeze_setup_pts: int = 0      # 0/3/5 — 券資比高+空頭回補啟動（SHORT_SQUEEZE_SETUP）
     stealth_accum_composite_pts: int = 0  # 0/6/10 — K-of-6 隱蔽吸籌複合（STEALTH_ACCUM/PRIME）
 
-    # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 40) ---
+    # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 35) ---
     proximity_pts: int = 0            # 0/6/12 — close distance to 20d_high
     bb_compression_pts: int = 0       # 0/5/10 — BB width tightness
     ma_convergence_pts: int = 0       # 0/4/8 — MA5/MA10/MA20 convergence
@@ -305,87 +305,28 @@ class _ScoreBreakdown:
 
     @property
     def total(self) -> int:
-        """Clamped score sum. Explicit enumeration is intentional — see extensibility guide."""
-        raw = (
-            # Pillar 1
-            self.volume_ratio_pts
-            + self.price_direction_pts
-            + self.close_strength_pts
-            + self.vwap_advantage_pts
-            + self.trend_continuity_pts
-            + self.volume_escalation_pts
-            + self.rsi_momentum_pts
-            + self.dmi_initiation_pts
-            + self.volume_dryup_pts
-            + self.volume_climax_pts
-            + self.ma5_walk_pts
-            # Pillar 2A paid
-            + self.breadth_pts
-            + self.concentration_pts
-            + self.continuity_pts
-            + self.daytrade_filter_pts
-            + self.foreign_broker_pts
-            # Pillar 2B free
-            + self.foreign_strength_pts
-            + self.trust_strength_pts
-            + self.dealer_strength_pts
-            + self.institution_continuity_pts
-            + self.institution_consensus_pts
-            + self.margin_structure_pts      # can be negative
-            + self.margin_utilization_pts    # can be negative
-            + self.sbl_pressure_pts          # can be negative (0/-4/-8)
-            + self.cumul_flow_pts
-            + self.consistent_accum_pts
-            + self.inst_synergy_pts
-            + self.margin_declining_pts
-            + self.ownership_concentration_pts  # can be negative
-            + self.obv_accumulation_pts
-            + self.vol_asymmetry_pts
-            + self.dual_inst_flow_pts
-            + self.chip_cleanliness_pts
-            + self.turnover_pts
-            + self.super_large_pts          # can be negative
-            + self.foreign_trend_pts        # can be negative
-            + self.short_cover_pts
-            + self.large_2w_trend_pts       # can be negative
-            + self.inst_accel_3d_pts        # can be negative
-            + self.obv_stealth_pts
-            + self.margin_persist_decline_pts
-            + self.holder_count_declining_pts
-            + self.chip_concentration_accel_pts
-            + self.short_squeeze_setup_pts
-            + self.stealth_accum_composite_pts
-            # Pillar 3
-            + self.proximity_pts
-            + self.bb_compression_pts
-            + self.ma_convergence_pts
-            + self.consolidation_weeks_pts
-            + self.inside_bar_streak_pts
-            + self.prior_advance_pts
-            + self.ma_alignment_pts
-            + self.ma20_slope_pts
-            + self.relative_strength_pts
-            + self.longterm_rs_pts
-            + self.near_highhist_pts
-            + self.bb_squeeze_breakout_pts
-            + self.bb_upper_walk_pts
-            # Pillar 4
-            + self.emerging_setup_pts
+        """Score with per-pillar caps enforced. Uses momentum_pts/chip_pts/structure_pts helpers."""
+        p1 = min(_PILLAR1_MAX, self.momentum_pts)
+        p2 = min(_PILLAR2_FREE_MAX, self.chip_pts)   # paid/free caps both = 40
+        p3 = min(_PILLAR3_MAX, self.structure_pts)
+        p4 = (
+            self.emerging_setup_pts
             + self.pullback_setup_pts
             + self.bb_squeeze_coiling_pts
-            # Risk deductions
-            - self.daytrade_risk
-            - self.long_upper_shadow
-            - self.overheat_ma20
-            - self.overheat_ma60
-            - self.daytrade_heat
-            - self.sbl_breakout_fail
-            - self.margin_chase_heat
-            - self.adx_exhaustion_deduction
-            - self.dmi_divergence_deduction
-            - self.vol_consecutive_surge
         )
-        return max(0, min(100, raw))
+        risk = (
+            self.daytrade_risk
+            + self.long_upper_shadow
+            + self.overheat_ma20
+            + self.overheat_ma60
+            + self.daytrade_heat
+            + self.sbl_breakout_fail
+            + self.margin_chase_heat
+            + self.adx_exhaustion_deduction
+            + self.dmi_divergence_deduction
+            + self.vol_consecutive_surge
+        )
+        return max(0, min(100, p1 + p2 + p3 + p4 - risk))
 
     @property
     def chip_pts(self) -> int:

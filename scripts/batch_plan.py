@@ -613,6 +613,67 @@ def _apply_near_high_first_day(
     return boosted
 
 
+def _load_concept_ticker_map(rank_pct_threshold: float = 70.0) -> dict[str, int]:
+    """Returns {ticker: n_hot_concepts} for the latest concept heat snapshot.
+
+    Hot concept = rank_pct >= rank_pct_threshold in the snapshot.
+    Returns {} if no snapshot or concepts.json found.
+    """
+    import json as _json
+    concept_files = sorted(_HEAT_DIR.glob("concept_heat_*.json"))
+    if not concept_files:
+        return {}
+    try:
+        with open(concept_files[-1], encoding="utf-8") as f:
+            cd = _json.load(f)
+        hot_keys = {
+            k for k, v in cd.get("concepts", {}).items()
+            if v.get("rank_pct", 0) >= rank_pct_threshold
+        }
+        if not hot_keys:
+            return {}
+        concepts_path = _ROOT_PATH / "config" / "concepts.json"
+        if not concepts_path.exists():
+            return {}
+        with open(concepts_path, encoding="utf-8") as f:
+            cdefs_raw = _json.load(f)
+        cdefs = cdefs_raw.get("concepts", cdefs_raw)
+        hot_count: dict[str, int] = {}
+        for ck, cdef in cdefs.items():
+            if ck in hot_keys:
+                for t in cdef.get("tickers", []):
+                    hot_count[t] = hot_count.get(t, 0) + 1
+        return hot_count
+    except Exception:
+        return {}
+
+
+def _apply_concept_heat_bonus(results: list[dict]) -> int:
+    """Boost stocks in hot concept baskets.
+
+    +3 pts for 1 hot concept basket, +5 pts for 2+ baskets.
+    Hot = rank_pct >= 70 in the latest concept heat snapshot.
+    Adds CONCEPT_HEAT flag; skips halted/error results.
+    Returns count of stocks boosted.
+    """
+    ticker_hot = _load_concept_ticker_map()
+    if not ticker_hot:
+        return 0
+    n = 0
+    for r in results:
+        if r.get("halt") or r.get("error") is not None:
+            continue
+        count = ticker_hot.get(r["ticker"], 0)
+        if count == 0:
+            continue
+        bonus = 5 if count >= 2 else 3
+        r["confidence"] = min(100, r["confidence"] + bonus)
+        tag = f"+{bonus}({'2題材+' if count >= 2 else '1題材'})"
+        r["flags"] = list(r.get("flags") or []) + [f"CONCEPT_HEAT:{tag}"]
+        n += 1
+    return n
+
+
 def _make_label_repo():
     """Try to connect to PostgreSQL BrokerLabelRepository.
 
@@ -1208,6 +1269,10 @@ def run_batch(
     n_near_high = _apply_near_high_first_day(results, analysis_date, scan_data_dir)
     if n_near_high:
         _console.print(f"  [dim]↑ 近高蓄積首日補償: {n_near_high} 檔 (NEAR_HIGH_COIL +4)[/dim]")
+
+    n_concept = _apply_concept_heat_bonus(results)
+    if n_concept:
+        _console.print(f"  [dim]↑ 熱門題材加成: {n_concept} 檔 (+3/+5 pts)[/dim]")
 
     # Re-evaluate action after post-processing bonuses may have crossed a threshold.
     # A CAUTION that reaches ≥ 45 after bonuses becomes WATCH.
