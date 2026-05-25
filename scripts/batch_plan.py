@@ -1658,54 +1658,170 @@ def _generate_plan_html(
             chart_data[futs[fut]] = fut.result()
 
     def _rule_rec(r: dict) -> str:
-        """Plain-Chinese fallback recommendation when LLM verdict is absent."""
-        flag_set = set(r.get("flags") or [])
+        """Data-grounded recommendation with actual numbers extracted from flags."""
+        flags = list(r.get("flags") or [])
+        flag_set = set(flags)
         action = r["action"]
         conf = r.get("confidence", 0)
         parts: list[str] = []
 
-        if "ACCUM_MODE" in flag_set:
-            parts.append("大盤處於修正期，法人籌碼出現逆勢買進跡象")
+        # 1. Price zone (G1)
+        for f in flags:
+            if "GATE_PASS:G1_ZONE:" in f:
+                pct = f.split(":")[-1]
+                parts.append(f"收盤在近20日高點{pct}蓄勢區")
+                break
 
-        if any("RISING" in f for f in flag_set):
-            parts.append("訊號持續走強")
-        elif any("STABLE" in f for f in flag_set):
-            parts.append("訊號保持穩定")
+        # 2. BB compression (G2)
+        for f in flags:
+            if "GATE_PASS:G2_BB_PCT:" in f:
+                bp = f.split(":")[-1].rstrip("p")
+                try:
+                    label = "極度壓縮" if float(bp) <= 20 else ("明顯收窄" if float(bp) <= 35 else "收窄")
+                except ValueError:
+                    label = "收窄"
+                parts.append(f"布林帶{label}（{bp}百分位）")
+                break
 
+        # 3. Institutional flow — most important, show actual numbers
+        for f in flags:
+            if "DUAL_FLOW_STRONG:" in f:
+                detail = f.split("DUAL_FLOW_STRONG:")[-1]
+                parts.append(f"外資+投信同步大力買進（{detail}）")
+                break
+            elif "DUAL_FLOW:" in f:
+                detail = f.split("DUAL_FLOW:")[-1]
+                parts.append(f"外資+投信同步買進（{detail}）")
+                break
+        else:
+            for f in flags:
+                if "INST_SURGE:" in f:
+                    x = f.split(":")[-1]
+                    parts.append(f"法人買超衝量（達均量{x}）")
+                    break
+
+        # 4. Cumulative flow or foreign acceleration
+        for f in flags:
+            if "CUMUL_FLOW_HOT:" in f:
+                x = f.split(":")[-1]
+                parts.append(f"20日累積法人流量熱絡（{x}）")
+                break
+            elif "CUMUL_FLOW_WARM:" in f:
+                x = f.split(":")[-1]
+                parts.append(f"20日累積法人流量溫和（{x}）")
+                break
+        for f in flags:
+            if "CONSISTENT_ACCUM:" in f:
+                x = f.split(":")[-1]
+                parts.append(f"持續吸籌（{x}）")
+                break
+
+        # 5. Technical pattern
         if "COILING_PRIME" in flag_set:
-            parts.append("呈現強力蓄積型態")
-        elif "COILING" in flag_set:
-            parts.append("已有蓄積跡象")
-        if "NEAR_HIGH_COIL" in flag_set:
-            parts.append("貼近近期高點蓄勢待發")
-        if "BB_UPPER_COIL" in flag_set:
-            parts.append("布林帶上軌蓄力")
-        if "MA5_WALK" in flag_set:
-            parts.append("均線多頭向上排列")
-        if "MOMENTUM_WALK" in flag_set:
-            parts.append("突破後動能延續")
+            parts.append("強力蓄積型態成型")
+        elif "EMERGING_SETUP" in flag_set:
+            parts.append("法人+均線共振蓄積確認")
+        elif "BB_UPPER_COIL" in flag_set:
+            parts.append("布林帶上軌蓄力（突破動能醞釀）")
 
-        if any("DUAL_FLOW_STRONG" in f for f in flag_set):
-            parts.append("外資與投信同步大力買進")
-        elif any("DUAL_FLOW" in f for f in flag_set):
-            parts.append("外資與投信同步買進")
-        if any("OBV_ACCUM_PRIME" in f for f in flag_set):
-            parts.append("成交量顯示法人暗中大量吸籌")
-        elif any("OBV_ACCUM" in f for f in flag_set):
-            parts.append("成交量顯示法人持續積累")
-        if any("VOL_ASYMMETRY" in f for f in flag_set):
-            parts.append("上漲日成交量明顯大於下跌日")
-        if any("SECTOR_RANK" in f for f in flag_set):
-            parts.append("產業排名靠前")
+        # 6. Persistence with date
+        for f in flags:
+            if "PERSIST_RISING:" in f:
+                day = f.split(":")[-1]
+                parts.append(f"連續走強（前一日{day}）")
+                break
+            elif "PERSIST_STABLE:" in f:
+                day = f.split(":")[-1]
+                parts.append(f"訊號穩定持續（前一日{day}）")
+                break
+
+        # 7. Sector rank with numbers
+        for f in flags:
+            if "SECTOR_RANK:" in f:
+                x = f.split(":")[-1]
+                parts.append(f"產業內排名 {x}")
+                break
+
+        # 8. Market context
+        if "ACCUM_MODE" in flag_set:
+            parts.append("大盤修正期逆勢法人買進")
 
         if action == "LONG":
-            conclusion = "整體條件成熟，建議積極布局。" if conf >= 70 else "條件符合突破要求，可考慮進場。"
+            conclusion = "整體條件全面成熟，建議積極布局。" if conf >= 90 else "突破條件到位，可考慮進場。"
         else:
-            conclusion = "尚待突破確認，建議列入觀察。"
+            conclusion = "型態尚未完成，列入觀察追蹤。"
 
         if parts:
-            return "、".join(parts[:4]) + "。" + conclusion
+            return "；".join(parts[:5]) + "。" + conclusion
         return conclusion
+
+    def _key_signals_html(flags: list[str]) -> str:
+        """Compact quantitative signal badges — always shown as factual basis for the rec."""
+        sigs: list[tuple[str, str, str]] = []  # (label, value, css_class)
+        seen: set[str] = set()
+
+        for f in flags:
+            if "GATE_PASS:G1_ZONE:" in f and "g1" not in seen:
+                sigs.append(("位置", f.split(":")[-1], "ks-neutral"))
+                seen.add("g1")
+            elif "GATE_PASS:G2_BB_PCT:" in f and "bb" not in seen:
+                bp = f.split(":")[-1].rstrip("p")
+                try:
+                    cls = "ks-hot" if float(bp) <= 20 else "ks-warm" if float(bp) <= 35 else "ks-neutral"
+                except ValueError:
+                    cls = "ks-neutral"
+                sigs.append(("BB", f"{bp}p", cls))
+                seen.add("bb")
+            elif "DUAL_FLOW_STRONG:" in f and "flow" not in seen:
+                sigs.append(("土洋同買↑↑", f.split("DUAL_FLOW_STRONG:")[-1], "ks-hot"))
+                seen.add("flow")
+            elif "DUAL_FLOW:" in f and "flow" not in seen:
+                sigs.append(("土洋同買", f.split("DUAL_FLOW:")[-1], "ks-warm"))
+                seen.add("flow")
+            elif "INST_SURGE:" in f and "isurge" not in seen:
+                sigs.append(("法人衝量", f.split(":")[-1], "ks-warm"))
+                seen.add("isurge")
+            elif "CUMUL_FLOW_HOT:" in f and "cumul" not in seen:
+                sigs.append(("累積流量", f.split(":")[-1], "ks-hot"))
+                seen.add("cumul")
+            elif "CUMUL_FLOW_WARM:" in f and "cumul" not in seen:
+                sigs.append(("累積流量", f.split(":")[-1], "ks-warm"))
+                seen.add("cumul")
+            elif "FOREIGN_ACCEL:" in f and "faccel" not in seen:
+                sigs.append(("外資加速", f.split(":")[-1], "ks-warm"))
+                seen.add("faccel")
+            elif "CONSISTENT_ACCUM:" in f and "accum" not in seen:
+                sigs.append(("持續吸籌", f.split(":")[-1], "ks-warm"))
+                seen.add("accum")
+            elif "SECTOR_RANK:" in f and "rank" not in seen:
+                sigs.append(("產業排名", f.split(":")[-1], "ks-neutral"))
+                seen.add("rank")
+            elif "NEAR_HIST_HIGH:" in f and "histhigh" not in seen:
+                sigs.append(("距高點", f.split(":")[-1] + "日", "ks-neutral"))
+                seen.add("histhigh")
+            elif f == "RS_STRONG" and "rs" not in seen:
+                sigs.append(("相對強勢", "✓", "ks-warm"))
+                seen.add("rs")
+            elif f in ("COILING_PRIME", "EMERGING_SETUP") and "pattern" not in seen:
+                label = "強力蓄積" if f == "COILING_PRIME" else "蓄積確認"
+                sigs.append((label, "✓", "ks-hot"))
+                seen.add("pattern")
+            elif f == "CONCEPT_HEAT" and "concept" not in seen:
+                sigs.append(("熱門題材", "✓", "ks-hot"))
+                seen.add("concept")
+            elif "CONCEPT_HEAT:" in f and "concept" not in seen:
+                val = f.split(":")[-1]
+                sigs.append(("熱門題材", val, "ks-hot"))
+                seen.add("concept")
+
+        if not sigs:
+            return ""
+        tags = "".join(
+            f'<span class="ks-tag {cls}"><span class="ks-k">{_esc(lbl)}</span>'
+            f'<span class="ks-v">{_esc(val)}</span></span>'
+            for lbl, val, cls in sigs[:7]
+        )
+        return f'<div class="key-signals"><span class="ks-label">依據</span>{tags}</div>'
 
     hs = heat_summary or {}
     ticker_concepts: dict[str, list[tuple[str, bool]]] = hs.get("ticker_concepts", {})
@@ -1787,6 +1903,7 @@ def _generate_plan_html(
             rec_source_html = '<span class="rec-source src-rule">規則評估</span>'
         chip_txt = _esc(llm_chip)
         risk_txt = _esc(llm_risk)
+        key_sigs_html = _key_signals_html(list(r.get("flags") or []))
 
         entry_s = f"{entry:.2f}" if entry else "--"
         target_s = f"{target:.2f}" if target else "--"
@@ -1836,6 +1953,7 @@ def _generate_plan_html(
         {f'<div class="rec-chip"><span class="rec-chip-label">籌碼</span>{chip_txt}</div>' if chip_txt else ""}
         {f'<div class="rec-risk"><span class="rec-risk-label">風險</span>{risk_txt}</div>' if risk_txt else ""}
       </div>
+      {key_sigs_html}
       <div class="links">
         <a class="link-btn tv" href="{tv_url}" target="_blank" rel="noopener">TradingView</a>
         <a class="link-btn gi" href="{gi_url}" target="_blank" rel="noopener">Goodinfo</a>
@@ -1960,6 +2078,16 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .rec-chip-label,.rec-risk-label{{font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap;flex-shrink:0}}
 .rec-chip-label{{background:rgba(139,148,158,.15);color:#8b949e}}
 .rec-risk-label{{background:rgba(210,153,34,.15);color:#e3a008}}
+.key-signals{{display:flex;align-items:center;flex-wrap:wrap;gap:5px;padding:10px 16px;
+  border-top:1px solid #21262d;background:rgba(255,255,255,.02)}}
+.ks-label{{font-size:10px;color:#484f58;font-weight:600;margin-right:2px;white-space:nowrap}}
+.ks-tag{{display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:600;
+  padding:2px 7px;border-radius:8px;white-space:nowrap}}
+.ks-k{{opacity:.75}}
+.ks-v{{font-weight:700}}
+.ks-neutral{{background:rgba(139,148,158,.1);color:#8b949e;border:1px solid rgba(139,148,158,.2)}}
+.ks-warm{{background:rgba(56,139,253,.1);color:#58a6ff;border:1px solid rgba(56,139,253,.2)}}
+.ks-hot{{background:rgba(63,185,80,.1);color:#3fb950;border:1px solid rgba(63,185,80,.2)}}
 .filter-bar{{position:sticky;top:0;z-index:100;background:#0d1117cc;backdrop-filter:blur(12px);
   border-bottom:1px solid #21262d;padding:10px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}}
 .fb-group{{display:flex;align-items:center;gap:8px}}
