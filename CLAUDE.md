@@ -53,6 +53,7 @@ you will create drift that is expensive to fix.
 | Phase 4.34 | ✅ Done | **產業輪動雷達**：`config/rotation_map.json`（44節點：34 TWSE產業+10概念basket；63有向邊，含 `lag_weeks`/`conf` 權重）✅ · `scripts/rotation_tracker.py`（讀近10個熱度快照，計算 HOT/COOLING/EMERGING/COLD 狀態，依邊評分輸出 `data/market_heat/rotation_signal.json`）✅ · `update_market_heat.py` 自動觸發 rotation tracker ✅ · `batch_plan.py` HTML 頭部新增「📡 輪動候選」列（hover tooltip 顯示觸發來源+預期週期）和「🔻 降溫中」列 ✅ · `make rotation` 目標 ✅ · fix: `batch_plan._fetch_plan_chart` + `surge_scan._fetch_chart_candles` 補上 yfinance "possibly delisted" 警告抑制 ✅ · 524 unit tests passing ✅ |
 | Phase 4.35 | ✅ Done | **CSV → DB 全面遷移**：移除所有 scan CSV / surge CSV 輸出路徑 ✅ · 新建 `surge_signals` 表（爆量掃描結果，UNIQUE on analysis_date+ticker）+ `surge_watch` 表（D+1 追蹤，替代 JSON 檔案）✅ · `db/migrations/010_surge_to_db.sql`（建表 + source_valid 約束加入 'surge'）✅ · `src/taiwan_stock_agent/infrastructure/surge_recorder.py`（`record_surge_signals` / `save_surge_watch` / `confirm_surge_watch` / `load_surge_watch` / `query_surge_signals`）✅ · `batch_plan.py`：`_load_recent_csvs` → `_load_recent_db`（查 signal_outcomes，軌跡加分改從 DB 讀）✅ · `--show` 模式改查 signal_outcomes DB ✅ · `surge_scan.py`：移除 CSV 輸出，改用 `surge_recorder.record_surge_signals` ✅ · `surge_tracker.py` 完整改寫：`save_watch` / `check_d1` 皆查/寫 DB，移除 JSON 檔依賴 ✅ · `bot.py`：移除 CSV glob，改用 `_query_plan_signals_db` / `_query_surge_signals_db` ✅ · `accuracy_monitor.py`：`load_scan_signals` 改查 signal_outcomes DB ✅ · `plan_surge_label.py`：`_load_surge_tickers` 改用 `query_surge_signals` ✅ · 548 unit tests passing ✅ |
 | Phase 4.36A | ✅ Done | **Gate 0 硬性過濾 + PaidDataFetcher + TDCC/融資維持率 Macro Gate**：`PaidDataFetcher`（5個市場層級付費 FinMind 資料集，session 級快取）✅ · `TWSEChipProxy` 新增 4 個 Gate 0 bool 欄位（is_disposal/is_trading_halt/is_limit_up/is_daytrade_restricted）✅ · TCE Gate 0（處置股/暫停 → SKIP；漲停/當沖限制 → flag）✅ · SurgeRadar Gate 0（處置/暫停 → 跳過；當沖限制 → vol 門檻 ×1.2）✅ · 大盤融資維持率 Macro Gate（< 130 → LONG→WATCH，< 120 → CAUTION）✅ · 實際驗證 5 個 FinMind dataset 名稱（原文件全錯）✅ · TDCC 修正（dataset: TaiwanStockHoldingSharesPer，field: HoldingSharesLevel，more-than 前綴處理）✅ · Pillar 2A（TaiwanStockBrokerTradingStatement 在現有方案不可用）已確認 ✅ · 578 unit tests passing ✅ |
+| Phase 4.36B | ✅ Done | **Plan HTML 升級 + 分數去上限 + 早期佈局門檻校準**：HTML 結果頁新增互動式 Filter Bar（操作方向 pill、信心分數滑桿、產業下拉選單，即時篩選）✅ · `min_confidence` 參數正確傳入 `_generate_plan_html`（修正先前 filter 無效問題）✅ · TCE `total` property 移除 `min(100, ...)` 上限（分數現可突破 100，反映真實優質程度）✅ · `batch_plan.py` 所有後處理加分（PERSIST_RISING/NEAR_HIGH_COIL/SECTOR_RANK）同步移除上限 ✅ · `_print_score_health()` 分數分布健康檢查（P25/P50/P75/P95 + 頂部四分位寬度警告）加入 `make plan` 與 `make surge` 輸出 ✅ · `_key_signals_html` + `_rule_rec` 完整改寫：解析 flag 中的實際數值（GATE_PASS:G1_ZONE:98.6%、DUAL_FLOW_STRONG:F+860K/T+342K、CUMUL_FLOW_HOT:2.7x 等），HTML 固定顯示「依據」標籤列，LLM 分析同樣呈現數字根據 ✅ · `rotation_tracker.py` Python 3.9 `@dataclass` bug 修正（`sys.modules` 注冊後再 `exec_module`）✅ · **流動性門檻 TSE 40M→15M / TPEx 15M→8M**（建倉策略無需高流動性，提早捕捉小型股佈局機會）✅ · **`_is_inst_momentum` 連買天數 5→3 天**（法人連買 3 天已是足夠的早期佈局信號）✅ · 595 unit tests passing ✅ |
 
 **免費 vs 付費因子說明：**
 
@@ -80,7 +81,7 @@ All available `make` targets — do NOT cite commands not in this list.
 | Command | Script | Engine | Purpose |
 |---------|--------|--------|---------|
 | `make analyze TICKER=2330` | `analyze.py` | TCE | 單股深度分析 + 買賣建議 + 因子解釋 |
-| `make plan` | `batch_plan.py` | TCE | 主要每日掃描（Triple Confirmation Engine，結果存 signal_outcomes DB）|
+| `make plan` | `batch_plan.py` | TCE | **佈局/建倉掃描**（2–12 週持倉策略，提早識別蓄積型態，結果存 signal_outcomes DB）|
 | `make settle` | `daily_runner.py settle` | — | 週末結算（更新信號勝率）|
 | `make backtest` | `backtest.py` | TCE | 歷史回測 |
 | `make backtest-compare` | `backtest_v23_vs_v22.py` | TCE | v2.3 vs v2.2 比較 |
@@ -93,7 +94,7 @@ All available `make` targets — do NOT cite commands not in this list.
 | `make growth` | `growth_scan.py` | — | 月營收成長股掃描（MOPS，YoY ≥20%）|
 | `make flow` | plan + surge + report | Both | 全流程一鍵（growth[月] → plan → surge → report）|
 | `make bot` | `bot.py` | — | 啟動 Telegram Bot |
-| `make surge` | `surge_scan.py` | SurgeRadar | 爆量掃描（非 TCE，結果存 surge_signals DB）|
+| `make surge` | `surge_scan.py` | SurgeRadar | **短線爆量掃描**（當日/次日快進快出，非 TCE，結果存 surge_signals DB）|
 | `make surge-live` | `surge_scan.py --intraday` | SurgeRadar | 盤中即時爆量掃描 |
 | `make surge-factor` | `surge_factor_report.py` | SurgeRadar | Surge 因子 Lift 報告 |
 | `make surge-tune` | `surge_factor_report.py --llm --apply` | SurgeRadar | Surge 因子 LLM 調參 |
