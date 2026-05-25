@@ -80,9 +80,7 @@ class FinMindClient:
         # Allows backtest to pre-fetch the full date range once per ticker, then serve
         # all per-day slices from memory — eliminates 99% of OHLCV API calls in backtest.
         self._ohlcv_mem: dict[str, pd.DataFrame] = {}
-        # Short-circuit flag: if broker_trades returns 422 (paid feature), skip all
-        # future calls. Saves ~11K useless HTTP round trips in free-tier backtest.
-        self._broker_trades_unavailable = False
+        # (removed free-tier short-circuit flag — broker data now available via paid plan)
         # Suppress repeated warnings after the first occurrence
         self._warned_adj_unavailable = False
         self._warned_ohlcv_402 = False
@@ -99,50 +97,73 @@ class FinMindClient:
         *,
         use_cache: bool = True,
     ) -> pd.DataFrame:
-        """Fetch TaiwanStockBrokerTradingStatement for one ticker over a date range.
+        """Fetch broker branch trading data (分點買賣明細) for one ticker.
 
-        Columns (subset used downstream):
-          date, stock_id, branch_broker_id, buy, sell
+        Dataset: TaiwanStockTradingDailyReport
+        Columns returned: trade_date, ticker, branch_code, branch_name, buy_volume, sell_volume
+        Note: buy_volume / sell_volume are in shares (股), not 張.
+
+        The API only supports single-day queries, so we iterate day by day and
+        cache each day individually under key "broker_day_{ticker}_{date}".
         """
         _BROKER_COLS = ["trade_date", "ticker", "branch_code", "branch_name", "buy_volume", "sell_volume"]
 
         self._check_halt()
 
-        # Short-circuit: once we know broker trades is a paid feature, skip all future calls.
-        if self._broker_trades_unavailable:
+        # Enumerate calendar days (skip weekends; FinMind returns empty for holidays naturally)
+        day = start_date
+        day_frames: list[pd.DataFrame] = []
+        while day <= end_date:
+            if day.weekday() < 5:  # Mon–Fri only
+                day_df = self._fetch_broker_day(ticker, day, use_cache=use_cache)
+                if day_df is not None and not day_df.empty:
+                    day_frames.append(day_df)
+            day += timedelta(days=1)
+
+        if not day_frames:
             return pd.DataFrame(columns=_BROKER_COLS)
 
+        return pd.concat(day_frames, ignore_index=True)
+
+    def _fetch_broker_day(
+        self, ticker: str, day: date, *, use_cache: bool = True
+    ) -> pd.DataFrame | None:
+        """Fetch broker trades for a single trading day; return None on auth failure."""
+        _BROKER_COLS = ["trade_date", "ticker", "branch_code", "branch_name", "buy_volume", "sell_volume"]
+
         if use_cache:
-            cached = self._load_cache("broker_trades", ticker, start_date, end_date)
+            cached = self._load_cache("broker_day", ticker, day, day)
             if cached is not None:
                 return cached
 
         try:
+            # Pass same day for both start/end — API rejects multi-day ranges for this dataset
             df = self._fetch(
-                dataset="TaiwanStockBrokerTradingStatement",
+                dataset="TaiwanStockTradingDailyReport",
                 stock_id=ticker,
-                start_date=start_date,
-                end_date=end_date,
+                start_date=day,
+                end_date=day,
             )
         except Exception as exc:
-            # HTTP 422 = plan restriction (paid feature); return empty so caller
-            # can activate free_tier_mode gracefully.
             err_str = str(exc)
-            if ("422" in err_str or "Unprocessable Entity" in err_str
-                    or "403" in err_str or "Forbidden" in err_str):
-                self._broker_trades_unavailable = True
-                logger.info(
-                    "[權限限制] 券商分點明細為付費功能 — 後續所有 ticker 自動跳過（免費模式）"
-                )
-                return pd.DataFrame(columns=_BROKER_COLS)
+            if "403" in err_str or "Forbidden" in err_str or "401" in err_str:
+                logger.warning("[FinMind] 分點資料權限不足，請確認付費方案包含 TaiwanStockTradingDailyReport")
+                return None
+            # Non-auth errors (network, 5xx): propagate so tenacity can retry upstream
             raise
+
+        if df.empty:
+            # Cache empty result so we don't re-query holidays
+            if use_cache:
+                self._save_cache(pd.DataFrame(columns=_BROKER_COLS), "broker_day", ticker, day, day)
+            return pd.DataFrame(columns=_BROKER_COLS)
 
         df = df.rename(
             columns={
                 "date": "trade_date",
                 "stock_id": "ticker",
-                "broker_id": "branch_code",
-                "broker_name": "branch_name",
+                "securities_trader_id": "branch_code",
+                "securities_trader": "branch_name",
                 "buy": "buy_volume",
                 "sell": "sell_volume",
             }
@@ -150,7 +171,7 @@ class FinMindClient:
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
 
         if use_cache:
-            self._save_cache(df, "broker_trades", ticker, start_date, end_date)
+            self._save_cache(df, "broker_day", ticker, day, day)
         return df
 
     def fetch_ohlcv(

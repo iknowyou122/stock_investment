@@ -141,34 +141,36 @@ class TestCacheLogic:
         )
 
     def test_cache_miss_calls_api(self, tmp_path, monkeypatch):
-        """When no cache file exists, _fetch_from_api (i.e. _fetch) is called once."""
+        """No per-day cache file → _fetch called once for that day."""
         import taiwan_stock_agent.infrastructure.finmind_client as fc_module
 
         monkeypatch.setattr(fc_module, "CACHE_DIR", tmp_path)
 
-        sample_df = self._sample_df()
+        # Use a single weekday to ensure exactly one _fetch call
+        single_day = date(2025, 1, 2)  # Thursday
 
         with patch.object(FinMindClient, "_fetch", return_value=_broker_api_response()) as mock_fetch:
             client = FinMindClient(api_key="dummy")
             client.fetch_broker_trades(
-                self._TICKER, self._START, self._END, use_cache=True
+                self._TICKER, single_day, single_day, use_cache=True
             )
             mock_fetch.assert_called_once()
 
     def test_cache_hit_skips_api(self, tmp_path, monkeypatch):
-        """When a parquet cache file exists, _fetch is NOT called."""
+        """Per-day parquet cache exists → _fetch is NOT called."""
         import taiwan_stock_agent.infrastructure.finmind_client as fc_module
 
         monkeypatch.setattr(fc_module, "CACHE_DIR", tmp_path)
 
-        # Write a valid parquet file at the expected cache path
-        expected_path = tmp_path / f"broker_trades_{self._TICKER}_{self._START}_{self._END}.parquet"
+        # Cache is keyed per-day: broker_day_{ticker}_{day}_{day}.parquet
+        single_day = date(2025, 1, 2)  # Thursday
+        expected_path = tmp_path / f"broker_day_{self._TICKER}_{single_day}_{single_day}.parquet"
         self._sample_df().to_parquet(expected_path, index=False)
 
         with patch.object(FinMindClient, "_fetch") as mock_fetch:
             client = FinMindClient(api_key="dummy")
             result = client.fetch_broker_trades(
-                self._TICKER, self._START, self._END, use_cache=True
+                self._TICKER, single_day, single_day, use_cache=True
             )
             mock_fetch.assert_not_called()
             assert not result.empty
