@@ -1344,7 +1344,8 @@ def run_batch(
                         market_map=market_map or {},
                         heat_summary=_load_heat_summary(),
                         llm_provider=llm_provider,
-                        min_confidence=min_confidence)
+                        min_confidence=min_confidence,
+                        finmind_client=shared_finmind)
     _console.print(f"  [dim cyan]📄 HTML: file://{html_path.resolve()}[/dim cyan]")
     import subprocess, sys as _sys
     if _sys.platform == "darwin":
@@ -1497,6 +1498,37 @@ def _load_shares_map() -> dict[str, int]:
     return shares
 
 
+def _build_chart_from_df(df) -> dict:
+    """Build chart dict from a FinMind OHLCV DataFrame (already in memory)."""
+    import pandas as pd
+    period = 20
+    empty: dict = {"candles": [], "bb_upper": [], "bb_mid": [], "bb_lower": []}
+    try:
+        df = df.sort_values("trade_date").copy()
+        df = df.dropna(subset=["open", "high", "low", "close"])
+        rows = [
+            {"time": str(row["trade_date"]), "open": round(float(row["open"]), 2),
+             "high": round(float(row["high"]), 2), "low": round(float(row["low"]), 2),
+             "close": round(float(row["close"]), 2)}
+            for _, row in df.iterrows()
+        ]
+        if len(rows) < period:
+            return empty
+        closes = [r["close"] for r in rows]
+        bb_upper, bb_mid, bb_lower = [], [], []
+        for i in range(period - 1, len(rows)):
+            window = closes[i - period + 1: i + 1]
+            mean = sum(window) / period
+            std = (sum((x - mean) ** 2 for x in window) / period) ** 0.5
+            t = rows[i]["time"]
+            bb_upper.append({"time": t, "value": round(mean + 2 * std, 2)})
+            bb_mid.append({"time": t, "value": round(mean, 2)})
+            bb_lower.append({"time": t, "value": round(mean - 2 * std, 2)})
+        return {"candles": rows[period - 1:], "bb_upper": bb_upper, "bb_mid": bb_mid, "bb_lower": bb_lower}
+    except Exception:
+        return empty
+
+
 def _fetch_plan_chart(ticker: str, market: str) -> dict:
     """Fetch 5-month daily OHLCV + Bollinger Bands (20,2) via yfinance."""
     suffix = ".TW" if market == "TSE" else ".TWO"
@@ -1636,6 +1668,7 @@ def _generate_plan_html(
     heat_summary: dict | None = None,
     llm_provider=None,
     min_confidence: int = 50,
+    finmind_client=None,
 ) -> None:
     """Dark-themed HTML report for plan scan results (LONG + actionable WATCH only)."""
     import json as _json
@@ -1669,14 +1702,23 @@ def _generate_plan_html(
     n_long = sum(1 for r in filtered if r["action"] == "LONG")
     n_watch = sum(1 for r in filtered if r["action"] == "WATCH")
 
-    # Fetch chart data
+    # Fetch chart data — prefer FinMind in-memory cache (already fetched during scan),
+    # fall back to yfinance only for tickers not in cache.
     _console.print("  [dim]抓取線圖資料（plan HTML）…[/dim]")
     chart_data: dict[str, dict] = {}
-    pairs = [(r["ticker"], market_map.get(r["ticker"], "TSE")) for r in filtered]
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futs = {pool.submit(_fetch_plan_chart, t, m): t for t, m in pairs}
-        for fut in as_completed(futs):
-            chart_data[futs[fut]] = fut.result()
+    mem_cache = getattr(finmind_client, "_ohlcv_mem", {}) if finmind_client else {}
+    pairs_yf = []
+    for r in filtered:
+        t = r["ticker"]
+        if t in mem_cache and not mem_cache[t].empty:
+            chart_data[t] = _build_chart_from_df(mem_cache[t])
+        else:
+            pairs_yf.append((t, market_map.get(t, "TSE")))
+    if pairs_yf:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futs = {pool.submit(_fetch_plan_chart, t, m): t for t, m in pairs_yf}
+            for fut in as_completed(futs):
+                chart_data[futs[fut]] = fut.result()
 
     def _rule_rec(r: dict) -> str:
         """Data-grounded recommendation with actual numbers extracted from flags."""
