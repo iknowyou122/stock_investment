@@ -273,6 +273,23 @@ class FinMindClient:
                 df[col] = None
         df = df[["trade_date", "ticker", "open", "high", "low", "close", "volume"]]
 
+        # FinMind sometimes returns rows with NaN close (data not yet published).
+        # Detect this for the end_date row and patch via yfinance.
+        end_row = df[df["trade_date"] == end_date] if not df.empty else pd.DataFrame()
+        if not end_row.empty and pd.isna(end_row["close"].iloc[0]):
+            yf_df = self._fetch_ohlcv_yfinance(ticker, end_date, end_date)
+            if yf_df is not None and not yf_df.empty:
+                # yfinance already returns standard columns (trade_date, open, high, low, close, volume, ticker)
+                cols = [c for c in ["trade_date", "ticker", "open", "high", "low", "close", "volume"] if c in yf_df.columns]
+                yf_row = yf_df[cols]
+                df = df[df["trade_date"] != end_date]
+                df = pd.concat([df, yf_row], ignore_index=True)
+                df = df.sort_values("trade_date").reset_index(drop=True)
+                logger.info(
+                    "[FinMind] %s %s close=NaN, patched via yfinance (close=%.2f)",
+                    ticker, end_date, float(yf_row["close"].iloc[0]),
+                )
+
         if use_cache:
             self._save_cache(df, cache_key, ticker, start_date, end_date)
         self._update_ohlcv_mem(ticker, df)
