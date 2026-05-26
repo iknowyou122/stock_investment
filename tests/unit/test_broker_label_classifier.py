@@ -134,18 +134,18 @@ class TestClassificationLabels:
         assert "NG001" in labels
         assert labels["NG001"].label == "unknown"
 
-    def test_borderline_reversal_rate_exactly_60pct_is_unknown(self):
-        """rate must be STRICTLY > 0.60 for 隔日沖 classification."""
+    def test_borderline_reversal_rate_exactly_threshold_is_unknown(self):
+        """rate must be STRICTLY > DAYTRADE_REVERSAL_THRESHOLD (0.52) for 隔日沖."""
+        from taiwan_stock_agent.domain.broker_label_classifier import DAYTRADE_REVERSAL_THRESHOLD
         broker, ohlcv = _make_historical_data(
             n_days=60,
             branch_code="BL001",
             branch_name="Border",
-            reversal_rate=0.60,  # exactly at threshold — should be unknown
+            reversal_rate=DAYTRADE_REVERSAL_THRESHOLD,  # exactly at threshold — not strictly >
         )
         repo = _InMemoryRepo()
         classifier = BrokerLabelClassifier(repo)
         labels = classifier.fit(broker, ohlcv)
-        # 60% exactly → not strictly > 0.60
         assert labels["BL001"].label == "unknown"
 
     def test_insufficient_sample_count_gets_unknown(self):

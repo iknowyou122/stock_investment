@@ -21,11 +21,18 @@ install:
 #       make analyze TICKER=2330 DATE=2026-05-20
 TICKER ?=
 analyze:
-	@test -n "$(TICKER)" || { echo "請指定股票代號：make analyze TICKER=2330"; exit 1; }
-	$(PYTHON) scripts/analyze.py $(TICKER) \
-		$(if $(DATE),--date $(DATE)) \
-		$(if $(LLM),--llm $(LLM)) \
-		$(if $(filter 1,$(NO_LLM)),--no-llm)
+	@if [ -z "$(TICKER)" ]; then \
+		printf "股票代號："; read ticker; \
+		$(PYTHON) scripts/analyze.py $$ticker \
+			$(if $(DATE),--date $(DATE)) \
+			$(if $(LLM),--llm $(LLM)) \
+			$(if $(filter 1,$(NO_LLM)),--no-llm); \
+	else \
+		$(PYTHON) scripts/analyze.py $(TICKER) \
+			$(if $(DATE),--date $(DATE)) \
+			$(if $(LLM),--llm $(LLM)) \
+			$(if $(filter 1,$(NO_LLM)),--no-llm); \
+	fi
 
 # ── 盤後擬定計畫 (Plan) ──────────────────────────────────────────────────────
 # 掃描 + 存 CSV + 寫 DB（factor-report 用）
