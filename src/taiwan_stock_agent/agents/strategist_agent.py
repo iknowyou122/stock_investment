@@ -104,8 +104,19 @@ class StrategistAgent:
         history = self._df_to_ohlcv_list(ohlcv_df, ticker)
         today_rows = [h for h in history if h.trade_date == analysis_date]
         if not today_rows:
-            logger.warning("analysis_date %s not in OHLCV for %s", analysis_date, ticker)
-            return self._halt_signal(ticker, analysis_date, "DATE_NOT_IN_OHLCV")
+            # FinMind publishes T+1; requested date may not yet be available.
+            # Fall back to the most recent available trading day.
+            sorted_hist = sorted(history, key=lambda x: x.trade_date)
+            if not sorted_hist:
+                logger.warning("No OHLCV history for %s", ticker)
+                return self._halt_signal(ticker, analysis_date, "NO_OHLCV_DATA")
+            fallback_date = sorted_hist[-1].trade_date
+            logger.info(
+                "analysis_date %s not in OHLCV for %s, falling back to %s",
+                analysis_date, ticker, fallback_date,
+            )
+            analysis_date = fallback_date
+            today_rows = [sorted_hist[-1]]
 
         today_ohlcv = today_rows[0]
 

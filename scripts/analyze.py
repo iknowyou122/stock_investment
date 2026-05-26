@@ -702,7 +702,7 @@ def main() -> None:
     title_text = (
         f"[bold]{header_name}[/bold]  [{color}]{label}[/{color}]  "
         f"信心指數 [bold cyan]{signal.confidence}[/bold cyan]/100  "
-        f"[cyan]{conf_bar}[/cyan]  [dim]{market} · {analysis_date}[/dim]"
+        f"[cyan]{conf_bar}[/cyan]  [dim]{market} · {signal.date}[/dim]"
     )
     if signal.halt_flag:
         title_text += "  [bold red]⚠ HALT[/bold red]"
