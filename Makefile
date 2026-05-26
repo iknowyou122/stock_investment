@@ -179,7 +179,6 @@ growth:
 flow:
 	@test -f "$(_GROWTH_THIS_MONTH)" || { echo "  [成長掃描] 本月尚無資料，執行中…"; $(MAKE) growth; }
 	$(MAKE) plan
-	$(MAKE) surge
 	$(MAKE) report
 
 # ── 資料庫備份與還原 ─────────────────────────────────────────────────────────

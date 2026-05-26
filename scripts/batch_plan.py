@@ -762,6 +762,19 @@ def _make_agent(llm_provider=None, no_llm: bool = False, label_repo=None,
     return agent
 
 
+def _classify_tce_signal_type(flags: list[str]) -> tuple[str, str]:
+    """Return (signal_type_zh, horizon_zh) based on TCE flags.
+
+    signal_type: '趨勢延伸' | '蓄積★' | '蓄積'
+    horizon:     '波段' (all TCE signals are medium-term)
+    """
+    if "TREND_WALK" in flags:
+        return "趨勢延伸", "波段"
+    if "COILING_PRIME" in flags:
+        return "蓄積★", "波段"
+    return "蓄積", "波段"
+
+
 def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: str = "TSE") -> dict:
     """Run pipeline for one ticker using a shared agent; return result dict.
 
@@ -776,6 +789,7 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
         if signal.score_breakdown:
             breakdown_pts = signal.score_breakdown.get("pts", {})
         trend_score = sum(breakdown_pts.get(f, 0) for f in _TREND_FIELDS)
+        _sig_type, _horizon = _classify_tce_signal_type(signal.data_quality_flags)
         return {
             "ticker": ticker,
             "action": signal.action,
@@ -797,6 +811,9 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "trend_score": trend_score,
             "institution_continuity_pts": breakdown_pts.get("institution_continuity_pts", 0),
             "proximity_pts": breakdown_pts.get("proximity_pts", 0),
+            "signal_type": _sig_type,
+            "horizon": _horizon,
+            "secondary_types": [],
         }
     except Exception as e:
         return {
@@ -818,8 +835,196 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "error": str(e),
             "_signal": None,
             "trend_score": 0,
+            "institution_continuity_pts": 0,
             "proximity_pts": 0,
+            "signal_type": "蓄積",
+            "horizon": "波段",
+            "secondary_types": [],
         }
+
+
+def _run_surge_inline(
+    tickers: list[str],
+    analysis_date: date,
+    market_map: dict[str, str] | None = None,
+) -> None:
+    """Run SurgeRadar scan on the plan's tickers and write results to DB.
+
+    Uses quiet=True to suppress surge's own terminal table — results are
+    read back via _load_surge_from_db() and merged into the unified output.
+    Silently skips if surge_scan import fails.
+    """
+    import importlib.util
+    scripts_dir = Path(__file__).parent
+    spec = importlib.util.spec_from_file_location(
+        "_surge_scan_mod", scripts_dir / "surge_scan.py"
+    )
+    if spec is None or spec.loader is None:
+        return
+    try:
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.run_surge_scan(
+            tickers,
+            analysis_date,
+            market_map=market_map or {},
+            no_html=True,
+            notify=False,
+            quiet=True,
+        )
+    except Exception as _e:
+        _console.print(f"  [dim yellow]⚠ Surge inline scan 失敗，略過: {_e}[/dim yellow]")
+
+
+def _scan_pullback_batch(
+    tickers: list[str],
+    analysis_date: date,
+    agent: "StrategistAgent",
+    market_map: dict[str, str] | None = None,
+    min_score: int = 40,
+) -> list[dict]:
+    """Run PullbackDetector on all tickers.
+
+    Uses L2 DB cache (OHLCVRepository) — hits the DB before falling back to API.
+    Returns result dicts in the same shape as _scan_one for qualifying stocks only.
+    """
+    from taiwan_stock_agent.domain.pullback_detector import PullbackDetector
+
+    detector = PullbackDetector()
+    results: list[dict] = []
+
+    for ticker in tickers:
+        try:
+            ohlcv_df = agent._finmind.fetch_ohlcv(
+                ticker,
+                analysis_date - timedelta(days=130),
+                analysis_date,
+            )
+            history = StrategistAgent._df_to_ohlcv_list(ohlcv_df, ticker)
+            if not history:
+                continue
+            det = detector.score(history)
+            if det is None or det["score"] < min_score:
+                continue
+            sorted_h = sorted(history, key=lambda x: x.trade_date)
+            close = float(sorted_h[-1].close) if sorted_h else 0.0
+            ma20 = det["ma20"]
+            results.append({
+                "ticker": ticker,
+                "action": "LONG",
+                "confidence": det["score"],
+                "halt": False,
+                "free_tier": None,
+                "flags": det["flags"],
+                "entry_bid": round(close * 0.997, 1),
+                "stop_loss": round(ma20 * 0.97, 1),
+                "target": round(close * 1.08, 1),
+                "verdict": f"趨勢回調至 MA20（±{abs(det['ma20_pct']):.1f}%）",
+                "position": "",
+                "momentum": "",
+                "chip": "",
+                "risk": "",
+                "elapsed": 0.0,
+                "error": None,
+                "_signal": None,
+                "trend_score": 0,
+                "institution_continuity_pts": 0,
+                "proximity_pts": 0,
+                "signal_type": "回調",
+                "horizon": "波段",
+                "secondary_types": [],
+                "change_pct": 0.0,
+            })
+        except Exception:
+            continue
+
+    return results
+
+
+def _load_surge_from_db(analysis_date: date, min_score: int = 50) -> list[dict]:
+    """Load surge signals from surge_signals DB for analysis_date.
+
+    Normalises each row to the same result-dict shape as _scan_one so they
+    can be merged with TCE and pullback results without special-casing.
+    Returns empty list if DB unavailable or no records.
+    """
+    import json as _json
+    from taiwan_stock_agent.infrastructure.surge_recorder import query_surge_signals
+
+    surge_rows = query_surge_signals(analysis_date, min_score=min_score)
+    results: list[dict] = []
+    for s in surge_rows:
+        grade = s.get("grade", "")
+        sig_type = "爆量★" if grade == "SURGE_ALPHA" else "爆量"
+        flags = s.get("flags") or []
+        if isinstance(flags, str):
+            try:
+                flags = _json.loads(flags)
+            except Exception:
+                flags = []
+        close = float(s.get("close_price") or 0.0)
+        results.append({
+            "ticker": s["ticker"],
+            "action": "LONG",
+            "confidence": int(s.get("score") or 0),
+            "halt": False,
+            "free_tier": None,
+            "flags": flags,
+            "entry_bid": round(close * 0.997, 1),
+            "stop_loss": round(close * 0.97, 1),
+            "target": round(close * 1.05, 1),
+            "verdict": f"{sig_type}  Vol×{s.get('vol_ratio', 0):.1f}",
+            "position": "",
+            "momentum": "",
+            "chip": "",
+            "risk": "",
+            "elapsed": 0.0,
+            "error": None,
+            "_signal": None,
+            "trend_score": 0,
+            "institution_continuity_pts": 0,
+            "proximity_pts": 0,
+            "signal_type": sig_type,
+            "horizon": "短線",
+            "secondary_types": [],
+            "change_pct": float(s.get("day_chg_pct") or 0.0),
+        })
+    return results
+
+
+def _merge_unified_signals(
+    tce_results: list[dict],
+    pullback_results: list[dict],
+    surge_results: list[dict],
+) -> list[dict]:
+    """Merge TCE, pullback, and surge results into one unified list.
+
+    Deduplicates by ticker: keeps highest-confidence result as primary;
+    appends other signal_types to secondary_types list.
+    Halted/error TCE results are replaced if a valid signal exists for that ticker.
+    """
+    merged: dict[str, dict] = {r["ticker"]: r for r in tce_results}
+
+    for r in [*pullback_results, *surge_results]:
+        ticker = r["ticker"]
+        new_conf = r.get("confidence", 0)
+        if ticker not in merged:
+            merged[ticker] = r
+        else:
+            existing = merged[ticker]
+            if existing.get("halt") or existing.get("error"):
+                merged[ticker] = r
+            elif new_conf > existing.get("confidence", 0):
+                existing_type = existing.get("signal_type", "")
+                merged[ticker] = r
+                if existing_type and existing_type not in r.get("secondary_types", []):
+                    merged[ticker].setdefault("secondary_types", []).append(existing_type)
+            else:
+                new_type = r.get("signal_type", "")
+                if new_type and new_type not in existing.get("secondary_types", []):
+                    existing.setdefault("secondary_types", []).append(new_type)
+
+    return list(merged.values())
 
 
 CSV_FIELDS = [
@@ -866,6 +1071,39 @@ def _trend_bar(ts: int) -> str:
     return f"[{color}]{ts}[/{color}][dim]/37[/dim]"
 
 
+_SIG_COLORS = {
+    "爆量★": "bold bright_red",
+    "爆量": "red",
+    "回調": "bright_yellow",
+    "趨勢延伸": "bright_cyan",
+    "蓄積★": "bright_green",
+    "蓄積": "cyan",
+}
+
+
+def _make_signal_cells(r: dict) -> tuple[str, str, str]:
+    """Return (sig_cell, horizon_cell, fund_cell) Rich markup strings for a result row."""
+    sig_type = r.get("signal_type", "蓄積")
+    secondary = r.get("secondary_types") or []
+    secondary_str = f"\n[dim]+{secondary[0]}[/dim]" if secondary else ""
+    sig_color = _SIG_COLORS.get(sig_type, "white")
+    sig_cell = f"[{sig_color}]{sig_type}[/{sig_color}]{secondary_str}"
+
+    horizon = r.get("horizon", "波段")
+    horizon_color = "red" if horizon == "短線" else "cyan"
+    horizon_cell = f"[{horizon_color}]{horizon}[/{horizon_color}]"
+
+    yoy = r.get("growth_yoy")
+    consec = r.get("growth_consecutive", 0)
+    if yoy:
+        consec_str = f" 連{consec}M" if consec >= 3 else ""
+        fund_cell = f"[bright_green]★ +{yoy:.0f}%{consec_str}[/bright_green]"
+    else:
+        fund_cell = "[dim]—[/dim]"
+
+    return sig_cell, horizon_cell, fund_cell
+
+
 def _print_table(
     results: list[dict],
     top: int,
@@ -905,18 +1143,24 @@ def _print_table(
     )
     table.add_column("Rank", justify="center", style="dim", width=5)
     table.add_column("Ticker", style="bold white", width=11)
-    table.add_column("Action", width=12)
+    table.add_column("型態", width=10)
+    table.add_column("持倉", width=7)
+    table.add_column("Action", width=10)
     table.add_column("Confidence", width=18)
-    table.add_column("趨勢", justify="right", width=9)
     table.add_column("Entry", justify="right", style="cyan", width=9)
     table.add_column("Stop", justify="right", style="red", width=9)
     table.add_column("Target", justify="right", style="green", width=9)
     table.add_column("Upside", justify="right", style="yellow", width=7)
+    table.add_column("基本面", width=14)
 
     for i, r in enumerate(valid, 1):
         action_str = r["action"] + ("*" if r["free_tier"] else "")
 
         action_text = Text.from_markup(f"[{_action_style(r['action'])}]{action_str}[/{_action_style(r['action'])}]")
+
+        # Signal type badge
+        sig_cell, horizon_cell, fund_cell = _make_signal_cells(r)
+
         upside_pct = (r["target"] / r["entry_bid"] - 1) * 100 if r["entry_bid"] > 0 else 0
         ticker = r["ticker"]
         if name_map:
@@ -924,16 +1168,19 @@ def _print_table(
             ticker_cell = f"{ticker}\n[dim]{short_name}[/dim]" if short_name else ticker
         else:
             ticker_cell = ticker
+
         table.add_row(
             str(i),
             ticker_cell,
+            sig_cell,
+            horizon_cell,
             action_text,
             _conf_bar(r["confidence"]),
-            _trend_bar(r.get("trend_score", 0)),
             f"{r['entry_bid']:.1f}",
             f"{r['stop_loss']:.1f}",
             f"{r['target']:.1f}",
             f"{upside_pct:+.1f}%",
+            fund_cell,
         )
 
     _console.print()
@@ -1058,20 +1305,53 @@ def _print_by_industry(
 
         _console.print(ind_header)
 
+        ind_table = Table(
+            box=box.SIMPLE,
+            show_header=True,
+            header_style="bold dim",
+            show_lines=False,
+            padding=(0, 1),
+        )
+        ind_table.add_column("Ticker", style="bold white", width=11)
+        ind_table.add_column("型態", width=10)
+        ind_table.add_column("持倉", width=7)
+        ind_table.add_column("Action", width=10)
+        ind_table.add_column("Confidence", width=18)
+        ind_table.add_column("Entry", justify="right", style="cyan", width=9)
+        ind_table.add_column("Stop", justify="right", style="red", width=9)
+        ind_table.add_column("Target", justify="right", style="green", width=9)
+        ind_table.add_column("Upside", justify="right", style="yellow", width=7)
+        ind_table.add_column("基本面", width=14)
+
         for s in stocks:
             ticker = s["ticker"]
-            name = (name_m.get(ticker) or "")[:5]
-            action = s["action"]
-            conf = s["confidence"]
+            short_name = name_m.get(ticker, "")
+            ticker_cell = f"{ticker}\n[dim]{short_name}[/dim]" if short_name else ticker
 
-            action_label = "🚀 準備突破" if action == "LONG" else "🔍 整理中"
-            action_clr = "cyan" if action == "LONG" else "yellow"
+            action_str = s["action"] + ("*" if s.get("free_tier") else "")
+            action_text = Text.from_markup(f"[{_action_style(s['action'])}]{action_str}[/{_action_style(s['action'])}]")
 
-            conf_bar = _conf_bar(conf)
-            _console.print(
-                f"  [dim]{ticker}[/dim]  [{action_clr}]{action_label}[/{action_clr}]"
-                f"  {conf_bar}  [dim]{name}[/dim]"
+            sig_cell, horizon_cell, fund_cell = _make_signal_cells(s)
+
+            entry_bid = s.get("entry_bid", 0)
+            stop_loss = s.get("stop_loss", 0)
+            target = s.get("target", 0)
+            upside_pct = (target / entry_bid - 1) * 100 if entry_bid > 0 else 0
+
+            ind_table.add_row(
+                ticker_cell,
+                sig_cell,
+                horizon_cell,
+                action_text,
+                _conf_bar(s["confidence"]),
+                f"{entry_bid:.1f}",
+                f"{stop_loss:.1f}",
+                f"{target:.1f}",
+                f"{upside_pct:+.1f}%",
+                fund_cell,
             )
+
+        _console.print(ind_table)
 
     if top and len(valid) > top:
         _console.print(f"\n[dim]  (顯示前 {top} 檔，共 {len(valid)} 檔符合條件)[/dim]")
@@ -1085,6 +1365,7 @@ def _run_phase(
     no_llm: bool = False,
     label_repo=None,
     market_map: dict[str, str] | None = None,
+    finmind: "FinMindClient | None" = None,
 ) -> list[dict]:
     """執行一批 ticker 的掃描，回傳 results list（順序不保證）。
 
@@ -1098,10 +1379,10 @@ def _run_phase(
     no_llm=True 強制關閉 LLM（Phase 1 deterministc 用，避免 StrategistAgent 自動偵測 API key）。
     label_repo: shared BrokerLabelRepository instance（read-only，多執行緒安全）。
     market_map: {ticker: "TSE"|"TPEx"}
+    finmind: optional pre-built FinMindClient to share across phases (L1 cache reuse).
     """
     # 建立共用客戶端 — 所有 worker 共享快取
-    shared_ohlcv_repo = OHLCVRepository()
-    shared_finmind = FinMindClient(ohlcv_repo=shared_ohlcv_repo)
+    shared_finmind = finmind if finmind is not None else FinMindClient(ohlcv_repo=OHLCVRepository())
     shared_paid = PaidDataFetcher()
     shared_chip = ChipProxyFetcher(paid_fetcher=shared_paid)
     shared_chip.shares_map = _load_shares_map()
@@ -1218,13 +1499,15 @@ def run_batch(
         padding=(0, 2),
     ))
 
+    _shared_finmind = FinMindClient(ohlcv_repo=OHLCVRepository())
+
     if llm_provider is None:
         # 純 deterministic：強制關閉 LLM（避免 StrategistAgent 自動偵測 API key）
-        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo, market_map=market_map)
+        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo, market_map=market_map, finmind=_shared_finmind)
     else:
         # 永遠兩階段：Phase 1 全量 deterministic → Phase 2 top N with LLM
         _console.print(f"\n[bold cyan][Phase 1][/bold cyan] deterministic scan：{len(tickers)} 檔")
-        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo, market_map=market_map)
+        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo, market_map=market_map, finmind=_shared_finmind)
 
         # 排序有效結果
         eligible = sorted(
@@ -1248,9 +1531,27 @@ def run_batch(
         else:
             _console.print(f"\n[bold cyan][Phase 2][/bold cyan] 送前 {llm_top} 名給 [cyan]{llm_label}[/cyan]：{', '.join(llm_tickers)}")
             p2_workers = min(3, len(llm_tickers))
-            phase2 = _run_phase(llm_tickers, analysis_date, p2_workers, llm_provider=llm_provider, label_repo=label_repo, market_map=market_map)
+            phase2 = _run_phase(llm_tickers, analysis_date, p2_workers, llm_provider=llm_provider, label_repo=label_repo, market_map=market_map, finmind=_shared_finmind)
             p2_valid = {r["ticker"]: r for r in phase2 if r.get("error") is None}
             results = [p2_valid.get(r["ticker"], r) for r in results]
+
+    # ── Pullback scan (uses L2 DB cache via OHLCVRepository) ──
+    _console.print("\n[bold cyan][Pullback Scan][/bold cyan] 回調型偵測中…")
+    _shared_agent = _make_agent(llm_provider=None, label_repo=label_repo, finmind=_shared_finmind)
+    pullback_results = _scan_pullback_batch(
+        tickers, analysis_date, _shared_agent, market_map=market_map
+    )
+    _console.print(f"  回調型信號: [green]{len(pullback_results)}[/green] 檔")
+
+    # ── Surge scan (SurgeRadar on same tickers, writes to DB) ─────────────────
+    _console.print("\n[bold cyan][Surge Scan][/bold cyan] 爆量偵測中…")
+    _run_surge_inline(tickers, analysis_date, market_map=market_map)
+    surge_db_results = _load_surge_from_db(analysis_date)
+    if surge_db_results:
+        _console.print(f"  爆量型信號: [green]{len(surge_db_results)}[/green] 檔")
+
+    # ── Merge all three signal types into one unified result list ──────────────
+    results = _merge_unified_signals(results, pullback_results, surge_db_results)
 
     # --- Post-processing: sector ranking + persistence ---
     scan_data_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
@@ -1347,7 +1648,7 @@ def run_batch(
                         heat_summary=_load_heat_summary(),
                         llm_provider=llm_provider,
                         min_confidence=min_confidence,
-                        finmind_client=shared_finmind)
+                        finmind_client=_shared_finmind)
     _console.print(f"  [dim cyan]📄 HTML: file://{html_path.resolve()}[/dim cyan]")
     import subprocess, sys as _sys
     if _sys.platform == "darwin":
@@ -1990,6 +2291,39 @@ def _generate_plan_html(
         ) if ctags_sorted else ""
 
         raw_industry = industry_map.get(ticker, "")
+
+        # Signal type + fundamental badges
+        sig_type = r.get("signal_type", "蓄積")
+        horizon_val = r.get("horizon", "波段")
+        yoy = r.get("growth_yoy")
+        consec = r.get("growth_consecutive", 0) or 0
+
+        sig_colors = {
+            "爆量★": "#ff4444", "爆量": "#ff7744",
+            "回調": "#ffcc44", "趨勢延伸": "#44ccff",
+            "蓄積★": "#44ff88", "蓄積": "#44aaff",
+        }
+        sig_bg = sig_colors.get(sig_type, "#888888")
+        horizon_bg = "#cc4444" if horizon_val == "短線" else "#226688"
+
+        type_badge = (
+            f'<span style="background:{sig_bg};color:#000;'
+            f'border-radius:4px;padding:2px 6px;font-size:11px;'
+            f'font-weight:bold;margin-right:4px">{sig_type}</span>'
+            f'<span style="background:{horizon_bg};color:#fff;'
+            f'border-radius:4px;padding:2px 6px;font-size:11px;'
+            f'margin-right:4px">{horizon_val}</span>'
+        )
+        if yoy:
+            consec_str = f" 連{consec}M" if consec >= 3 else ""
+            fund_badge = (
+                f'<span style="background:#1a4a2a;color:#44ff88;'
+                f'border-radius:4px;padding:2px 6px;font-size:11px">'
+                f'★ 月營收 +{yoy:.0f}%{consec_str}</span>'
+            )
+        else:
+            fund_badge = ""
+
         cards.append(f"""
     <div class="card" data-action="{action}" data-conf="{conf}" data-industry="{_esc(raw_industry)}" style="animation-delay:{delay}s">
       <div class="card-header">
@@ -2001,6 +2335,7 @@ def _generate_plan_html(
         <div class="badge g-{gcls}">{badge_zh}</div>
       </div>
       {concept_html}
+      <div class="type-badges" style="margin:4px 12px 8px">{type_badge}{fund_badge}</div>
       <div class="metrics">
         <div class="m"><div class="mv {conf_cls}">{conf}</div><div class="ml">信心分</div></div>
         <div class="m"><div class="mv">{entry_s}</div><div class="ml">進場價</div></div>

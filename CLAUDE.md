@@ -57,6 +57,7 @@ you will create drift that is expensive to fix.
 | Phase 4.37 | ✅ Done | **評分品質門（Cross-Pillar + 反向扣分 + 追高懲罰）**：跨柱最低要求（P1<12｜P2<10｜P3<12 → 最高 WATCH，flag CROSS_PILLAR_WEAK）✅ · 追高懲罰因子 `recent_advance_deduction`（近20日最低收盤漲幅 >40% → -10 HIGH_BASE_RISK / >25% → -5 MOD_BASE_RISK）✅ · OBV 出貨訊號（normalized slope < -0.05 → -3，flag OBV_DIST，原範圍 0–5 擴為 -3/0/2/3/5）✅ · 量能不對稱負向（avg_up/avg_down < 0.5 → -4 / <0.7 → -2，flag VOL_ASYM_WEAK，原範圍 0–4 擴為 -4/-2/0/2/4）✅ · 分點資料修正（`fetch_broker_trades` 改為逐日迭代，解決 TaiwanStockTradingDailyReport 400 error，Pillar 2A 恢復正常得分）✅ · 606 unit tests passing ✅ |
 | Phase 4.38 | ✅ Done | **統一 OHLCV DB（L2 快取層）**：新建 `ohlcv_daily` PostgreSQL 表（migration 011）✅ · `OHLCVRepository`（`get`/`upsert`/`max_date`，DB 不可用時自動降級為 no-op）✅ · `FinMindClient` DB-first pattern（L1 mem → L2 DB → Parquet → API，源頭無論 FinMind/yfinance 皆寫回同一表）✅ · `_used_yfinance` flag 修正 source 偵測（原 `df.get()` 對 DataFrame 無效）✅ · `batch_plan.py` + `surge_scan.py` 注入 `OHLCVRepository`（所有掃描共享 DB 快取）✅ · 7 個 `OHLCVRepository` 單元測試（無 DB 環境 no-op 路徑覆蓋）✅ · 613 unit tests passing ✅ |
 | Phase 4.39 | ✅ Done | **TREND_WALK bypass track**：`_is_trend_walk()`（G2 唯一失敗 + MA5>MA20>MA60 + proximity ≥90%）✅ · TREND_WALK 繞過 BB 壓縮門檻，捕捉沿 BB 上軌走強的趨勢股 ✅ · RSI 刻意不納入條件（趨勢股自然帶高 RSI 65–80，Pillar 1 已計分，雙重篩選會阻擋目標設置）✅ · `score_full` 修正：TREND_WALK 加入 bypass-track 傳播列表（`data_quality_flags`）✅ · 7 個 TestTrendWalkTrack 單元測試（含整合測試）✅ · 620 unit tests passing ✅ |
+| Phase 4.40 | ✅ Done | **統一掃描輸出**：PullbackDetector（MA20回調型偵測）✅ · signal_type/horizon 欄位（蓄積/回調/爆量/趨勢延伸）✅ · `make plan` 直接整合 TCE + Pullback + SurgeRadar 三引擎（同一批 tickers，一個指令全包）✅ · 成長股基本面★標記（所有信號類型）✅ · 終端輸出新增 型態/持倉/基本面 欄位 ✅ · HTML 信號類型徽章 ✅ · `make flow` 移除獨立 surge 步驟 ✅ · 626 unit tests passing ✅ |
 
 **免費 vs 付費因子說明：**
 
@@ -84,7 +85,7 @@ All available `make` targets — do NOT cite commands not in this list.
 | Command | Script | Engine | Purpose |
 |---------|--------|--------|---------|
 | `make analyze TICKER=2330` | `analyze.py` | TCE | 單股深度分析 + 買賣建議 + 因子解釋 |
-| `make plan` | `batch_plan.py` | TCE | **佈局/建倉掃描**（2–12 週持倉策略，提早識別蓄積型態，結果存 signal_outcomes DB）|
+| `make plan` | `batch_plan.py` | TCE+SurgeRadar | **統一掃描**（TCE 蓄積/趨勢延伸 + PullbackDetector 回調 + SurgeRadar 爆量，同一批 tickers 三引擎一次跑完，結果依信心分排序輸出）|
 | `make settle` | `daily_runner.py settle` | — | 週末結算（更新信號勝率）|
 | `make backtest` | `backtest.py` | TCE | 歷史回測 |
 | `make backtest-compare` | `backtest_v23_vs_v22.py` | TCE | v2.3 vs v2.2 比較 |
@@ -95,9 +96,9 @@ All available `make` targets — do NOT cite commands not in this list.
 | `make test` | pytest | — | 執行所有單元測試 |
 | `make report` | `report.py` | — | 盤後復盤（非 TCE）|
 | `make growth` | `growth_scan.py` | — | 月營收成長股掃描（MOPS，YoY ≥20%）|
-| `make flow` | plan + surge + report | Both | 全流程一鍵（growth[月] → plan → surge → report）|
+| `make flow` | plan + report | Both | 全流程一鍵（growth[月] → plan → report；surge 已內建於 plan）|
 | `make bot` | `bot.py` | — | 啟動 Telegram Bot |
-| `make surge` | `surge_scan.py` | SurgeRadar | **短線爆量掃描**（當日/次日快進快出，非 TCE，結果存 surge_signals DB）|
+| `make surge` | `surge_scan.py` | SurgeRadar | **獨立爆量掃描**（`make plan` 已內建；此指令用於單獨跑全市場 surge 或盤中模式）|
 | `make surge-live` | `surge_scan.py --intraday` | SurgeRadar | 盤中即時爆量掃描 |
 | `make surge-factor` | `surge_factor_report.py` | SurgeRadar | Surge 因子 Lift 報告 |
 | `make surge-tune` | `surge_factor_report.py --llm --apply` | SurgeRadar | Surge 因子 LLM 調參 |
@@ -105,9 +106,6 @@ All available `make` targets — do NOT cite commands not in this list.
 | `make heat-scan` | `heat_scan.py` | — | 市場熱度掃描（產業+概念）|
 | `make heat-update` | `update_market_heat.py` | — | 每日熱度快照更新 |
 | `make rotation` | `rotation_tracker.py` | — | 板塊輪動追蹤 |
-| `make tight-base-bt` | `tight_base_backtest.py` | — | 緊縮底部回測 v1 |
-| `make tight-base-v2` | `tight_base_v2_backtest.py` | — | 緊縮底部回測 v2（熱度感知）|
-| `make chip-loading-bt` | `chip_loading_backtest.py` | — | 籌碼吸收回測 |
 | `make monitor` | `accuracy_monitor.py` | — | 信號準確率監控 |
 | `make db-dump` | pg_dump | — | 備份完整 DB |
 | `make db-restore` | pg_restore | — | 還原 DB |
@@ -117,7 +115,7 @@ All available `make` targets — do NOT cite commands not in this list.
 | `make api` | uvicorn | — | 啟動 FastAPI server |
 | `make setup` | pip install | — | 安裝依賴 |
 
-> `make daily` / `make show` **不存在**。每日工作流程用 `make flow`（plan + surge + report）。
+> 每日工作流程：`make flow`（growth[月] → plan → report）。`plan` 已內建 TCE + Pullback + SurgeRadar 三引擎。`make surge` 僅用於獨立全市場掃描或盤中模式。
 
 ## gstack
 
