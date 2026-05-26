@@ -185,17 +185,15 @@ class TestStrategistPipeline:
         assert signal.action == "CAUTION"
         assert "NO_OHLCV_DATA" in signal.data_quality_flags
 
-    def test_returns_caution_when_date_not_in_ohlcv(self):
-        """OHLCV that doesn't include analysis_date triggers halt."""
-        # Build a df whose last row is NOT the analysis_date
-        df = _make_mock_ohlcv_df(n=25, analysis_date=date(2025, 2, 4))  # date is 2025-02-04
-        # Overwrite so none of the rows are on _ANALYSIS_DATE (2025-02-05)
+    def test_falls_back_to_last_available_date_when_not_in_ohlcv(self):
+        """When analysis_date not in OHLCV (FinMind T+1 delay), falls back to last available."""
+        df = _make_mock_ohlcv_df(n=25, analysis_date=date(2025, 2, 4))
         df["trade_date"] = [_BASE_DATE + timedelta(days=i) for i in range(len(df))]
         agent, _ = _make_agent(ohlcv_df=df)
         signal = agent.run("9999", _ANALYSIS_DATE)
 
-        assert signal.halt_flag is True
-        assert "DATE_NOT_IN_OHLCV" in signal.data_quality_flags
+        assert signal.halt_flag is False
+        assert signal.date < _ANALYSIS_DATE
 
     def test_no_llm_when_api_key_absent(self):
         """With no API key, reasoning.momentum should be empty (LLM not called)."""
