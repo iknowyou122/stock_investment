@@ -843,6 +843,39 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
         }
 
 
+def _run_surge_inline(
+    tickers: list[str],
+    analysis_date: date,
+    market_map: dict[str, str] | None = None,
+) -> None:
+    """Run SurgeRadar scan on the plan's tickers and write results to DB.
+
+    Uses quiet=True to suppress surge's own terminal table — results are
+    read back via _load_surge_from_db() and merged into the unified output.
+    Silently skips if surge_scan import fails.
+    """
+    import importlib.util
+    scripts_dir = Path(__file__).parent
+    spec = importlib.util.spec_from_file_location(
+        "_surge_scan_mod", scripts_dir / "surge_scan.py"
+    )
+    if spec is None or spec.loader is None:
+        return
+    try:
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.run_surge_scan(
+            tickers,
+            analysis_date,
+            market_map=market_map or {},
+            no_html=True,
+            notify=False,
+            quiet=True,
+        )
+    except Exception as _e:
+        _console.print(f"  [dim yellow]⚠ Surge inline scan 失敗，略過: {_e}[/dim yellow]")
+
+
 def _scan_pullback_batch(
     tickers: list[str],
     analysis_date: date,
@@ -1510,10 +1543,12 @@ def run_batch(
     )
     _console.print(f"  回調型信號: [green]{len(pullback_results)}[/green] 檔")
 
-    # ── Surge signals from DB (populated by `make surge`, empty if not yet run) ──
+    # ── Surge scan (SurgeRadar on same tickers, writes to DB) ─────────────────
+    _console.print("\n[bold cyan][Surge Scan][/bold cyan] 爆量偵測中…")
+    _run_surge_inline(tickers, analysis_date, market_map=market_map)
     surge_db_results = _load_surge_from_db(analysis_date)
     if surge_db_results:
-        _console.print(f"  爆量型信號 (DB): [green]{len(surge_db_results)}[/green] 檔")
+        _console.print(f"  爆量型信號: [green]{len(surge_db_results)}[/green] 檔")
 
     # ── Merge all three signal types into one unified result list ──────────────
     results = _merge_unified_signals(results, pullback_results, surge_db_results)

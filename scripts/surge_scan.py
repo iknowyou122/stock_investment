@@ -1480,6 +1480,7 @@ def run_surge_scan(
     intraday: bool = False,
     no_html: bool = False,
     llm_provider=None,
+    quiet: bool = False,
 ) -> list[dict]:
     from taiwan_stock_agent.infrastructure.twse_client import ChipProxyFetcher
     from taiwan_stock_agent.infrastructure.paid_data_fetcher import PaidDataFetcher
@@ -1623,24 +1624,25 @@ def run_surge_scan(
         pass
 
     # Gate 0 過濾統計
-    total_g0 = sum(_gate0_stats.values())
-    if total_g0:
-        parts = []
-        if _gate0_stats["disposal"]:
-            parts.append(f"處置 {_gate0_stats['disposal']}")
-        if _gate0_stats["halt"]:
-            parts.append(f"暫停 {_gate0_stats['halt']}")
-        if _gate0_stats["limit_up"]:
-            parts.append(f"漲停 {_gate0_stats['limit_up']}")
-        if _gate0_stats["daytrade"]:
-            parts.append(f"當沖限制 {_gate0_stats['daytrade']}")
-        _console.print(f"  [dim]Gate 0 過濾：{total_g0} 支（{' / '.join(parts)}）[/dim]")
+    if not quiet:
+        total_g0 = sum(_gate0_stats.values())
+        if total_g0:
+            parts = []
+            if _gate0_stats["disposal"]:
+                parts.append(f"處置 {_gate0_stats['disposal']}")
+            if _gate0_stats["halt"]:
+                parts.append(f"暫停 {_gate0_stats['halt']}")
+            if _gate0_stats["limit_up"]:
+                parts.append(f"漲停 {_gate0_stats['limit_up']}")
+            if _gate0_stats["daytrade"]:
+                parts.append(f"當沖限制 {_gate0_stats['daytrade']}")
+            _console.print(f"  [dim]Gate 0 過濾：{total_g0} 支（{' / '.join(parts)}）[/dim]")
 
-    _print_surge_table(results, scan_date, name_map)
-    _print_score_health(
-        [int(r.get("score", 0)) for r in results],
-        label="爆量信號分數分布",
-    )
+        _print_surge_table(results, scan_date, name_map)
+        _print_score_health(
+            [int(r.get("score", 0)) for r in results],
+            label="爆量信號分數分布",
+        )
 
     # ── Write to DB ──────────────────────────────────────────────────────────
     if results and os.environ.get("DATABASE_URL"):
