@@ -69,7 +69,7 @@ class FinMindClient:
     - halt_flag: if set True externally, all fetch calls raise immediately
     """
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, ohlcv_repo=None) -> None:
         self.api_key = api_key or os.environ.get("FINMIND_API_KEY", "")
         if not self.api_key:
             raise ValueError(
@@ -80,6 +80,9 @@ class FinMindClient:
         # Allows backtest to pre-fetch the full date range once per ticker, then serve
         # all per-day slices from memory — eliminates 99% of OHLCV API calls in backtest.
         self._ohlcv_mem: dict[str, pd.DataFrame] = {}
+        # Optional DB-backed L2 cache (OHLCVRepository). When set, fetch_ohlcv uses
+        # DB-first pattern: read DB → fill gaps via API → write back to DB.
+        self._ohlcv_repo = ohlcv_repo
         # (removed free-tier short-circuit flag — broker data now available via paid plan)
         # Suppress repeated warnings after the first occurrence
         self._warned_adj_unavailable = False
@@ -208,6 +211,18 @@ class FinMindClient:
                 if not result.empty:
                     return result.reset_index(drop=True).copy()
 
+        # 1. DB cache (L2) — persistent across sessions, source-agnostic
+        if self._ohlcv_repo is not None and not adjusted:
+            db_df = self._ohlcv_repo.get(ticker, start_date, end_date)
+            if not db_df.empty:
+                db_max = db_df["trade_date"].max()
+                if db_max >= end_date:
+                    # DB has full range — serve directly
+                    self._update_ohlcv_mem(ticker, db_df)
+                    return db_df.reset_index(drop=True).copy()
+                # DB has partial data — only fetch the missing tail from API
+                start_date = db_max  # re-fetch from last known date (inclusive overlap is OK)
+
         if use_cache:
             cached = self._load_cache(cache_key, ticker, start_date, end_date)
             if cached is not None:
@@ -248,6 +263,7 @@ class FinMindClient:
             else:
                 raise
 
+        _used_yfinance = df is None
         if df is None:
             df = self._fetch_ohlcv_yfinance(ticker, start_date, end_date)
 
@@ -292,6 +308,11 @@ class FinMindClient:
 
         if use_cache:
             self._save_cache(df, cache_key, ticker, start_date, end_date)
+
+        # Write to DB (L2 cache) so future sessions skip the API call
+        if self._ohlcv_repo is not None and not adjusted:
+            self._ohlcv_repo.upsert(df, source="yfinance" if _used_yfinance else "finmind")
+
         self._update_ohlcv_mem(ticker, df)
         return df
 

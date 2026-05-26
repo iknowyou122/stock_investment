@@ -57,6 +57,7 @@ load_dotenv()
 
 from taiwan_stock_agent.agents.strategist_agent import StrategistAgent
 from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
+from taiwan_stock_agent.infrastructure.ohlcv_repository import OHLCVRepository
 from taiwan_stock_agent.infrastructure.paid_data_fetcher import PaidDataFetcher
 from taiwan_stock_agent.infrastructure.twse_client import ChipProxyFetcher
 
@@ -1099,7 +1100,8 @@ def _run_phase(
     market_map: {ticker: "TSE"|"TPEx"}
     """
     # 建立共用客戶端 — 所有 worker 共享快取
-    shared_finmind = FinMindClient()
+    shared_ohlcv_repo = OHLCVRepository()
+    shared_finmind = FinMindClient(ohlcv_repo=shared_ohlcv_repo)
     shared_paid = PaidDataFetcher()
     shared_chip = ChipProxyFetcher(paid_fetcher=shared_paid)
     shared_chip.shares_map = _load_shares_map()

@@ -46,6 +46,7 @@ load_dotenv()
 from taiwan_stock_agent.domain.models import DailyOHLCV
 from taiwan_stock_agent.domain.surge_radar import SurgeRadar
 from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
+from taiwan_stock_agent.infrastructure.ohlcv_repository import OHLCVRepository
 
 _console = Console()
 _lock = Lock()
@@ -1490,7 +1491,7 @@ def run_surge_scan(
     global _gate0_stats
     _gate0_stats = {"disposal": 0, "halt": 0, "limit_up": 0, "daytrade": 0}
 
-    finmind = FinMindClient()
+    finmind = FinMindClient(ohlcv_repo=OHLCVRepository())
     paid_fetcher = PaidDataFetcher()
     chip_fetcher = ChipProxyFetcher(paid_fetcher=paid_fetcher)
     chip_fetcher.shares_map = _load_shares_map()
