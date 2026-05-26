@@ -762,6 +762,19 @@ def _make_agent(llm_provider=None, no_llm: bool = False, label_repo=None,
     return agent
 
 
+def _classify_tce_signal_type(flags: list[str]) -> tuple[str, str]:
+    """Return (signal_type_zh, horizon_zh) based on TCE flags.
+
+    signal_type: '趨勢延伸' | '蓄積★' | '蓄積'
+    horizon:     '波段' (all TCE signals are medium-term)
+    """
+    if "TREND_WALK" in flags:
+        return "趨勢延伸", "波段"
+    if "COILING_PRIME" in flags:
+        return "蓄積★", "波段"
+    return "蓄積", "波段"
+
+
 def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: str = "TSE") -> dict:
     """Run pipeline for one ticker using a shared agent; return result dict.
 
@@ -797,6 +810,9 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "trend_score": trend_score,
             "institution_continuity_pts": breakdown_pts.get("institution_continuity_pts", 0),
             "proximity_pts": breakdown_pts.get("proximity_pts", 0),
+            "signal_type": _classify_tce_signal_type(signal.data_quality_flags)[0],
+            "horizon": _classify_tce_signal_type(signal.data_quality_flags)[1],
+            "secondary_types": [],
         }
     except Exception as e:
         return {
@@ -818,8 +834,165 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "error": str(e),
             "_signal": None,
             "trend_score": 0,
+            "institution_continuity_pts": 0,
             "proximity_pts": 0,
+            "signal_type": "蓄積",
+            "horizon": "波段",
+            "secondary_types": [],
         }
+
+
+def _scan_pullback_batch(
+    tickers: list[str],
+    analysis_date: date,
+    agent: "StrategistAgent",
+    market_map: dict[str, str] | None = None,
+    min_score: int = 40,
+) -> list[dict]:
+    """Run PullbackDetector on all tickers.
+
+    Uses L1 in-memory OHLCV cache already populated by the TCE scan —
+    no additional HTTP requests are made for tickers already scanned.
+    Returns result dicts in the same shape as _scan_one for qualifying stocks only.
+    """
+    from taiwan_stock_agent.domain.pullback_detector import PullbackDetector
+    from taiwan_stock_agent.agents.strategist_agent import StrategistAgent
+
+    detector = PullbackDetector()
+    results: list[dict] = []
+
+    for ticker in tickers:
+        try:
+            ohlcv_df = agent._client.fetch_ohlcv(
+                ticker,
+                analysis_date - timedelta(days=130),
+                analysis_date,
+            )
+            history = StrategistAgent._df_to_ohlcv_list(ohlcv_df, ticker)
+            if not history:
+                continue
+            det = detector.score(history)
+            if det is None or det["score"] < min_score:
+                continue
+            sorted_h = sorted(history, key=lambda x: x.trade_date)
+            close = float(sorted_h[-1].close) if sorted_h else 0.0
+            ma20 = det["ma20"]
+            results.append({
+                "ticker": ticker,
+                "action": "LONG",
+                "confidence": det["score"],
+                "halt": False,
+                "free_tier": None,
+                "flags": det["flags"],
+                "entry_bid": round(close * 0.997, 1),
+                "stop_loss": round(ma20 * 0.97, 1),
+                "target": round(close * 1.08, 1),
+                "verdict": f"趨勢回調至 MA20（±{abs(det['ma20_pct']):.1f}%）",
+                "position": "",
+                "momentum": "",
+                "chip": "",
+                "risk": "",
+                "elapsed": 0.0,
+                "error": None,
+                "_signal": None,
+                "trend_score": 0,
+                "institution_continuity_pts": 0,
+                "proximity_pts": 0,
+                "signal_type": "回調",
+                "horizon": "波段",
+                "secondary_types": [],
+                "change_pct": 0.0,
+            })
+        except Exception:
+            continue
+
+    return results
+
+
+def _load_surge_from_db(analysis_date: date, min_score: int = 50) -> list[dict]:
+    """Load surge signals from surge_signals DB for analysis_date.
+
+    Normalises each row to the same result-dict shape as _scan_one so they
+    can be merged with TCE and pullback results without special-casing.
+    Returns empty list if DB unavailable or no records.
+    """
+    import json as _json
+    from taiwan_stock_agent.infrastructure.surge_recorder import query_surge_signals
+
+    surge_rows = query_surge_signals(analysis_date, min_score=min_score)
+    results: list[dict] = []
+    for s in surge_rows:
+        grade = s.get("grade", "")
+        sig_type = "爆量★" if grade == "SURGE_ALPHA" else "爆量"
+        flags = s.get("flags") or []
+        if isinstance(flags, str):
+            try:
+                flags = _json.loads(flags)
+            except Exception:
+                flags = []
+        close = float(s.get("close_price") or 0.0)
+        results.append({
+            "ticker": s["ticker"],
+            "action": "LONG",
+            "confidence": int(s.get("score") or 0),
+            "halt": False,
+            "free_tier": None,
+            "flags": flags,
+            "entry_bid": round(close * 0.997, 1),
+            "stop_loss": round(close * 0.97, 1),
+            "target": round(close * 1.05, 1),
+            "verdict": f"{sig_type}  Vol×{s.get('vol_ratio', 0):.1f}",
+            "position": "",
+            "momentum": "",
+            "chip": "",
+            "risk": "",
+            "elapsed": 0.0,
+            "error": None,
+            "_signal": None,
+            "trend_score": 0,
+            "institution_continuity_pts": 0,
+            "proximity_pts": 0,
+            "signal_type": sig_type,
+            "horizon": "短線",
+            "secondary_types": [],
+            "change_pct": float(s.get("day_chg_pct") or 0.0),
+        })
+    return results
+
+
+def _merge_unified_signals(
+    tce_results: list[dict],
+    pullback_results: list[dict],
+    surge_results: list[dict],
+) -> list[dict]:
+    """Merge TCE, pullback, and surge results into one unified list.
+
+    Deduplicates by ticker: keeps highest-confidence result as primary;
+    appends other signal_types to secondary_types list.
+    Halted/error TCE results are replaced if a valid signal exists for that ticker.
+    """
+    merged: dict[str, dict] = {r["ticker"]: r for r in tce_results}
+
+    for r in [*pullback_results, *surge_results]:
+        ticker = r["ticker"]
+        new_conf = r.get("confidence", 0)
+        if ticker not in merged:
+            merged[ticker] = r
+        else:
+            existing = merged[ticker]
+            if existing.get("halt") or existing.get("error"):
+                merged[ticker] = r
+            elif new_conf > existing.get("confidence", 0):
+                existing_type = existing.get("signal_type", "")
+                merged[ticker] = r
+                if existing_type and existing_type not in r.get("secondary_types", []):
+                    merged[ticker].setdefault("secondary_types", []).append(existing_type)
+            else:
+                new_type = r.get("signal_type", "")
+                if new_type and new_type not in existing.get("secondary_types", []):
+                    existing.setdefault("secondary_types", []).append(new_type)
+
+    return list(merged.values())
 
 
 CSV_FIELDS = [
@@ -1251,6 +1424,22 @@ def run_batch(
             phase2 = _run_phase(llm_tickers, analysis_date, p2_workers, llm_provider=llm_provider, label_repo=label_repo, market_map=market_map)
             p2_valid = {r["ticker"]: r for r in phase2 if r.get("error") is None}
             results = [p2_valid.get(r["ticker"], r) for r in results]
+
+    # ── Pullback scan (uses cached OHLCV — no extra HTTP for already-scanned tickers) ──
+    _console.print("\n[bold cyan][Pullback Scan][/bold cyan] 回調型偵測中…")
+    _shared_agent = _make_agent(llm_provider=None, label_repo=label_repo)
+    pullback_results = _scan_pullback_batch(
+        tickers, analysis_date, _shared_agent, market_map=market_map
+    )
+    _console.print(f"  回調型信號: [green]{len(pullback_results)}[/green] 檔")
+
+    # ── Surge signals from DB (populated by `make surge`, empty if not yet run) ──
+    surge_db_results = _load_surge_from_db(analysis_date)
+    if surge_db_results:
+        _console.print(f"  爆量型信號 (DB): [green]{len(surge_db_results)}[/green] 檔")
+
+    # ── Merge all three signal types into one unified result list ──────────────
+    results = _merge_unified_signals(results, pullback_results, surge_db_results)
 
     # --- Post-processing: sector ranking + persistence ---
     scan_data_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
