@@ -2270,6 +2270,39 @@ def _generate_plan_html(
         ) if ctags_sorted else ""
 
         raw_industry = industry_map.get(ticker, "")
+
+        # Signal type + fundamental badges
+        sig_type = r.get("signal_type", "蓄積")
+        horizon_val = r.get("horizon", "波段")
+        yoy = r.get("growth_yoy")
+        consec = r.get("growth_consecutive", 0) or 0
+
+        sig_colors = {
+            "爆量★": "#ff4444", "爆量": "#ff7744",
+            "回調": "#ffcc44", "趨勢延伸": "#44ccff",
+            "蓄積★": "#44ff88", "蓄積": "#44aaff",
+        }
+        sig_bg = sig_colors.get(sig_type, "#888888")
+        horizon_bg = "#cc4444" if horizon_val == "短線" else "#226688"
+
+        type_badge = (
+            f'<span style="background:{sig_bg};color:#000;'
+            f'border-radius:4px;padding:2px 6px;font-size:11px;'
+            f'font-weight:bold;margin-right:4px">{sig_type}</span>'
+            f'<span style="background:{horizon_bg};color:#fff;'
+            f'border-radius:4px;padding:2px 6px;font-size:11px;'
+            f'margin-right:4px">{horizon_val}</span>'
+        )
+        if yoy:
+            consec_str = f" 連{consec}M" if consec >= 3 else ""
+            fund_badge = (
+                f'<span style="background:#1a4a2a;color:#44ff88;'
+                f'border-radius:4px;padding:2px 6px;font-size:11px">'
+                f'★ 月營收 +{yoy:.0f}%{consec_str}</span>'
+            )
+        else:
+            fund_badge = ""
+
         cards.append(f"""
     <div class="card" data-action="{action}" data-conf="{conf}" data-industry="{_esc(raw_industry)}" style="animation-delay:{delay}s">
       <div class="card-header">
@@ -2281,6 +2314,7 @@ def _generate_plan_html(
         <div class="badge g-{gcls}">{badge_zh}</div>
       </div>
       {concept_html}
+      <div class="type-badges" style="margin:4px 12px 8px">{type_badge}{fund_badge}</div>
       <div class="metrics">
         <div class="m"><div class="mv {conf_cls}">{conf}</div><div class="ml">信心分</div></div>
         <div class="m"><div class="mv">{entry_s}</div><div class="ml">進場價</div></div>
