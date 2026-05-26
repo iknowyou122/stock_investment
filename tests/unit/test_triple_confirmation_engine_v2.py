@@ -2870,3 +2870,181 @@ class TestVolAsymmetryDeduction:
         pts, flag = TripleConfirmationEngine._vol_asymmetry_score(ohlcv, hist)
         assert pts < 0
         assert flag is not None and "VOL_ASYM_WEAK" in flag
+
+
+# ---------------------------------------------------------------------------
+# Trend Walk Track tests (Phase 4.39)
+# ---------------------------------------------------------------------------
+
+def _make_trend_walk_history(n: int = 85, base_close: float = 80.0) -> list[DailyOHLCV]:
+    """Two-phase history designed to trigger TREND_WALK G2 failure.
+
+    Phase 1 (first max(0, n-20) bars): tight oscillation (±0.2) → narrow BB widths.
+    Phase 2 (last 20 bars): strong uptrend (+2.0/+2.0/-0.5) → wide BB.
+
+    Key insight: Phase 2 is only 20 bars so that the CURRENT 20-bar BB window is
+    all Phase 2 (wide), while most of the last-60 historical widths are Phase 1 (narrow).
+    This places the current BB at a very high percentile → G2 fails (>35th pct).
+
+    With n≥85: ≥60 valid percentile widths; percentile ≈ 90%+ → G2 fails.
+    With n=65: only 46 valid widths (no percentile) but fallback bb_w ≈ 29% > 15% → G2 fails.
+    MA5 > MA20 > MA60 guaranteed: Phase 2 lifts recent MAs above the flat Phase 1 base.
+    Volume=600_000 passes G3 (≥60M turnover at ~90+ price).
+    """
+    phase1_len = max(0, n - 20)
+    result = []
+    close = base_close
+    for i in range(n):
+        if i < phase1_len:
+            close += 0.2 if i % 2 == 0 else -0.2
+        else:
+            j = i - phase1_len
+            close += 2.0 if j % 3 != 2 else -0.5
+        result.append(DailyOHLCV(
+            ticker="TEST",
+            trade_date=date(2025, 1, 2) + timedelta(days=i),
+            open=close - 0.5,
+            high=close + 1.0,
+            low=close - 1.0,
+            close=close,
+            volume=600_000,
+        ))
+    return result
+
+
+class TestTrendWalkTrack:
+    """_is_trend_walk() + full-engine TREND_WALK integration.
+
+    TREND_WALK fires when a stock is walking up along the upper BB
+    (MA5>MA20>MA60, proximity ≥90%) but G2 fails because BB is wide
+    (trending, not compressing). RSI is NOT checked — trending stocks
+    naturally carry elevated RSI; Pillar 1 already prices it in.
+    """
+
+    def _g2_only_flags(self) -> list[str]:
+        return [
+            "GATE_FAIL:G2_BB_WIDE_PCT:60.0p",
+            "GATE_PASS:G1_ZONE:93.0%",
+            "GATE_PASS:G3_LIQ:500.0M",
+            "GATE_PASS:G4_REGIME:uptrend",
+            "GATE_PASS:G5_NO_OVERHEAD:95.0%",
+        ]
+
+    def _make_trend_walk_vp(self, twenty_day_high: float = 100.0) -> VolumeProfile:
+        return _make_volume_profile(
+            twenty_day_high=twenty_day_high,
+            sixty_day_high=twenty_day_high * 1.02,
+            sixty_day_sessions=60,
+        )
+
+    # --- unit: _is_trend_walk ---
+
+    def test_fires_when_all_conditions_met(self):
+        hist = _make_trend_walk_history(65, base_close=80.0)
+        last_close = hist[-1].close
+        ohlcv = _make_ohlcv(close=last_close, high=last_close + 1.0, low=last_close - 1.0, volume=600_000)
+        vp = self._make_trend_walk_vp(twenty_day_high=last_close + 0.5)
+        flags = self._g2_only_flags()
+        assert TripleConfirmationEngine._is_trend_walk(ohlcv, hist, vp, flags)
+
+    def test_does_not_fire_when_other_gates_also_fail(self):
+        """Only fires when G2 is the SOLE gate failure."""
+        hist = _make_trend_walk_history(65, base_close=80.0)
+        ohlcv = _make_ohlcv(close=99.0, high=100.0, low=97.0, volume=10_000)
+        vp = self._make_trend_walk_vp(twenty_day_high=100.0)
+        flags = [
+            "GATE_FAIL:G2_BB_WIDE_PCT:60.0p",
+            "GATE_FAIL:G3_LIQ:5.0M",  # second failure
+            "GATE_PASS:G1_ZONE:93.0%",
+            "GATE_PASS:G4_REGIME:uptrend",
+        ]
+        assert not TripleConfirmationEngine._is_trend_walk(ohlcv, hist, vp, flags)
+
+    def test_does_not_fire_when_proximity_below_90pct(self):
+        hist = _make_trend_walk_history(65, base_close=80.0)
+        last_close = hist[-1].close
+        ohlcv = _make_ohlcv(close=last_close * 0.88, volume=600_000)  # 88% of twenty_day_high
+        vp = self._make_trend_walk_vp(twenty_day_high=last_close)
+        flags = self._g2_only_flags()
+        assert not TripleConfirmationEngine._is_trend_walk(ohlcv, hist, vp, flags)
+
+    def test_does_not_fire_when_ma_stack_broken(self):
+        """Flat or declining history breaks MA5>MA20>MA60 stack."""
+        hist = _make_history(65, base_close=100.0, flat=True)
+        ohlcv = _make_ohlcv(close=99.0, volume=600_000)
+        vp = self._make_trend_walk_vp(twenty_day_high=100.0)
+        flags = self._g2_only_flags()
+        assert not TripleConfirmationEngine._is_trend_walk(ohlcv, hist, vp, flags)
+
+    def test_fires_for_parabolic_history_rsi_not_checked(self):
+        """RSI is NOT a gate in _is_trend_walk — Pillar 1 already scores it.
+        A parabolic all-up history (RSI≈100) still satisfies TREND_WALK
+        because MA5>MA20>MA60 and proximity ≥90% are met."""
+        hist = []
+        close = 50.0
+        for i in range(65):
+            close += 2.0
+            hist.append(DailyOHLCV(
+                ticker="TEST",
+                trade_date=date(2025, 1, 2) + timedelta(days=i),
+                open=close - 1.0, high=close + 1.0, low=close - 1.0,
+                close=close, volume=600_000,
+            ))
+        ohlcv = _make_ohlcv(close=close + 2.0, volume=600_000)
+        vp = self._make_trend_walk_vp(twenty_day_high=close + 2.5)
+        flags = self._g2_only_flags()
+        assert TripleConfirmationEngine._is_trend_walk(ohlcv, hist, vp, flags)
+
+    def test_does_not_fire_when_insufficient_history(self):
+        """< 60 bars → can't compute MA60 reliably."""
+        hist = _make_trend_walk_history(50, base_close=80.0)
+        ohlcv = _make_ohlcv(close=95.0, volume=600_000)
+        vp = self._make_trend_walk_vp(twenty_day_high=100.0)
+        flags = self._g2_only_flags()
+        assert not TripleConfirmationEngine._is_trend_walk(ohlcv, hist, vp, flags)
+
+    # --- integration: full engine ---
+
+    def test_trend_walk_flag_present_in_signal(self):
+        """Full score_full: 85-bar Phase1/Phase2 history → BB percentile wide
+        (G2 fails), MA stacked, proximity ≥90% → TREND_WALK bypass."""
+        hist = _make_trend_walk_history(85, base_close=80.0)
+        last_close = hist[-1].close
+        # Close at 92% of 20D high, within G1 zone (85-99%)
+        twenty_day_high = last_close / 0.92
+        ohlcv = DailyOHLCV(
+            ticker="TEST",
+            trade_date=date(2025, 1, 2) + timedelta(days=65),
+            open=last_close - 0.3,
+            high=last_close + 1.0,
+            low=last_close - 1.0,
+            close=last_close,
+            volume=600_000,
+        )
+        vp = VolumeProfile(
+            ticker="TEST",
+            period_end=ohlcv.trade_date,
+            poc_proxy=last_close * 0.95,
+            twenty_day_high=twenty_day_high,
+            sixty_day_high=twenty_day_high * 1.03,
+            twenty_day_sessions=20,
+            sixty_day_sessions=60,
+            one_twenty_day_sessions=120,
+            fiftytwo_week_sessions=250,
+        )
+        chip = _make_chip_report()
+
+        engine = TripleConfirmationEngine()
+        engine._market = "TSE"
+        engine._taiex_history = _make_history(30, base_close=17000.0, flat=False)
+
+        signal, _, _ = engine.score_full(
+            ohlcv=ohlcv,
+            ohlcv_history=hist,
+            chip_report=chip,
+            volume_profile=vp,
+        )
+        assert "TREND_WALK" in signal.data_quality_flags, (
+            f"Expected TREND_WALK in flags, got: {signal.data_quality_flags}"
+        )
+        assert signal.action != "CAUTION", f"Expected WATCH/LONG, got CAUTION"

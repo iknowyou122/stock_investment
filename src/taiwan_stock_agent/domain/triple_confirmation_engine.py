@@ -689,6 +689,9 @@ class TripleConfirmationEngine:
             elif self._is_inst_momentum(ohlcv, volume_profile, gate_detail_flags, twse_proxy):
                 bd.flags.append("INST_MOMENTUM")
                 # proceed to full pillar scoring below
+            elif self._is_trend_walk(ohlcv, ohlcv_history, volume_profile, gate_detail_flags):
+                bd.flags.append("TREND_WALK")
+                # proceed to full pillar scoring below
             elif self._is_chip_loading(gate_detail_flags, twse_proxy):
                 bd.flags.append("CHIP_LOADING")
                 bd.flags.extend(gate_detail_flags)
@@ -2452,13 +2455,13 @@ class TripleConfirmationEngine:
                     action = "WATCH"
                 data_quality_flags.append("MARKET_MARGIN_STRESS")
 
-        # v2.2b: propagate COILING / COILING_PRIME flags (set in _compute)
-        for tag in ("COILING_PRIME", "COILING", "MOMENTUM_TRACK", "INST_MOMENTUM"):
+        # Propagate bypass-track and COILING flags (set in _compute)
+        for tag in ("COILING_PRIME", "COILING", "MOMENTUM_TRACK", "INST_MOMENTUM", "TREND_WALK"):
             if tag in breakdown.flags and tag not in data_quality_flags:
                 data_quality_flags.append(tag)
 
-        # For MOMENTUM_TRACK / INST_MOMENTUM: surface gate pass/fail flags so UI shows context
-        if "MOMENTUM_TRACK" in breakdown.flags or "INST_MOMENTUM" in breakdown.flags:
+        # For bypass tracks: surface gate pass/fail flags so UI shows context
+        if any(t in breakdown.flags for t in ("MOMENTUM_TRACK", "INST_MOMENTUM", "TREND_WALK")):
             for f in breakdown.flags:
                 if any(f.startswith(p) for p in ("GATE_PASS:", "GATE_FAIL:", "GATE_SKIP:")):
                     if f not in data_quality_flags:
@@ -2720,6 +2723,49 @@ class TripleConfirmationEngine:
             twse_proxy.foreign_consecutive_buy_days >= 3
             or twse_proxy.trust_consecutive_buy_days >= 3
         )
+
+    @staticmethod
+    def _is_trend_walk(
+        ohlcv: "DailyOHLCV",
+        ohlcv_history: "list[DailyOHLCV]",
+        volume_profile: "VolumeProfile",
+        gate_flags: list[str],
+    ) -> bool:
+        """Trend Walk Track: strong uptrend without BB compression.
+
+        Catches stocks walking higher along the upper Bollinger Band.
+        BB is wide because price is trending steadily, not because it's volatile.
+        Unlike MOMENTUM_TRACK (needs 1.5× volume) or INST_MOMENTUM (needs 3-day
+        consecutive institutional buying), this track fires on MA alignment alone.
+
+        RSI is NOT checked here — stocks walking the upper BB naturally carry
+        RSI 65-80, which is normal for trending stocks. RSI is already priced
+        into Pillar 1 scoring; double-filtering here would block the exact
+        setups this track is designed to catch.
+
+        Activates when ALL of:
+          - G2 is the ONLY gate failure (G1, G3, G4, G5 all passed/skipped)
+          - MA5 > MA20 > MA60 (complete bullish stack — price trending above all MAs)
+          - proximity ≥ 90% of 20D high (near the highs, not merely recovering)
+        """
+        failures = [f for f in gate_flags if f.startswith("GATE_FAIL:")]
+        if len(failures) != 1 or not failures[0].startswith("GATE_FAIL:G2"):
+            return False
+
+        if volume_profile.twenty_day_high <= 0:
+            return False
+        if ohlcv.close / volume_profile.twenty_day_high < 0.90:
+            return False
+
+        sorted_hist = sorted(ohlcv_history, key=lambda x: x.trade_date)
+        if len(sorted_hist) < 60:
+            return False
+
+        closes = [d.close for d in sorted_hist] + [ohlcv.close]
+        ma5 = sum(closes[-5:]) / 5
+        ma20 = sum(closes[-20:]) / 20
+        ma60 = sum(closes[-60:]) / 60
+        return ma5 > ma20 > ma60
 
     @staticmethod
     def _is_chip_loading(
