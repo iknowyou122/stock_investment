@@ -82,4 +82,4 @@ def test_vol_contraction_flag():
 def test_score_capped_at_100():
     result = PullbackDetector().score(_pullback_history())
     assert result is not None
-    assert result["score"] <= 100
+    assert 0 <= result["score"] <= 100

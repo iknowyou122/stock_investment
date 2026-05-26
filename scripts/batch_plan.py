@@ -1038,6 +1038,39 @@ def _trend_bar(ts: int) -> str:
     return f"[{color}]{ts}[/{color}][dim]/37[/dim]"
 
 
+_SIG_COLORS = {
+    "爆量★": "bold bright_red",
+    "爆量": "red",
+    "回調": "bright_yellow",
+    "趨勢延伸": "bright_cyan",
+    "蓄積★": "bright_green",
+    "蓄積": "cyan",
+}
+
+
+def _make_signal_cells(r: dict) -> tuple[str, str, str]:
+    """Return (sig_cell, horizon_cell, fund_cell) Rich markup strings for a result row."""
+    sig_type = r.get("signal_type", "蓄積")
+    secondary = r.get("secondary_types") or []
+    secondary_str = f"\n[dim]+{secondary[0]}[/dim]" if secondary else ""
+    sig_color = _SIG_COLORS.get(sig_type, "white")
+    sig_cell = f"[{sig_color}]{sig_type}[/{sig_color}]{secondary_str}"
+
+    horizon = r.get("horizon", "波段")
+    horizon_color = "red" if horizon == "短線" else "cyan"
+    horizon_cell = f"[{horizon_color}]{horizon}[/{horizon_color}]"
+
+    yoy = r.get("growth_yoy")
+    consec = r.get("growth_consecutive", 0)
+    if yoy:
+        consec_str = f" 連{consec}M" if consec >= 3 else ""
+        fund_cell = f"[bright_green]★ +{yoy:.0f}%{consec_str}[/bright_green]"
+    else:
+        fund_cell = "[dim]—[/dim]"
+
+    return sig_cell, horizon_cell, fund_cell
+
+
 def _print_table(
     results: list[dict],
     top: int,
@@ -1093,31 +1126,7 @@ def _print_table(
         action_text = Text.from_markup(f"[{_action_style(r['action'])}]{action_str}[/{_action_style(r['action'])}]")
 
         # Signal type badge
-        sig_type = r.get("signal_type", "蓄積")
-        secondary = r.get("secondary_types") or []
-        secondary_str = f"\n[dim]+{secondary[0]}[/dim]" if secondary else ""
-        _sig_colors = {
-            "爆量★": "bold bright_red",
-            "爆量": "red",
-            "回調": "bright_yellow",
-            "趨勢延伸": "bright_cyan",
-            "蓄積★": "bright_green",
-            "蓄積": "cyan",
-        }
-        sig_color = _sig_colors.get(sig_type, "white")
-        sig_cell = f"[{sig_color}]{sig_type}[/{sig_color}]{secondary_str}"
-
-        horizon = r.get("horizon", "波段")
-        horizon_color = "red" if horizon == "短線" else "cyan"
-        horizon_cell = f"[{horizon_color}]{horizon}[/{horizon_color}]"
-
-        yoy = r.get("growth_yoy")
-        consec = r.get("growth_consecutive", 0)
-        if yoy:
-            consec_str = f" 連{consec}M" if consec >= 3 else ""
-            fund_cell = f"[bright_green]★ +{yoy:.0f}%{consec_str}[/bright_green]"
-        else:
-            fund_cell = "[dim]—[/dim]"
+        sig_cell, horizon_cell, fund_cell = _make_signal_cells(r)
 
         upside_pct = (r["target"] / r["entry_bid"] - 1) * 100 if r["entry_bid"] > 0 else 0
         ticker = r["ticker"]
@@ -1289,31 +1298,7 @@ def _print_by_industry(
             action_str = s["action"] + ("*" if s.get("free_tier") else "")
             action_text = Text.from_markup(f"[{_action_style(s['action'])}]{action_str}[/{_action_style(s['action'])}]")
 
-            sig_type = s.get("signal_type", "蓄積")
-            secondary = s.get("secondary_types") or []
-            secondary_str = f"\n[dim]+{secondary[0]}[/dim]" if secondary else ""
-            _sig_colors = {
-                "爆量★": "bold bright_red",
-                "爆量": "red",
-                "回調": "bright_yellow",
-                "趨勢延伸": "bright_cyan",
-                "蓄積★": "bright_green",
-                "蓄積": "cyan",
-            }
-            sig_color = _sig_colors.get(sig_type, "white")
-            sig_cell = f"[{sig_color}]{sig_type}[/{sig_color}]{secondary_str}"
-
-            horizon = s.get("horizon", "波段")
-            horizon_color = "red" if horizon == "短線" else "cyan"
-            horizon_cell = f"[{horizon_color}]{horizon}[/{horizon_color}]"
-
-            yoy = s.get("growth_yoy")
-            consec = s.get("growth_consecutive", 0)
-            if yoy:
-                consec_str = f" 連{consec}M" if consec >= 3 else ""
-                fund_cell = f"[bright_green]★ +{yoy:.0f}%{consec_str}[/bright_green]"
-            else:
-                fund_cell = "[dim]—[/dim]"
+            sig_cell, horizon_cell, fund_cell = _make_signal_cells(s)
 
             entry_bid = s.get("entry_bid", 0)
             stop_loss = s.get("stop_loss", 0)
@@ -1347,6 +1332,7 @@ def _run_phase(
     no_llm: bool = False,
     label_repo=None,
     market_map: dict[str, str] | None = None,
+    finmind: "FinMindClient | None" = None,
 ) -> list[dict]:
     """執行一批 ticker 的掃描，回傳 results list（順序不保證）。
 
@@ -1360,10 +1346,10 @@ def _run_phase(
     no_llm=True 強制關閉 LLM（Phase 1 deterministc 用，避免 StrategistAgent 自動偵測 API key）。
     label_repo: shared BrokerLabelRepository instance（read-only，多執行緒安全）。
     market_map: {ticker: "TSE"|"TPEx"}
+    finmind: optional pre-built FinMindClient to share across phases (L1 cache reuse).
     """
     # 建立共用客戶端 — 所有 worker 共享快取
-    shared_ohlcv_repo = OHLCVRepository()
-    shared_finmind = FinMindClient(ohlcv_repo=shared_ohlcv_repo)
+    shared_finmind = finmind if finmind is not None else FinMindClient(ohlcv_repo=OHLCVRepository())
     shared_paid = PaidDataFetcher()
     shared_chip = ChipProxyFetcher(paid_fetcher=shared_paid)
     shared_chip.shares_map = _load_shares_map()
@@ -1480,13 +1466,15 @@ def run_batch(
         padding=(0, 2),
     ))
 
+    _shared_finmind = FinMindClient(ohlcv_repo=OHLCVRepository())
+
     if llm_provider is None:
         # 純 deterministic：強制關閉 LLM（避免 StrategistAgent 自動偵測 API key）
-        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo, market_map=market_map)
+        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo, market_map=market_map, finmind=_shared_finmind)
     else:
         # 永遠兩階段：Phase 1 全量 deterministic → Phase 2 top N with LLM
         _console.print(f"\n[bold cyan][Phase 1][/bold cyan] deterministic scan：{len(tickers)} 檔")
-        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo, market_map=market_map)
+        results = _run_phase(tickers, analysis_date, workers, no_llm=True, label_repo=label_repo, market_map=market_map, finmind=_shared_finmind)
 
         # 排序有效結果
         eligible = sorted(
@@ -1510,15 +1498,13 @@ def run_batch(
         else:
             _console.print(f"\n[bold cyan][Phase 2][/bold cyan] 送前 {llm_top} 名給 [cyan]{llm_label}[/cyan]：{', '.join(llm_tickers)}")
             p2_workers = min(3, len(llm_tickers))
-            phase2 = _run_phase(llm_tickers, analysis_date, p2_workers, llm_provider=llm_provider, label_repo=label_repo, market_map=market_map)
+            phase2 = _run_phase(llm_tickers, analysis_date, p2_workers, llm_provider=llm_provider, label_repo=label_repo, market_map=market_map, finmind=_shared_finmind)
             p2_valid = {r["ticker"]: r for r in phase2 if r.get("error") is None}
             results = [p2_valid.get(r["ticker"], r) for r in results]
 
     # ── Pullback scan (uses L2 DB cache via OHLCVRepository) ──
     _console.print("\n[bold cyan][Pullback Scan][/bold cyan] 回調型偵測中…")
-    _ohlcv_repo = OHLCVRepository()
-    _pullback_finmind = FinMindClient(ohlcv_repo=_ohlcv_repo)
-    _shared_agent = _make_agent(llm_provider=None, label_repo=label_repo, finmind=_pullback_finmind)
+    _shared_agent = _make_agent(llm_provider=None, label_repo=label_repo, finmind=_shared_finmind)
     pullback_results = _scan_pullback_batch(
         tickers, analysis_date, _shared_agent, market_map=market_map
     )
