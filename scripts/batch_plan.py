@@ -1077,18 +1077,48 @@ def _print_table(
     )
     table.add_column("Rank", justify="center", style="dim", width=5)
     table.add_column("Ticker", style="bold white", width=11)
-    table.add_column("Action", width=12)
+    table.add_column("型態", width=10)
+    table.add_column("持倉", width=7)
+    table.add_column("Action", width=10)
     table.add_column("Confidence", width=18)
-    table.add_column("趨勢", justify="right", width=9)
     table.add_column("Entry", justify="right", style="cyan", width=9)
     table.add_column("Stop", justify="right", style="red", width=9)
     table.add_column("Target", justify="right", style="green", width=9)
     table.add_column("Upside", justify="right", style="yellow", width=7)
+    table.add_column("基本面", width=14)
 
     for i, r in enumerate(valid, 1):
         action_str = r["action"] + ("*" if r["free_tier"] else "")
 
         action_text = Text.from_markup(f"[{_action_style(r['action'])}]{action_str}[/{_action_style(r['action'])}]")
+
+        # Signal type badge
+        sig_type = r.get("signal_type", "蓄積")
+        secondary = r.get("secondary_types") or []
+        secondary_str = f"\n[dim]+{secondary[0]}[/dim]" if secondary else ""
+        _sig_colors = {
+            "爆量★": "bold bright_red",
+            "爆量": "red",
+            "回調": "bright_yellow",
+            "趨勢延伸": "bright_cyan",
+            "蓄積★": "bright_green",
+            "蓄積": "cyan",
+        }
+        sig_color = _sig_colors.get(sig_type, "white")
+        sig_cell = f"[{sig_color}]{sig_type}[/{sig_color}]{secondary_str}"
+
+        horizon = r.get("horizon", "波段")
+        horizon_color = "red" if horizon == "短線" else "cyan"
+        horizon_cell = f"[{horizon_color}]{horizon}[/{horizon_color}]"
+
+        yoy = r.get("growth_yoy")
+        consec = r.get("growth_consecutive", 0)
+        if yoy:
+            consec_str = f" 連{consec}M" if consec >= 3 else ""
+            fund_cell = f"[bright_green]★ +{yoy:.0f}%{consec_str}[/bright_green]"
+        else:
+            fund_cell = "[dim]—[/dim]"
+
         upside_pct = (r["target"] / r["entry_bid"] - 1) * 100 if r["entry_bid"] > 0 else 0
         ticker = r["ticker"]
         if name_map:
@@ -1096,16 +1126,19 @@ def _print_table(
             ticker_cell = f"{ticker}\n[dim]{short_name}[/dim]" if short_name else ticker
         else:
             ticker_cell = ticker
+
         table.add_row(
             str(i),
             ticker_cell,
+            sig_cell,
+            horizon_cell,
             action_text,
             _conf_bar(r["confidence"]),
-            _trend_bar(r.get("trend_score", 0)),
             f"{r['entry_bid']:.1f}",
             f"{r['stop_loss']:.1f}",
             f"{r['target']:.1f}",
             f"{upside_pct:+.1f}%",
+            fund_cell,
         )
 
     _console.print()
@@ -1230,20 +1263,77 @@ def _print_by_industry(
 
         _console.print(ind_header)
 
+        ind_table = Table(
+            box=box.SIMPLE,
+            show_header=True,
+            header_style="bold dim",
+            show_lines=False,
+            padding=(0, 1),
+        )
+        ind_table.add_column("Ticker", style="bold white", width=11)
+        ind_table.add_column("型態", width=10)
+        ind_table.add_column("持倉", width=7)
+        ind_table.add_column("Action", width=10)
+        ind_table.add_column("Confidence", width=18)
+        ind_table.add_column("Entry", justify="right", style="cyan", width=9)
+        ind_table.add_column("Stop", justify="right", style="red", width=9)
+        ind_table.add_column("Target", justify="right", style="green", width=9)
+        ind_table.add_column("Upside", justify="right", style="yellow", width=7)
+        ind_table.add_column("基本面", width=14)
+
         for s in stocks:
             ticker = s["ticker"]
-            name = (name_m.get(ticker) or "")[:5]
-            action = s["action"]
-            conf = s["confidence"]
+            short_name = name_m.get(ticker, "")
+            ticker_cell = f"{ticker}\n[dim]{short_name}[/dim]" if short_name else ticker
 
-            action_label = "🚀 準備突破" if action == "LONG" else "🔍 整理中"
-            action_clr = "cyan" if action == "LONG" else "yellow"
+            action_str = s["action"] + ("*" if s.get("free_tier") else "")
+            action_text = Text.from_markup(f"[{_action_style(s['action'])}]{action_str}[/{_action_style(s['action'])}]")
 
-            conf_bar = _conf_bar(conf)
-            _console.print(
-                f"  [dim]{ticker}[/dim]  [{action_clr}]{action_label}[/{action_clr}]"
-                f"  {conf_bar}  [dim]{name}[/dim]"
+            sig_type = s.get("signal_type", "蓄積")
+            secondary = s.get("secondary_types") or []
+            secondary_str = f"\n[dim]+{secondary[0]}[/dim]" if secondary else ""
+            _sig_colors = {
+                "爆量★": "bold bright_red",
+                "爆量": "red",
+                "回調": "bright_yellow",
+                "趨勢延伸": "bright_cyan",
+                "蓄積★": "bright_green",
+                "蓄積": "cyan",
+            }
+            sig_color = _sig_colors.get(sig_type, "white")
+            sig_cell = f"[{sig_color}]{sig_type}[/{sig_color}]{secondary_str}"
+
+            horizon = s.get("horizon", "波段")
+            horizon_color = "red" if horizon == "短線" else "cyan"
+            horizon_cell = f"[{horizon_color}]{horizon}[/{horizon_color}]"
+
+            yoy = s.get("growth_yoy")
+            consec = s.get("growth_consecutive", 0)
+            if yoy:
+                consec_str = f" 連{consec}M" if consec >= 3 else ""
+                fund_cell = f"[bright_green]★ +{yoy:.0f}%{consec_str}[/bright_green]"
+            else:
+                fund_cell = "[dim]—[/dim]"
+
+            entry_bid = s.get("entry_bid", 0)
+            stop_loss = s.get("stop_loss", 0)
+            target = s.get("target", 0)
+            upside_pct = (target / entry_bid - 1) * 100 if entry_bid > 0 else 0
+
+            ind_table.add_row(
+                ticker_cell,
+                sig_cell,
+                horizon_cell,
+                action_text,
+                _conf_bar(s["confidence"]),
+                f"{entry_bid:.1f}",
+                f"{stop_loss:.1f}",
+                f"{target:.1f}",
+                f"{upside_pct:+.1f}%",
+                fund_cell,
             )
+
+        _console.print(ind_table)
 
     if top and len(valid) > top:
         _console.print(f"\n[dim]  (顯示前 {top} 檔，共 {len(valid)} 檔符合條件)[/dim]")
