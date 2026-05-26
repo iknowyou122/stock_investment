@@ -789,6 +789,7 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
         if signal.score_breakdown:
             breakdown_pts = signal.score_breakdown.get("pts", {})
         trend_score = sum(breakdown_pts.get(f, 0) for f in _TREND_FIELDS)
+        _sig_type, _horizon = _classify_tce_signal_type(signal.data_quality_flags)
         return {
             "ticker": ticker,
             "action": signal.action,
@@ -810,8 +811,8 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "trend_score": trend_score,
             "institution_continuity_pts": breakdown_pts.get("institution_continuity_pts", 0),
             "proximity_pts": breakdown_pts.get("proximity_pts", 0),
-            "signal_type": _classify_tce_signal_type(signal.data_quality_flags)[0],
-            "horizon": _classify_tce_signal_type(signal.data_quality_flags)[1],
+            "signal_type": _sig_type,
+            "horizon": _horizon,
             "secondary_types": [],
         }
     except Exception as e:
@@ -851,19 +852,17 @@ def _scan_pullback_batch(
 ) -> list[dict]:
     """Run PullbackDetector on all tickers.
 
-    Uses L1 in-memory OHLCV cache already populated by the TCE scan —
-    no additional HTTP requests are made for tickers already scanned.
+    Uses L2 DB cache (OHLCVRepository) — hits the DB before falling back to API.
     Returns result dicts in the same shape as _scan_one for qualifying stocks only.
     """
     from taiwan_stock_agent.domain.pullback_detector import PullbackDetector
-    from taiwan_stock_agent.agents.strategist_agent import StrategistAgent
 
     detector = PullbackDetector()
     results: list[dict] = []
 
     for ticker in tickers:
         try:
-            ohlcv_df = agent._client.fetch_ohlcv(
+            ohlcv_df = agent._finmind.fetch_ohlcv(
                 ticker,
                 analysis_date - timedelta(days=130),
                 analysis_date,
@@ -1425,9 +1424,11 @@ def run_batch(
             p2_valid = {r["ticker"]: r for r in phase2 if r.get("error") is None}
             results = [p2_valid.get(r["ticker"], r) for r in results]
 
-    # ── Pullback scan (uses cached OHLCV — no extra HTTP for already-scanned tickers) ──
+    # ── Pullback scan (uses L2 DB cache via OHLCVRepository) ──
     _console.print("\n[bold cyan][Pullback Scan][/bold cyan] 回調型偵測中…")
-    _shared_agent = _make_agent(llm_provider=None, label_repo=label_repo)
+    _ohlcv_repo = OHLCVRepository()
+    _pullback_finmind = FinMindClient(ohlcv_repo=_ohlcv_repo)
+    _shared_agent = _make_agent(llm_provider=None, label_repo=label_repo, finmind=_pullback_finmind)
     pullback_results = _scan_pullback_batch(
         tickers, analysis_date, _shared_agent, market_map=market_map
     )
@@ -1536,7 +1537,7 @@ def run_batch(
                         heat_summary=_load_heat_summary(),
                         llm_provider=llm_provider,
                         min_confidence=min_confidence,
-                        finmind_client=shared_finmind)
+                        finmind_client=_pullback_finmind)
     _console.print(f"  [dim cyan]📄 HTML: file://{html_path.resolve()}[/dim cyan]")
     import subprocess, sys as _sys
     if _sys.platform == "darwin":
