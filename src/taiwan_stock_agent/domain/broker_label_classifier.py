@@ -1,7 +1,7 @@
 """BrokerLabelClassifier: behavioral fingerprinting of 分點 (broker branches).
 
 Classification rules (from design doc):
-  - label = '隔日沖' if reversal_rate > 0.60 AND sample_count >= 50
+  - label = '隔日沖' if reversal_rate > 0.52 AND sample_count >= 50
   - label = 'unknown' until sample_count reaches 50
 
 The reversal_rate is defined as:
@@ -27,7 +27,8 @@ from taiwan_stock_agent.domain.models import BrokerLabel
 logger = logging.getLogger(__name__)
 
 # Classification thresholds
-DAYTRADE_REVERSAL_THRESHOLD = 0.60
+# 0.52 (was 0.60): bull market 2024-2026 suppresses D+2 reversals; 凱基 sits at 0.548
+DAYTRADE_REVERSAL_THRESHOLD = 0.52
 MIN_SAMPLE_COUNT = 50
 
 
