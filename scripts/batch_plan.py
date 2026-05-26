@@ -1613,7 +1613,7 @@ def run_batch(
                         heat_summary=_load_heat_summary(),
                         llm_provider=llm_provider,
                         min_confidence=min_confidence,
-                        finmind_client=_pullback_finmind)
+                        finmind_client=_shared_finmind)
     _console.print(f"  [dim cyan]📄 HTML: file://{html_path.resolve()}[/dim cyan]")
     import subprocess, sys as _sys
     if _sys.platform == "darwin":
