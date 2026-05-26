@@ -1,0 +1,15 @@
+{
+  "saved_at": "2026-05-15",
+  "params": {
+    "rsi_momentum_lo": 58,
+    "rsi_momentum_hi": 75,
+    "breakout_vol_ratio": 2.0,
+    "long_threshold_neutral": 63
+  },
+  "avg_test_lift": 0.04369081996211769,
+  "violations": [
+    "rsi_momentum_lo: 30 → 58 (93% > 20% 上限)",
+    "rsi_momentum_hi: 55 → 75 (36% > 20% 上限)",
+    "breakout_vol_ratio: 1.5 → 2.0 (33% > 20% 上限)"
+  ]
+}
