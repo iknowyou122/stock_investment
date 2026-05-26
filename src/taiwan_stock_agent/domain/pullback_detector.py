@@ -49,7 +49,7 @@ class PullbackDetector:
         upper_bb_touched = False
         n = len(closes)
         for i in range(n - 10, n):
-            window = closes[max(0, i - 20):i]
+            window = closes[max(0, i - 19):i + 1]
             if len(window) < 5:
                 continue
             bb_mid = mean(window)
@@ -86,7 +86,7 @@ class PullbackDetector:
                 flags.append("VOL_EXPANDING_BEARISH")
 
         # 3. MA20 slope — uptrend strength (0–20 pts)
-        ma20_prev = mean(closes[-25:-5])
+        ma20_prev = mean(closes[-40:-20])
         slope = (ma20 - ma20_prev) / ma20_prev if ma20_prev > 0 else 0.0
         if slope > 0.02:
             score += 20
