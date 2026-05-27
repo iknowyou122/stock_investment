@@ -992,6 +992,115 @@ def _load_surge_from_db(analysis_date: date, min_score: int = 50) -> list[dict]:
     return results
 
 
+def _early_accum_analysis(det: dict, proxy=None) -> tuple[str, str, str, str]:
+    """Generate verdict / position / momentum / chip from detector output (no LLM).
+
+    Returns (verdict, position, momentum, chip).
+    """
+    sig = det.get("signal_type", "提前佈局")
+    flags: list[str] = det.get("flags", [])
+    flag_set = set(flags)
+
+    # ── InstAccumDetector ─────────────────────────────────────────────
+    if "INST_ACCUM" in flag_set:
+        consec = det.get("consec_days", 0)
+        dist = det.get("distance_pct", 0)
+        verdict = f"法人悄悄建倉：距60日高點 -{dist:.0f}%，連買 {consec} 天，尚未引起市場注意"
+        position = f"距高點 -{dist:.0f}%，有充足上漲空間；等待量能回升或突破短期均線確認"
+        momentum = "股價仍在整理中，MA 尚未完全多頭排列；耐心等待催化劑"
+        chip_parts = []
+        if consec >= 5:
+            chip_parts.append(f"法人連買 {consec} 天（強烈意圖）")
+        else:
+            chip_parts.append(f"法人連買 {consec} 天")
+        if "VOL_DRYUP_STRONG" in flag_set:
+            chip_parts.append("成交量極度萎縮（籌碼乾淨）")
+        elif "VOL_DRYUP" in flag_set:
+            chip_parts.append("成交量縮減")
+        if "LARGE_HOLDER_ACCUM" in flag_set:
+            chip_parts.append("大戶持股增加")
+        chip = "；".join(chip_parts)
+        return verdict, position, momentum, chip
+
+    # ── ChipTransferDetector ──────────────────────────────────────────
+    if "CHIP_TRANSFER" in flag_set:
+        signals: list[str] = det.get("signals_met", [])
+        price_rng = det.get("price_range_pct", 0)
+        vol_ratio = det.get("vol_ratio", 1.0)
+        margin_streak = det.get("margin_streak", 0)
+        consec = det.get("consec_days", 0)
+        signal_desc = []
+        if "A" in signals and margin_streak:
+            signal_desc.append(f"融資連降 {margin_streak} 天")
+        if "B" in signals:
+            signal_desc.append(f"股價穩定（20日振幅僅 {price_rng:.1f}%）")
+        if "C" in signals and consec:
+            signal_desc.append(f"法人連買 {consec} 天")
+        if "D" in signals:
+            signal_desc.append("大戶持股增加")
+        if "E" in signals:
+            signal_desc.append("散戶持股下降")
+        verdict = "散戶出、法人進：" + "，".join(signal_desc[:3])
+        position = f"股價平台整理中（{price_rng:.1f}%）；散戶信心減弱卻是法人低調建倉良機"
+        momentum = "尚無明顯突破訊號，屬蓄積期；動能訊號出現前保持觀察"
+        chip = "；".join(signal_desc) + f"；量縮比 {vol_ratio:.2f}x"
+        return verdict, position, momentum, chip
+
+    # ── VCPDetector ───────────────────────────────────────────────────
+    if "VCP" in flag_set:
+        n_c = det.get("contractions", 2)
+        pb = det.get("latest_pullback_pct", 0)
+        dist = det.get("dist_from_trough_pct", 0)
+        verdict = f"Minervini VCP：{n_c} 次回調幅度遞減，最新回調僅 {pb:.1f}%，波動率持續收斂"
+        position = f"目前距最新低點 +{dist:.1f}%，仍在底部建倉區；量縮期為最佳進場窗口"
+        bb_tight = "BB 極度壓縮（動能即將釋放）" if "BB_VERY_TIGHT" in flag_set else ("BB 偏緊" if "BB_TIGHT" in flag_set else "")
+        momentum = f"{'；'.join(filter(None, ['波動率收縮至低點', bb_tight]))}；等待放量突破確認"
+        chip_parts = []
+        for f in flags:
+            if f.startswith("TROUGH_VOL_DRYUP"):
+                chip_parts.append("每次回調量能遞減（主力未出貨）")
+            elif f.startswith("TROUGH_VOL_LOW"):
+                chip_parts.append("回調量能偏低")
+        if "MA_ALIGNED" in flag_set:
+            chip_parts.append("均線多頭排列")
+        chip = "；".join(chip_parts) if chip_parts else "量縮回調中"
+        return verdict, position, momentum, chip
+
+    # ── HTFDetector ───────────────────────────────────────────────────
+    if "HTF" in flag_set:
+        adv = det.get("prior_advance_pct", 0)
+        rng = det.get("consolidation_range_pct", 0)
+        vr = det.get("vol_ratio", 1.0)
+        fw = det.get("flag_window", 0)
+        verdict = f"高緊旗形：急漲 {adv:.0f}% 後低量整理 {fw} 天，旗形振幅僅 {rng:.1f}%"
+        position = f"整理 {fw} 天後動能保留；突破旗形上緣即為進場點"
+        tight = "FLAG_TIGHT" in flag_set or "FLAG_MOD" in flag_set
+        momentum = f"量縮 {vr:.2f}x，{'旗形極緊（爆發力強）' if rng < 8 else '旗形整理中'}；靜待放量突破"
+        chip = f"量縮比 {vr:.2f}x（整理期主力未出貨）；旗形寬度 {rng:.1f}%"
+        if "MA_ALIGNED" in flag_set:
+            chip += "；均線多頭排列"
+        return verdict, position, momentum, chip
+
+    # ── PullbackDetector (fallback if called from here) ───────────────
+    if "PULLBACK_MA20" in flag_set:
+        ma20_pct = det.get("ma20_pct", 0)
+        rsi = det.get("rsi", 50)
+        pb_days = det.get("pullback_days", 0)
+        verdict = f"回調至 MA20 支撐（{ma20_pct:+.1f}%），RSI 冷卻至 {rsi:.0f}，{pb_days} 天回調"
+        position = "均線多頭排列，回調至 MA20 為中繼買點；止損設 MA20 下方 3%"
+        bounce = "今日出現陽線反彈" if "BOUNCE_CANDLE" in flag_set else "等待反彈訊號確認"
+        momentum = f"RSI {rsi:.0f} 已從高位冷卻；{bounce}"
+        if "VOL_CONTRACTION_STRONG" in flag_set:
+            chip = "量縮整理（籌碼穩定）"
+        elif "VOL_CONTRACTION" in flag_set:
+            chip = "成交量收縮"
+        else:
+            chip = "量能中性"
+        return verdict, position, momentum, chip
+
+    return f"{sig} 訊號", "", "", ""
+
+
 def _scan_early_accum_batch(
     tickers: list[str],
     analysis_date: date,
@@ -1066,6 +1175,8 @@ def _scan_early_accum_batch(
             closes = [d.close for d in sorted_h]
             ma20 = _mean(closes[-20:]) if len(closes) >= 20 else close
 
+            _verdict, _position, _momentum, _chip = _early_accum_analysis(best, proxy)
+
             results.append({
                 "ticker": ticker,
                 "action": "WATCH",
@@ -1076,11 +1187,11 @@ def _scan_early_accum_batch(
                 "entry_bid": round(close * 0.997, 1),
                 "stop_loss": round(ma20 * 0.97, 1),
                 "target": round(close * 1.10, 1),
-                "verdict": f"{best['signal_type']} 提前佈局",
-                "position": "",
-                "momentum": "",
-                "chip": "",
-                "risk": "",
+                "verdict": _verdict,
+                "position": _position,
+                "momentum": _momentum,
+                "chip": _chip,
+                "risk": "提前佈局訊號，尚未突破，持倉前等待量能確認",
                 "elapsed": 0.0,
                 "error": None,
                 "_signal": None,
