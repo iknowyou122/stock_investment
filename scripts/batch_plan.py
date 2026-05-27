@@ -2227,6 +2227,11 @@ def _generate_plan_html(
             _seen_inds.add(ind)
             unique_industries.append(ind)
 
+    # Collect unique signal types (preserve display order)
+    _sig_type_order = ["爆量★", "爆量", "趨勢延伸", "蓄積★", "蓄積", "回調"]
+    _seen_sigtypes: set[str] = {r.get("signal_type", "蓄積") for r in filtered}
+    unique_sig_types: list[str] = [s for s in _sig_type_order if s in _seen_sigtypes]
+
     # Collect all unique concept names for filter pills (hot-first, then alphabetical)
     _seen_cnames: set[str] = set()
     _all_concepts_hot: list[str] = []
@@ -2340,7 +2345,7 @@ def _generate_plan_html(
             fund_badge = ""
 
         cards.append(f"""
-    <div class="card" data-action="{action}" data-conf="{conf}" data-industry="{_esc(raw_industry)}" data-concepts="{_esc(concept_names_joined)}" style="animation-delay:{delay}s">
+    <div class="card" data-action="{action}" data-conf="{conf}" data-industry="{_esc(raw_industry)}" data-concepts="{_esc(concept_names_joined)}" data-sigtype="{_esc(sig_type)}" data-horizon="{_esc(horizon_val)}" style="animation-delay:{delay}s">
       <div class="card-header">
         <div class="rank">{i+1}</div>
         <div class="info">
@@ -2535,11 +2540,16 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 </div>
 <div class="filter-bar" id="filterBar">
   <div class="fb-group">
-    <span class="fb-label">類型</span>
+    <span class="fb-label">操作</span>
     <button class="fb-pill active" data-filter-action="ALL">全部</button>
     <button class="fb-pill" data-filter-action="LONG">突破進場</button>
     <button class="fb-pill" data-filter-action="WATCH">等待確認</button>
   </div>
+  {(('<div class="fb-group"><span class="fb-label">訊號型態</span>' +
+     '<button class="fb-pill sigtype-pill active" data-sigtype="ALL">全部</button>' +
+     "".join(f'<button class="fb-pill sigtype-pill" data-sigtype="{_esc(s)}">{_esc(s)}</button>'
+             for s in unique_sig_types) +
+     '</div>') if len(unique_sig_types) > 1 else "")}
   <div class="fb-group">
     <span class="fb-label">信心 ≥</span>
     <input type="range" class="fb-slider" id="confSlider" min="{min_confidence}" max="150" value="{min_confidence}" step="5">
@@ -2602,6 +2612,7 @@ document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.ob
 // --- Filter bar ---
 (function() {{
   var activeAction = "ALL";
+  var activeSigType = "ALL";
   var minConf = {min_confidence};
   var activeInd = "";
   var selectedConcepts = new Set();
@@ -2613,11 +2624,13 @@ document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.ob
       var a = c.dataset.action;
       var conf = parseInt(c.dataset.conf, 10);
       var ind = c.dataset.industry;
+      var sigtype = c.dataset.sigtype || "";
       var cardConceptsRaw = c.dataset.concepts || "";
       var cardConcepts = cardConceptsRaw ? new Set(cardConceptsRaw.split(",")) : new Set();
       var conceptMatch = selectedConcepts.size === 0
         || [...selectedConcepts].every(function(sc) {{ return cardConcepts.has(sc); }});
       var show = (activeAction === "ALL" || a === activeAction)
+               && (activeSigType === "ALL" || sigtype === activeSigType)
                && conf >= minConf
                && (activeInd === "" || ind === activeInd)
                && conceptMatch;
@@ -2658,6 +2671,15 @@ document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.ob
       document.querySelectorAll("[data-filter-action]").forEach(function(b) {{ b.classList.remove("active"); }});
       btn.classList.add("active");
       activeAction = btn.dataset.filterAction;
+      applyFilters();
+    }});
+  }});
+
+  document.querySelectorAll(".sigtype-pill").forEach(function(btn) {{
+    btn.addEventListener("click", function() {{
+      document.querySelectorAll(".sigtype-pill").forEach(function(b) {{ b.classList.remove("active"); }});
+      btn.classList.add("active");
+      activeSigType = btn.dataset.sigtype;
       applyFilters();
     }});
   }});
