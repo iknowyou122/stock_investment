@@ -30,6 +30,8 @@ class PaidDataFetcher:
         self._limit_up_cache: dict[date, frozenset[str]] = {}
         self._daytrade_cache: dict[date, frozenset[str]] = {}
         self._margin_cache: dict[date, float | None] = {}
+        # {date: {stock_id: (foreign_net, trust_net, dealer_net)}}
+        self._inst_day_cache: dict[date, dict[str, tuple[int, int, int]]] = {}
 
     def _get(self, dataset: str, trade_date: date) -> list[dict]:
         """Generic FinMind API call. Returns [] on any failure."""
@@ -162,3 +164,66 @@ class PaidDataFetcher:
                     pass
         self._margin_cache[trade_date] = rate
         return rate
+
+    def fetch_institution_day(
+        self, trade_date: date
+    ) -> dict[str, tuple[int, int, int]]:
+        """Full-market institution buy/sell for trade_date via FinMind paid API.
+
+        Returns {stock_id: (foreign_net, trust_net, dealer_net)} in shares.
+        Empty dict on failure or missing API key.
+
+        Dataset: TaiwanStockInstitutionalInvestorsBuySell
+        Names: Foreign_Investor → foreign, Investment_Trust → trust,
+               Dealer_self + Dealer_Hedging + Foreign_Dealer_Self → dealer
+        """
+        if trade_date in self._inst_day_cache:
+            return self._inst_day_cache[trade_date]
+        if not self._api_key:
+            return {}
+        try:
+            resp = requests.get(
+                _FINMIND_URL,
+                params={
+                    "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+                    "start_date": trade_date.isoformat(),
+                    "end_date": trade_date.isoformat(),
+                    "token": self._api_key,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+        except Exception as e:
+            logger.debug("fetch_institution_day(%s) failed: %s", trade_date, e)
+            self._inst_day_cache[trade_date] = {}
+            return {}
+
+        # Aggregate by stock_id
+        foreign: dict[str, int] = {}
+        trust: dict[str, int] = {}
+        dealer: dict[str, int] = {}
+        _dealer_names = {"Dealer_self", "Dealer_Hedging", "Foreign_Dealer_Self"}
+
+        for row in data:
+            sid = str(row.get("stock_id", "")).strip()
+            name = row.get("name", "")
+            net = int(row.get("buy", 0)) - int(row.get("sell", 0))
+            if name == "Foreign_Investor":
+                foreign[sid] = net
+            elif name == "Investment_Trust":
+                trust[sid] = net
+            elif name in _dealer_names:
+                dealer[sid] = dealer.get(sid, 0) + net
+
+        result: dict[str, tuple[int, int, int]] = {}
+        all_ids = foreign.keys() | trust.keys() | dealer.keys()
+        for sid in all_ids:
+            result[sid] = (foreign.get(sid, 0), trust.get(sid, 0), dealer.get(sid, 0))
+
+        self._inst_day_cache[trade_date] = result
+        logger.info(
+            "fetch_institution_day(%s): %d tickers loaded from FinMind",
+            trade_date, len(result),
+        )
+        return result

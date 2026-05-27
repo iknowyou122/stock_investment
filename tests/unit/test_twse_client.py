@@ -796,3 +796,103 @@ class TestFetchMarginUtilization:
         assert result is None
         # No error flag appended — absent limit is expected, not an error
         assert not any("MARGN" in f or "UTIL" in f for f in flags)
+
+
+class TestPaidFinMindInstitutionPath:
+    """When PaidDataFetcher is injected and returns data, TWSE T86 is never called."""
+
+    def _make_paid_fetcher(self, inst_data: dict) -> MagicMock:
+        paid = MagicMock()
+        paid.fetch_institution_day.return_value = inst_data
+        # Other paid methods return defaults used by ChipProxyFetcher
+        paid.fetch_disposal_tickers.return_value = frozenset()
+        paid.fetch_halt_tickers.return_value = frozenset()
+        paid.fetch_limit_up_tickers.return_value = frozenset()
+        paid.fetch_daytrade_restricted_tickers.return_value = frozenset()
+        paid.fetch_market_margin_maintenance.return_value = None
+        return paid
+
+    def test_paid_data_skips_twse_http(self):
+        """When paid fetcher returns institution data, requests.get is not called for T86."""
+        ticker = "2330"
+        trade_date = date(2026, 5, 27)
+        inst_data = {"2330": (8_000_000, 300_000, 50_000)}
+        paid = self._make_paid_fetcher(inst_data)
+
+        margn_resp = MagicMock()
+        margn_resp.json.return_value = _make_mi_margn_openapi_response(
+            ticker, today_margin=10_000, prev_margin=11_000
+        )
+        margn_resp.raise_for_status = MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir), paid_fetcher=paid)
+
+            t86_call_count = 0
+
+            def _side_effect(url, **kwargs):
+                nonlocal t86_call_count
+                if "T86" in url:
+                    t86_call_count += 1
+                return margn_resp
+
+            with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get", side_effect=_side_effect):
+                proxy = fetcher.fetch(ticker, trade_date)
+
+        assert t86_call_count == 0, "TWSE T86 HTTP called despite paid fetcher providing data"
+        assert proxy.foreign_net_buy == 8_000_000
+        assert proxy.trust_net_buy == 300_000
+        assert proxy.dealer_net_buy == 50_000
+
+    def test_paid_data_populates_date_cache(self):
+        """Second ticker for same date uses _t86_date_cache, not paid API again."""
+        trade_date = date(2026, 5, 27)
+        inst_data = {
+            "2330": (5_000_000, 100_000, 20_000),
+            "2317": (2_000_000, 50_000, 10_000),
+        }
+        paid = self._make_paid_fetcher(inst_data)
+
+        margn_resp = MagicMock()
+        margn_resp.json.return_value = []
+        margn_resp.raise_for_status = MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir), paid_fetcher=paid)
+            with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get", return_value=margn_resp):
+                fetcher._fetch_t86_data("2330", trade_date, [])
+                fetcher._fetch_t86_data("2317", trade_date, [])
+
+        # fetch_institution_day called only once (second ticker hits memory cache)
+        assert paid.fetch_institution_day.call_count == 1
+
+    def test_paid_empty_falls_back_to_twse(self):
+        """When paid fetcher returns empty dict, TWSE T86 HTTP is attempted."""
+        ticker = "2330"
+        trade_date = date(2026, 5, 27)
+        paid = self._make_paid_fetcher({})  # empty → fall back
+
+        t86_resp = MagicMock()
+        t86_resp.json.return_value = _make_t86_response(ticker, net_buy=1_000_000)
+        t86_resp.raise_for_status = MagicMock()
+
+        margn_resp = MagicMock()
+        margn_resp.json.return_value = _make_mi_margn_openapi_response(ticker)
+        margn_resp.raise_for_status = MagicMock()
+
+        t86_called = False
+
+        def _side_effect(url, **kwargs):
+            nonlocal t86_called
+            if "T86" in url:
+                t86_called = True
+                return t86_resp
+            return margn_resp
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fetcher = ChipProxyFetcher(cache_dir=Path(tmpdir), paid_fetcher=paid)
+            with patch("taiwan_stock_agent.infrastructure.twse_client.requests.get", side_effect=_side_effect):
+                proxy = fetcher.fetch(ticker, trade_date)
+
+        assert t86_called, "Expected TWSE T86 HTTP call when paid data is empty"
+        assert proxy.foreign_net_buy == 1_000_000

@@ -222,11 +222,19 @@ class ChipProxyFetcher:
         Returns (foreign_net_buy, trust_net_buy, dealer_net_buy) in shares;
         any value may be None if unavailable.
         """
-        # 0. Circuit breaker — if TWSE has been rate-limiting us, skip HTTP entirely.
+        # 0a. Paid FinMind path — populate date cache from paid API, skip TWSE T86 entirely.
+        if self._paid is not None and trade_date not in self._t86_date_cache:
+            inst_day = self._paid.fetch_institution_day(trade_date)
+            if inst_day:
+                # Convert to same tuple format as TWSE T86 cache
+                self._t86_date_cache[trade_date] = {
+                    sid: (f, t, d) for sid, (f, t, d) in inst_day.items()
+                }
+
+        # 0b. Circuit breaker — if TWSE has been rate-limiting us, skip HTTP entirely.
         #    After 3 consecutive rate-limited dates, assume TWSE is blocking this session.
-        if self._t86_circuit_open:
-            if trade_date not in self._t86_date_cache:
-                self._t86_date_cache[trade_date] = {}
+        if self._t86_circuit_open and trade_date not in self._t86_date_cache:
+            self._t86_date_cache[trade_date] = {}
             # Still try TPEx for OTC stocks
             tpex_result = self._fetch_tpex_t86_data(ticker, trade_date, flags)
             if any(v is not None for v in tpex_result):
