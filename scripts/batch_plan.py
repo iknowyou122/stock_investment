@@ -2465,6 +2465,21 @@ def _generate_plan_html(
         # Signal type + fundamental badges
         sig_type = r.get("signal_type", "蓄積")
         horizon_val = r.get("horizon", "波段")
+
+        # Strategy category (for filter + card border)
+        _EARLY_TYPES = {"法人建倉", "籌碼轉移", "VCP", "旗形"}
+        _TRACK_TYPES = {"回調", "爆量★", "爆量"}
+        strategy = "early" if sig_type in _EARLY_TYPES else "track" if sig_type in _TRACK_TYPES else "confirm"
+
+        # Rotation status from flags
+        _flags_list = r.get("flags") or []
+        _flags_str = " ".join(_flags_list) if isinstance(_flags_list, list) else str(_flags_list)
+        rotation_status = (
+            "EMERGING" if "ROTATION_EMERGING" in _flags_str else
+            "HOT"      if "ROTATION_HOT"      in _flags_str else
+            "COOLING"  if "ROTATION_COOLING"   in _flags_str else ""
+        )
+        rotation_label = {"EMERGING": "📡升溫", "HOT": "🔥熱門", "COOLING": "🔻降溫"}.get(rotation_status, "")
         yoy = r.get("growth_yoy")
         consec = r.get("growth_consecutive", 0) or 0
 
@@ -2485,6 +2500,7 @@ def _generate_plan_html(
             f'<span style="background:{horizon_bg};color:#fff;'
             f'border-radius:4px;padding:2px 6px;font-size:11px;'
             f'margin-right:4px">{horizon_val}</span>'
+            + (f'<span class="rot-badge rot-{rotation_status.lower()}">{rotation_label}</span>' if rotation_label else "")
         )
         if yoy:
             consec_str = f" 連{consec}M" if consec >= 3 else ""
@@ -2496,8 +2512,12 @@ def _generate_plan_html(
         else:
             fund_badge = ""
 
+        # Strategy left-border color
+        _border_colors = {"early": "#dd44ff", "confirm": "#388bfd", "track": "#ef5350"}
+        _border_col = _border_colors.get(strategy, "#388bfd")
+
         cards.append(f"""
-    <div class="card" data-action="{action}" data-conf="{conf}" data-industry="{_esc(raw_industry)}" data-concepts="{_esc(concept_names_joined)}" data-sigtype="{_esc(sig_type)}" data-horizon="{_esc(horizon_val)}" style="animation-delay:{delay}s">
+    <div class="card" data-action="{action}" data-conf="{conf}" data-industry="{_esc(raw_industry)}" data-concepts="{_esc(concept_names_joined)}" data-sigtype="{_esc(sig_type)}" data-horizon="{_esc(horizon_val)}" data-strategy="{strategy}" data-rotation="{rotation_status}" style="animation-delay:{delay}s;border-left:4px solid {_border_col}">
       <div class="card-header">
         <div class="rank">{i+1}</div>
         <div class="info">
@@ -2678,6 +2698,19 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .fb-count{{margin-left:auto;font-size:12px;color:#8b949e}}
 .fb-count span{{color:#e6edf3;font-weight:700}}
 .card.hidden{{display:none}}
+.rot-badge{{font-size:10px;font-weight:700;padding:2px 7px;border-radius:8px;vertical-align:middle}}
+.rot-emerging{{background:rgba(61,185,130,.18);color:#3fb98b;border:1px solid rgba(61,185,130,.35)}}
+.rot-hot{{background:rgba(248,81,73,.15);color:#ff7b7b;border:1px solid rgba(248,81,73,.3)}}
+.rot-cooling{{background:rgba(139,148,158,.1);color:#6e7681;border:1px solid rgba(139,148,158,.2)}}
+.sig-summary{{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 24px;
+  background:#0d1117;border-bottom:1px solid #21262d;font-size:11px;color:#8b949e}}
+.sig-summary-item{{display:flex;align-items:center;gap:5px;cursor:pointer;padding:3px 8px;
+  border-radius:12px;border:1px solid transparent;transition:all .15s}}
+.sig-summary-item:hover{{border-color:#30363d;background:rgba(255,255,255,.04)}}
+.sig-summary-item.active{{border-color:#388bfd;background:rgba(56,139,253,.1)}}
+.sig-dot{{width:8px;height:8px;border-radius:50%;flex-shrink:0}}
+.sig-summary-label{{font-size:11px;font-weight:600;color:#c9d1d9}}
+.sig-summary-cnt{{font-size:11px;color:#8b949e}}
 </style>
 </head>
 <body>
@@ -2697,6 +2730,19 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
     <button class="fb-pill" data-filter-action="LONG">突破進場</button>
     <button class="fb-pill" data-filter-action="WATCH">等待確認</button>
   </div>
+  <div class="fb-group">
+    <span class="fb-label">策略</span>
+    <button class="fb-pill strategy-pill active" data-strategy="ALL">全部</button>
+    <button class="fb-pill strategy-pill" data-strategy="early" style="border-color:#6e2a8a">提前佈局</button>
+    <button class="fb-pill strategy-pill" data-strategy="confirm" style="border-color:#1a3a6a">確認型</button>
+    <button class="fb-pill strategy-pill" data-strategy="track" style="border-color:#6a1a1a">追蹤型</button>
+  </div>
+  <div class="fb-group">
+    <span class="fb-label">持倉</span>
+    <button class="fb-pill horizon-pill active" data-horizon="ALL">全部</button>
+    <button class="fb-pill horizon-pill" data-horizon="波段">波段</button>
+    <button class="fb-pill horizon-pill" data-horizon="短線">短線</button>
+  </div>
   {(('<div class="fb-group"><span class="fb-label">訊號型態</span>' +
      '<button class="fb-pill sigtype-pill active" data-sigtype="ALL">全部</button>' +
      "".join(f'<button class="fb-pill sigtype-pill" data-sigtype="{_esc(s)}">{_esc(s)}</button>'
@@ -2706,6 +2752,14 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
     <span class="fb-label">信心 ≥</span>
     <input type="range" class="fb-slider" id="confSlider" min="{min_confidence}" max="150" value="{min_confidence}" step="5">
     <span class="fb-val" id="confVal">{min_confidence}</span>
+  </div>
+  <div class="fb-group">
+    <span class="fb-label">排序</span>
+    <select class="fb-select" id="sortSelect">
+      <option value="conf">信心分↓</option>
+      <option value="strategy">策略優先</option>
+      <option value="rotation">輪動熱度</option>
+    </select>
   </div>
   <div class="fb-group">
     <span class="fb-label">產業</span>
@@ -2719,6 +2773,9 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
              for n in all_concept_names) +
      '</div>') if all_concept_names else "")}
   <div class="fb-count">顯示 <span id="visCount">{len(filtered)}</span> / {len(filtered)} 支</div>
+</div>
+<div class="sig-summary" id="sigSummary">
+  <span style="font-size:11px;color:#8b949e;white-space:nowrap">訊號分布：</span>
 </div>
 <div class="grid" id="cardGrid">
 {"".join(cards)}
@@ -2761,28 +2818,134 @@ const _obs = new IntersectionObserver(function(entries) {{
 }}, {{ rootMargin: "100px" }});
 document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.observe(el); }});
 
+// --- Signal summary bar ---
+(function() {{
+  var SIG_META = {{
+    "爆量★":  {{ color:"#ef5350", strategy:"track" }},
+    "爆量":   {{ color:"#f57c70", strategy:"track" }},
+    "回調":   {{ color:"#e3b341", strategy:"track" }},
+    "趨勢延伸":{{ color:"#58a6ff", strategy:"confirm" }},
+    "蓄積★":  {{ color:"#3fb950", strategy:"confirm" }},
+    "蓄積":   {{ color:"#26a69a", strategy:"confirm" }},
+    "法人建倉":{{ color:"#dd44ff", strategy:"early" }},
+    "籌碼轉移":{{ color:"#b044dd", strategy:"early" }},
+    "VCP":    {{ color:"#44ddcc", strategy:"early" }},
+    "旗形":   {{ color:"#ddcc44", strategy:"early" }},
+  }};
+  var STRATEGY_LABEL = {{ early:"提前佈局", confirm:"確認型", track:"追蹤型" }};
+  var STRATEGY_COLOR = {{ early:"#dd44ff", confirm:"#388bfd", track:"#ef5350" }};
+  var summary = document.getElementById("sigSummary");
+  var cards = Array.from(document.querySelectorAll("#cardGrid .card"));
+
+  // Count per sig type
+  var counts = {{}};
+  cards.forEach(function(c) {{
+    var t = c.dataset.sigtype || "蓄積";
+    counts[t] = (counts[t] || 0) + 1;
+  }});
+
+  // Build summary items grouped by strategy
+  var strategies = ["early","confirm","track"];
+  strategies.forEach(function(strat) {{
+    var stratTotal = 0;
+    var items = [];
+    Object.keys(SIG_META).forEach(function(t) {{
+      if (SIG_META[t].strategy !== strat) return;
+      var cnt = counts[t] || 0;
+      if (!cnt) return;
+      stratTotal += cnt;
+      items.push({{ t:t, cnt:cnt, color:SIG_META[t].color }});
+    }});
+    if (!stratTotal) return;
+    var grpEl = document.createElement("div");
+    grpEl.style.cssText = "display:flex;align-items:center;gap:6px;padding:2px 10px;border-radius:12px;border:1px solid " + STRATEGY_COLOR[strat] + "33;background:" + STRATEGY_COLOR[strat] + "11;cursor:pointer";
+    grpEl.dataset.strategyFilter = strat;
+    grpEl.title = "點擊篩選 " + STRATEGY_LABEL[strat];
+    var grpLabel = document.createElement("span");
+    grpLabel.textContent = STRATEGY_LABEL[strat];
+    grpLabel.style.cssText = "font-size:10px;font-weight:700;color:" + STRATEGY_COLOR[strat] + ";white-space:nowrap";
+    grpEl.appendChild(grpLabel);
+    items.forEach(function(it) {{
+      var dot = document.createElement("span");
+      dot.className = "sig-dot";
+      dot.style.background = it.color;
+      var lbl = document.createElement("span");
+      lbl.className = "sig-summary-label";
+      lbl.textContent = it.t;
+      var cnt = document.createElement("span");
+      cnt.className = "sig-summary-cnt";
+      cnt.textContent = "(" + it.cnt + ")";
+      var wrap = document.createElement("span");
+      wrap.className = "sig-summary-item";
+      wrap.dataset.summaryType = it.t;
+      [dot, lbl, cnt].forEach(function(el) {{ wrap.appendChild(el); }});
+      grpEl.appendChild(wrap);
+    }});
+    summary.appendChild(grpEl);
+  }});
+}})();
+
 // --- Filter bar ---
 (function() {{
   var activeAction = "ALL";
   var activeSigType = "ALL";
+  var activeStrategy = "ALL";
+  var activeHorizon = "ALL";
+  var activeSort = "conf";
   var minConf = {min_confidence};
   var activeInd = "";
   var selectedConcepts = new Set();
 
+  var STRATEGY_ORDER = {{ early: 0, confirm: 1, track: 2 }};
+  var ROTATION_ORDER = {{ EMERGING: 0, HOT: 1, "": 2, COOLING: 3 }};
+
+  function getCards() {{
+    return Array.from(document.querySelectorAll("#cardGrid .card"));
+  }}
+
+  function applySort() {{
+    var grid = document.getElementById("cardGrid");
+    var cards = getCards();
+    if (activeSort === "conf") {{
+      cards.sort(function(a, b) {{
+        return parseInt(b.dataset.conf, 10) - parseInt(a.dataset.conf, 10);
+      }});
+    }} else if (activeSort === "strategy") {{
+      cards.sort(function(a, b) {{
+        var sa = STRATEGY_ORDER[a.dataset.strategy] !== undefined ? STRATEGY_ORDER[a.dataset.strategy] : 9;
+        var sb = STRATEGY_ORDER[b.dataset.strategy] !== undefined ? STRATEGY_ORDER[b.dataset.strategy] : 9;
+        if (sa !== sb) return sa - sb;
+        return parseInt(b.dataset.conf, 10) - parseInt(a.dataset.conf, 10);
+      }});
+    }} else if (activeSort === "rotation") {{
+      cards.sort(function(a, b) {{
+        var ra = ROTATION_ORDER[a.dataset.rotation] !== undefined ? ROTATION_ORDER[a.dataset.rotation] : 2;
+        var rb = ROTATION_ORDER[b.dataset.rotation] !== undefined ? ROTATION_ORDER[b.dataset.rotation] : 2;
+        if (ra !== rb) return ra - rb;
+        return parseInt(b.dataset.conf, 10) - parseInt(a.dataset.conf, 10);
+      }});
+    }}
+    cards.forEach(function(c) {{ grid.appendChild(c); }});
+  }}
+
   function applyFilters() {{
-    var cards = document.querySelectorAll("#cardGrid .card");
+    var cards = getCards();
     var visible = 0;
     cards.forEach(function(c) {{
       var a = c.dataset.action;
       var conf = parseInt(c.dataset.conf, 10);
       var ind = c.dataset.industry;
       var sigtype = c.dataset.sigtype || "";
+      var strategy = c.dataset.strategy || "";
+      var horizon = c.dataset.horizon || "";
       var cardConceptsRaw = c.dataset.concepts || "";
       var cardConcepts = cardConceptsRaw ? new Set(cardConceptsRaw.split(",")) : new Set();
       var conceptMatch = selectedConcepts.size === 0
         || [...selectedConcepts].every(function(sc) {{ return cardConcepts.has(sc); }});
       var show = (activeAction === "ALL" || a === activeAction)
                && (activeSigType === "ALL" || sigtype === activeSigType)
+               && (activeStrategy === "ALL" || strategy === activeStrategy)
+               && (activeHorizon === "ALL" || horizon === activeHorizon)
                && conf >= minConf
                && (activeInd === "" || ind === activeInd)
                && conceptMatch;
@@ -2790,6 +2953,11 @@ document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.ob
       if (show) visible++;
     }});
     document.getElementById("visCount").textContent = visible;
+  }}
+
+  function applyFiltersAndSort() {{
+    applySort();
+    applyFilters();
   }}
 
   function toggleConcept(name) {{
@@ -2834,6 +3002,42 @@ document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.ob
       activeSigType = btn.dataset.sigtype;
       applyFilters();
     }});
+  }});
+
+  document.querySelectorAll(".strategy-pill").forEach(function(btn) {{
+    btn.addEventListener("click", function() {{
+      document.querySelectorAll(".strategy-pill").forEach(function(b) {{ b.classList.remove("active"); }});
+      btn.classList.add("active");
+      activeStrategy = btn.dataset.strategy;
+      applyFilters();
+    }});
+  }});
+
+  document.querySelectorAll(".horizon-pill").forEach(function(btn) {{
+    btn.addEventListener("click", function() {{
+      document.querySelectorAll(".horizon-pill").forEach(function(b) {{ b.classList.remove("active"); }});
+      btn.classList.add("active");
+      activeHorizon = btn.dataset.horizon;
+      applyFilters();
+    }});
+  }});
+
+  // clicking a strategy group in sig-summary bar filters by strategy
+  document.querySelectorAll("#sigSummary [data-strategy-filter]").forEach(function(el) {{
+    el.addEventListener("click", function() {{
+      var strat = el.dataset.strategyFilter;
+      var pills = document.querySelectorAll(".strategy-pill");
+      pills.forEach(function(b) {{ b.classList.remove("active"); }});
+      var target = document.querySelector('.strategy-pill[data-strategy="' + strat + '"]');
+      if (target) target.classList.add("active");
+      activeStrategy = strat;
+      applyFilters();
+    }});
+  }});
+
+  document.getElementById("sortSelect").addEventListener("change", function() {{
+    activeSort = this.value;
+    applyFiltersAndSort();
   }});
 
   var slider = document.getElementById("confSlider");
