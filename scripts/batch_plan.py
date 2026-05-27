@@ -630,7 +630,7 @@ def _apply_near_high_first_day(
             continue
         if r["ticker"] in yesterday_tickers:
             continue
-        if r.get("proximity_pts", 0) == 12:  # 12 = max proximity band (92-99% of 20d high); see _proximity_score()
+        if r.get("proximity_pts", 0) >= 11.5:  # near-max proximity band (92-99% of 20d high); see _proximity_score()
             r["confidence"] = r["confidence"] + 4
             r["flags"] = list(r.get("flags") or []) + ["NEAR_HIGH_COIL"]
             boosted += 1
@@ -1157,8 +1157,8 @@ def _action_style(action: str) -> str:
     return mapping.get(action.upper(), "white")
 
 
-def _conf_bar(conf: int) -> str:
-    filled = round(conf / 10)
+def _conf_bar(conf: float) -> str:
+    filled = max(0, min(10, round(conf / 10)))
     bar = "█" * filled + "░" * (10 - filled)
     if conf >= 70:
         color = "green"
@@ -1166,7 +1166,7 @@ def _conf_bar(conf: int) -> str:
         color = "yellow"
     else:
         color = "red"
-    return f"[{color}]{bar}[/{color}] [dim]{conf}[/dim]"
+    return f"[{color}]{bar}[/{color}] [dim]{conf:.1f}[/dim]"
 
 
 def _trend_bar(ts: int) -> str:
@@ -1542,7 +1542,7 @@ def _run_phase(
                 else:
                     conf = result["confidence"]
                     color = "green" if conf >= 60 else "yellow" if conf >= 40 else "white"
-                    log_line = f"[dim]{ticker:<8}[/dim] [{color}]conf={conf}[/{color}]"
+                    log_line = f"[dim]{ticker:<8}[/dim] [{color}]conf={conf:.1f}[/{color}]"
                 with _progress_lock:
                     progress.console.print(log_line)
                     progress.update(task, advance=1)
@@ -2402,7 +2402,9 @@ def _generate_plan_html(
         name = _esc(name_map.get(ticker, ticker))
         industry = _esc(industry_map.get(ticker, ""))
         action = r["action"]
-        conf = r.get("confidence", 0)
+        conf_raw = r.get("confidence", 0) or 0
+        conf = int(round(conf_raw))            # for data-conf (int slider)
+        conf_disp = f"{conf_raw:.1f}"          # visible 1-decimal display
         entry = r.get("entry_bid") or 0.0
         target = r.get("target") or 0.0
         stop = r.get("stop_loss") or 0.0
@@ -2529,7 +2531,7 @@ def _generate_plan_html(
       {concept_html}
       <div class="type-badges" style="margin:4px 12px 8px">{type_badge}{fund_badge}</div>
       <div class="metrics">
-        <div class="m"><div class="mv {conf_cls}">{conf}</div><div class="ml">信心分</div></div>
+        <div class="m"><div class="mv {conf_cls}">{conf_disp}</div><div class="ml">信心分</div></div>
         <div class="m"><div class="mv">{entry_s}</div><div class="ml">進場價</div></div>
         <div class="m"><div class="mv pos">{upside_s}</div><div class="ml">目標空間</div></div>
         <div class="m"><div class="mv neg">{stop_s}</div><div class="ml">止損</div></div>

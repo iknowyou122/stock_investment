@@ -50,28 +50,26 @@ class TestV23Core:
         assert any("GATE_FAIL:G1_ALREADY_BROKE_OUT" in f for f in bd.flags)
 
     def test_pillar3_proximity_at_92_percent(self):
-        """Proximity score: 92-99% range → 12 pts."""
+        """Phase 4.43 continuous: ratio=0.92 → (0.07/0.10)*12 = 8.4."""
         eng = TripleConfirmationEngine()
         hist = _make_history(30, base_vol=1_000_000)
-        # close 92 / high 100 = 0.92 (92% → 12 pts)
         ohlcv = _make_ohlcv(close=92.0, volume=1_000_000)
         vp = _make_volume_profile(twenty_day_high=100.0)
         chip = _make_chip_report()
 
         signal, bd = eng.score_with_breakdown(ohlcv, hist, chip, vp)
-        assert bd.proximity_pts == 12
+        assert bd.proximity_pts == pytest.approx(8.4, abs=0.05)
 
     def test_pillar3_proximity_at_88_percent(self):
-        """Proximity score: 88-92% range → 6 pts."""
+        """Phase 4.43 continuous: ratio=0.88 → (0.03/0.10)*12 = 3.6."""
         eng = TripleConfirmationEngine()
         hist = _make_history(30, base_vol=1_000_000)
-        # close 88 / high 100 = 0.88 (88% → 6 pts)
         ohlcv = _make_ohlcv(close=88.0, volume=1_000_000)
         vp = _make_volume_profile(twenty_day_high=100.0)
         chip = _make_chip_report()
 
         signal, bd = eng.score_with_breakdown(ohlcv, hist, chip, vp)
-        assert bd.proximity_pts == 6
+        assert bd.proximity_pts == pytest.approx(3.6, abs=0.05)
 
     def test_pillar3_bb_compression_tight(self):
         """BB compression: BB width < 8% → 10 pts."""

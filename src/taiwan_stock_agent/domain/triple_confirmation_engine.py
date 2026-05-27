@@ -85,7 +85,7 @@ Score breakdown (max 100 pts before risk deductions):
 
 Extensibility guide:
   Adding a new SCORING factor:
-    1. Add `new_factor_pts: int = 0` to _ScoreBreakdown
+    1. Add `new_factor_pts: float = 0.0` to _ScoreBreakdown
     2. Add it to `total` property sum (explicit enumeration)
     3. Add `_new_factor_score(self, ...) -> tuple[int, str | None]` method
     4. Call in _compute(), assign bd.new_factor_pts = pts
@@ -99,6 +99,7 @@ Extensibility guide:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -218,94 +219,94 @@ class _ScoreBreakdown:
     scoring_version: str = "v2"
 
     # --- Pillar 1: Momentum (max _PILLAR1_MAX = 35) ---
-    volume_ratio_pts: int = 0         # 0/4/8
-    price_direction_pts: int = 0      # 0/3
-    close_strength_pts: int = 0       # 0/2/4
-    vwap_advantage_pts: int = 0       # 0/6
-    trend_continuity_pts: int = 0     # 0/3/5
-    volume_escalation_pts: int = 0    # 0/3/5
-    rsi_momentum_pts: int = 0         # 0/4 — RSI(14) 40–65
-    dmi_initiation_pts: int = 0       # 0/2/4/6 — DMI: fresh cross/rising ADX → 6
-    volume_dryup_pts: int = 0         # 0/4/8 — last 5d avg vs 20d avg (lower = better)
-    volume_climax_pts: int = 0        # 0/4 — prior spike day + current dryup
-    ma5_walk_pts: int = 0             # 0/2 — close ≥ MA5 for ≥80% of last 10 days
+    volume_ratio_pts: float = 0.0         # 0/4/8
+    price_direction_pts: float = 0.0      # 0/3
+    close_strength_pts: float = 0.0       # 0/2/4
+    vwap_advantage_pts: float = 0.0       # 0/6
+    trend_continuity_pts: float = 0.0     # 0/3/5
+    volume_escalation_pts: float = 0.0    # 0/3/5
+    rsi_momentum_pts: float = 0.0         # 0/4 — RSI(14) 40–65
+    dmi_initiation_pts: float = 0.0       # 0/2/4/6 — DMI: fresh cross/rising ADX → 6
+    volume_dryup_pts: float = 0.0         # 0/4/8 — last 5d avg vs 20d avg (lower = better)
+    volume_climax_pts: float = 0.0        # 0/4 — prior spike day + current dryup
+    ma5_walk_pts: float = 0.0             # 0/2 — close ≥ MA5 for ≥80% of last 10 days
 
     # --- Pillar 2A: Chip paid (max _PILLAR2_PAID_MAX = 40) ---
-    breadth_pts: int = 0              # 0/5/10
-    concentration_pts: int = 0        # 0/5/10
-    continuity_pts: int = 0           # 0/3/5/8
-    daytrade_filter_pts: int = 0      # 0/7
-    foreign_broker_pts: int = 0       # 0/3/5
+    breadth_pts: float = 0.0              # 0/5/10
+    concentration_pts: float = 0.0        # 0/5/10
+    continuity_pts: float = 0.0           # 0/3/5/8
+    daytrade_filter_pts: float = 0.0      # 0/7
+    foreign_broker_pts: float = 0.0       # 0/3/5
 
     # --- Pillar 2B: Chip free (max _PILLAR2_FREE_MAX = 40) ---
-    foreign_strength_pts: int = 0         # 0/4/8/12
-    trust_strength_pts: int = 0           # 0/3/6/8
-    dealer_strength_pts: int = 0          # 0/2/4
-    institution_continuity_pts: int = 0   # 0–8
-    institution_consensus_pts: int = 0    # 0/4
-    margin_structure_pts: int = 0         # -4 to +8
-    margin_utilization_pts: int = 0       # -4/0/+4
-    sbl_pressure_pts: int = 0             # 0/-4/-8
-    cumul_flow_pts: int = 0               # 0/4/8 — 20日累計法人淨買超強度
-    consistent_accum_pts: int = 0         # 0/6 — 持續買進天數佔比+流向加速
-    inst_synergy_pts: int = 0             # 0/5/11 — 土洋合作 + 法人買超佔比
-    margin_declining_pts: int = 0         # 0/3 — 融資餘額今日下降（浮額洗盤）
-    ownership_concentration_pts: int = 0  # -10/0/8 — 集保大戶增/散戶退
-    obv_accumulation_pts: int = 0         # -3/0/2/3/5 — OBV 20d 斜率（暗吸+/出貨-）
-    vol_asymmetry_pts: int = 0            # -4/-2/0/2/4 — 上漲/下跌日均量比值
-    dual_inst_flow_pts: int = 0           # 0/3/5 — 外資+投信雙向 20D 累積
-    chip_cleanliness_pts: int = 0         # 0/4/7/10 — 籌碼乾淨度 K-of-6 複合分
-    super_large_pts: int = 0             # -4/0/+4/+8 — 千張大戶動向（持股比例+人數週變化）
-    turnover_pts: int = 0             # -3 to +4 — 換手率（籌碼鎖定/突破確認/出貨警告）
-    foreign_trend_pts: int = 0        # -2 to +4 — 外資W1/W2趨勢加速比
-    short_cover_pts: int = 0          # 0 to +4 — 融券回補率（空頭投降）
-    large_2w_trend_pts: int = 0       # -3 to +5 — 400張+大戶兩週持股趨勢
-    inst_accel_3d_pts: int = 0        # -2 to +4 — 法人短窗加速(3d/10d)
+    foreign_strength_pts: float = 0.0         # 0/4/8/12
+    trust_strength_pts: float = 0.0           # 0/3/6/8
+    dealer_strength_pts: float = 0.0          # 0/2/4
+    institution_continuity_pts: float = 0.0   # 0–8
+    institution_consensus_pts: float = 0.0    # 0/4
+    margin_structure_pts: float = 0.0         # -4 to +8
+    margin_utilization_pts: float = 0.0       # -4/0/+4
+    sbl_pressure_pts: float = 0.0             # 0/-4/-8
+    cumul_flow_pts: float = 0.0               # 0/4/8 — 20日累計法人淨買超強度
+    consistent_accum_pts: float = 0.0         # 0/6 — 持續買進天數佔比+流向加速
+    inst_synergy_pts: float = 0.0             # 0/5/11 — 土洋合作 + 法人買超佔比
+    margin_declining_pts: float = 0.0         # 0/3 — 融資餘額今日下降（浮額洗盤）
+    ownership_concentration_pts: float = 0.0  # -10/0/8 — 集保大戶增/散戶退
+    obv_accumulation_pts: float = 0.0         # -3/0/2/3/5 — OBV 20d 斜率（暗吸+/出貨-）
+    vol_asymmetry_pts: float = 0.0            # -4/-2/0/2/4 — 上漲/下跌日均量比值
+    dual_inst_flow_pts: float = 0.0           # 0/3/5 — 外資+投信雙向 20D 累積
+    chip_cleanliness_pts: float = 0.0         # 0/4/7/10 — 籌碼乾淨度 K-of-6 複合分
+    super_large_pts: float = 0.0             # -4/0/+4/+8 — 千張大戶動向（持股比例+人數週變化）
+    turnover_pts: float = 0.0             # -3 to +4 — 換手率（籌碼鎖定/突破確認/出貨警告）
+    foreign_trend_pts: float = 0.0        # -2 to +4 — 外資W1/W2趨勢加速比
+    short_cover_pts: float = 0.0          # 0 to +4 — 融券回補率（空頭投降）
+    large_2w_trend_pts: float = 0.0       # -3 to +5 — 400張+大戶兩週持股趨勢
+    inst_accel_3d_pts: float = 0.0        # -2 to +4 — 法人短窗加速(3d/10d)
     # --- 隱蔽吸籌因子 (Phase 4.32) ---
-    obv_stealth_pts: int = 0              # 0/3 — OBV 10d 斜率+ 且股價橫盤（偷吸信號）
-    margin_persist_decline_pts: int = 0   # 0/2/4 — 融資連跌天數（讀歷史快取）
-    holder_count_declining_pts: int = 0   # 0/3/5 — 總股東人數連週下降（TDCC，需付費）
-    chip_concentration_accel_pts: int = 0 # 0/3/6 — 大戶持股本週加速集中（CHIP_ACCEL/PRIME）
-    short_squeeze_setup_pts: int = 0      # 0/3/5 — 券資比高+空頭回補啟動（SHORT_SQUEEZE_SETUP）
-    stealth_accum_composite_pts: int = 0  # 0/6/10 — K-of-6 隱蔽吸籌複合（STEALTH_ACCUM/PRIME）
+    obv_stealth_pts: float = 0.0              # 0/3 — OBV 10d 斜率+ 且股價橫盤（偷吸信號）
+    margin_persist_decline_pts: float = 0.0   # 0/2/4 — 融資連跌天數（讀歷史快取）
+    holder_count_declining_pts: float = 0.0   # 0/3/5 — 總股東人數連週下降（TDCC，需付費）
+    chip_concentration_accel_pts: float = 0.0 # 0/3/6 — 大戶持股本週加速集中（CHIP_ACCEL/PRIME）
+    short_squeeze_setup_pts: float = 0.0      # 0/3/5 — 券資比高+空頭回補啟動（SHORT_SQUEEZE_SETUP）
+    stealth_accum_composite_pts: float = 0.0  # 0/6/10 — K-of-6 隱蔽吸籌複合（STEALTH_ACCUM/PRIME）
 
     # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 35) ---
-    proximity_pts: int = 0            # 0/6/12 — close distance to 20d_high
-    bb_compression_pts: int = 0       # 0/5/10 — BB width tightness
-    ma_convergence_pts: int = 0       # 0/4/8 — MA5/MA10/MA20 convergence
-    consolidation_weeks_pts: int = 0  # 0/3/6 — consecutive days in compression zone
-    inside_bar_streak_pts: int = 0    # 0–5 — narrowing bar count
-    prior_advance_pts: int = 0        # 0/2/5 — prior advance before consolidation
-    ma_alignment_pts: int = 0         # 0/5
-    ma20_slope_pts: int = 0           # 0/5
-    relative_strength_pts: int = 0    # 0/3/5
-    longterm_rs_pts: int = 0          # 0/3/5/8 — 60d+120d 加權超額報酬 vs TAIEX（強勢股長期領先）
-    near_highhist_pts: int = 0        # 0/3/5 — 距歷史高點（N日）接近度（近 ≥90%→3, ≥95%→5）
-    bb_squeeze_breakout_pts: int = 0  # 0/2/3/5 — (deprecated for compression)
-    bb_upper_walk_pts: int = 0        # 0/3 — proximity=12, 3/5 days near BB upper and rising
+    proximity_pts: float = 0.0            # 0/6/12 — close distance to 20d_high
+    bb_compression_pts: float = 0.0       # 0/5/10 — BB width tightness
+    ma_convergence_pts: float = 0.0       # 0/4/8 — MA5/MA10/MA20 convergence
+    consolidation_weeks_pts: float = 0.0  # 0/3/6 — consecutive days in compression zone
+    inside_bar_streak_pts: float = 0.0    # 0–5 — narrowing bar count
+    prior_advance_pts: float = 0.0        # 0/2/5 — prior advance before consolidation
+    ma_alignment_pts: float = 0.0         # 0/5
+    ma20_slope_pts: float = 0.0           # 0/5
+    relative_strength_pts: float = 0.0    # 0/3/5
+    longterm_rs_pts: float = 0.0          # 0/3/5/8 — 60d+120d 加權超額報酬 vs TAIEX（強勢股長期領先）
+    near_highhist_pts: float = 0.0        # 0/3/5 — 距歷史高點（N日）接近度（近 ≥90%→3, ≥95%→5）
+    bb_squeeze_breakout_pts: float = 0.0  # 0/2/3/5 — (deprecated for compression)
+    bb_upper_walk_pts: float = 0.0        # 0/3 — proximity=12, 3/5 days near BB upper and rising
 
     # --- Pillar 4: Accumulation Detection (max 13) ---
-    emerging_setup_pts: int = 0       # 0/10
-    pullback_setup_pts: int = 0       # 0/8
-    bb_squeeze_coiling_pts: int = 0   # 0/3
+    emerging_setup_pts: float = 0.0       # 0/10
+    pullback_setup_pts: float = 0.0       # 0/8
+    bb_squeeze_coiling_pts: float = 0.0   # 0/3
 
     # --- Risk deductions (stored as non-negative values; subtracted in total) ---
-    daytrade_risk: int = 0            # 0 or 25
-    long_upper_shadow: int = 0        # 0 or 8
-    overheat_ma20: int = 0            # 0 or 5
-    overheat_ma60: int = 0            # 0 or 5
-    daytrade_heat: int = 0            # 0 or 5
-    sbl_breakout_fail: int = 0        # 0 or 8
-    margin_chase_heat: int = 0        # 0 or 5
-    adx_exhaustion_deduction: int = 0   # 0 or 6 — ADX > 55
-    dmi_divergence_deduction: int = 0   # 0 or 4 — +DI falling while -DI rising
-    vol_consecutive_surge: int = 0      # 0 or 5 — 3+ consecutive vol surge days (框架第3根不追)
-    recent_advance_deduction: int = 0   # 0/5/10 — 近20日從低點漲幅過大（高基期追高懲罰）
+    daytrade_risk: float = 0.0            # 0 or 25
+    long_upper_shadow: float = 0.0        # 0 or 8
+    overheat_ma20: float = 0.0            # 0 or 5
+    overheat_ma60: float = 0.0            # 0 or 5
+    daytrade_heat: float = 0.0            # 0 or 5
+    sbl_breakout_fail: float = 0.0        # 0 or 8
+    margin_chase_heat: float = 0.0        # 0 or 5
+    adx_exhaustion_deduction: float = 0.0   # 0 or 6 — ADX > 55
+    dmi_divergence_deduction: float = 0.0   # 0 or 4 — +DI falling while -DI rising
+    vol_consecutive_surge: float = 0.0      # 0 or 5 — 3+ consecutive vol surge days (框架第3根不追)
+    recent_advance_deduction: float = 0.0   # 0/5/10 — 近20日從低點漲幅過大（高基期追高懲罰）
 
     flags: list[str] = field(default_factory=list)
 
     @property
-    def total(self) -> int:
+    def total(self) -> float:
         """Score with per-pillar caps enforced. Uses momentum_pts/chip_pts/structure_pts helpers."""
         p1 = min(_PILLAR1_MAX, self.momentum_pts)
         p2 = min(_PILLAR2_FREE_MAX, self.chip_pts)   # paid/free caps both = 40
@@ -328,10 +329,10 @@ class _ScoreBreakdown:
             + self.vol_consecutive_surge
             + self.recent_advance_deduction
         )
-        return max(0, p1 + p2 + p3 + p4 - risk)
+        return max(0.0, p1 + p2 + p3 + p4 - risk)
 
     @property
-    def chip_pts(self) -> int:
+    def chip_pts(self) -> float:
         """Total chip pillar points from whichever path was used (paid or free)."""
         return (
             # Paid
@@ -373,7 +374,7 @@ class _ScoreBreakdown:
         )
 
     @property
-    def momentum_pts(self) -> int:
+    def momentum_pts(self) -> float:
         """Total Pillar 1 points."""
         return (
             self.volume_ratio_pts
@@ -390,7 +391,7 @@ class _ScoreBreakdown:
         )
 
     @property
-    def structure_pts(self) -> int:
+    def structure_pts(self) -> float:
         """Total Pillar 3 points."""
         return (
             self.proximity_pts
@@ -847,7 +848,7 @@ class TripleConfirmationEngine:
 
         # --- Pillar 3: Compression Structure ---
         bd.proximity_pts = self._proximity_score(ohlcv.close, volume_profile.twenty_day_high)
-        if bd.proximity_pts == 12:
+        if bd.proximity_pts >= 11.5:
             bb_walk = self._bb_upper_walk_score(ohlcv_history)
             bd.bb_upper_walk_pts = bb_walk
             if bb_walk > 0:
@@ -934,22 +935,21 @@ class TripleConfirmationEngine:
     # Pillar 1: Momentum scoring methods
     # ------------------------------------------------------------------
 
-    def _volume_ratio_score(self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]) -> tuple[int, str | None]:
-        """Volume ratio vs 20d avg.
-        <1.2 → 0, 1.2-2.0 → 4, 2.0-3.0 → 8 (最佳爆量區間),
-        ≥3.0 → 5 + VOL_EXHAUSTION_RISK (極端量：警戒噴出型).
+    def _volume_ratio_score(self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]) -> tuple[float, str | None]:
+        """Volume ratio vs 20d avg — continuous curve.
+        Log curve: 1x→0, 2x→~5.0, 3x→8.0 (peak); ≥3x decay 8→4 by 6x + VOL_EXHAUSTION_RISK.
         """
         vol_20ma = self._volume_20ma(history)
         if vol_20ma is None or vol_20ma == 0:
-            return 0, None
+            return 0.0, None
         ratio = ohlcv.volume / vol_20ma
+        if ratio < 1.0:
+            return 0.0, None
         if ratio >= 3.0:
-            return 5, "VOL_EXHAUSTION_RISK"
-        if ratio >= 2.0:
-            return 8, None
-        if ratio >= 1.2:
-            return 4, None
-        return 0, None
+            pts = max(4.0, 8.0 - (ratio - 3.0) * 1.0)
+            return round(pts, 2), "VOL_EXHAUSTION_RISK"
+        pts = math.log(ratio) / math.log(3.0) * 8.0
+        return round(pts, 2), None
 
     def _price_direction_score(self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]) -> int:
         """Price direction: close >= prev_close → +3."""
@@ -959,23 +959,19 @@ class TripleConfirmationEngine:
         prev_close = max(prev_day, key=lambda x: x.trade_date).close
         return 3 if ohlcv.close >= prev_close else 0
 
-    def _close_strength_score(self, ohlcv: DailyOHLCV) -> tuple[int, str | None]:
-        """K線收盤強弱比: (close-low)/(high-low).
-        ≥0.8 → +4 (買盤全日主導), 0.6-0.8 → +2 (健康收盤), 0.4-0.6 → 0 (觀察),
-        <0.4 → -2 (出貨型：開高走低).
+    def _close_strength_score(self, ohlcv: DailyOHLCV) -> tuple[float, str | None]:
+        """K線收盤強弱比 — continuous: pts = (ratio - 0.5) * 8, clamp [-2, 4].
+        ratio 0.5 → 0, 1.0 → 4.0, 0.0 → −2.0 (clamp). flag CLOSE_WEAK_OUT_PATTERN if < 0.4.
         Guard: high==low → 0, flag DOJI_OR_HALT.
         """
         bar_range = ohlcv.high - ohlcv.low
         if bar_range <= 0:
-            return 0, "DOJI_OR_HALT"
+            return 0.0, "DOJI_OR_HALT"
         ratio = (ohlcv.close - ohlcv.low) / bar_range
-        if ratio >= 0.8:
-            return 4, None
-        if ratio >= 0.6:
-            return 2, None
-        if ratio >= 0.4:
-            return 0, None
-        return -2, "CLOSE_WEAK_OUT_PATTERN"
+        pts = (ratio - 0.5) * 8.0
+        pts = max(-2.0, min(4.0, pts))
+        flag = "CLOSE_WEAK_OUT_PATTERN" if ratio < 0.4 else None
+        return round(pts, 2), flag
 
     def _close_strength_ratio(self, ohlcv: DailyOHLCV) -> float | None:
         """Return (close-low)/(high-low) or None when high==low."""
@@ -985,22 +981,25 @@ class TripleConfirmationEngine:
         return (ohlcv.close - ohlcv.low) / bar_range
 
     @staticmethod
-    def _volume_dryup_score(history: list[DailyOHLCV]) -> int:
-        """Reward volume drying up. Max 8 pts."""
+    def _volume_dryup_score(history: list[DailyOHLCV]) -> float:
+        """Reward volume drying up — continuous. Max 8 pts.
+        ratio = avg_5d/avg_20d; 1.0→0, 0.4→8 (linear), clamp.
+        """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         if len(sorted_h) < 20:
-            return 0
+            return 0.0
         vols = [d.volume for d in sorted_h]
         avg_20d = sum(vols[-20:]) / 20
         if avg_20d <= 0:
-            return 0
+            return 0.0
         avg_5d = sum(vols[-5:]) / 5
         ratio = avg_5d / avg_20d
-        if ratio < 0.60:
-            return 8
-        if ratio < 0.80:
-            return 4
-        return 0
+        if ratio >= 1.0:
+            return 0.0
+        if ratio <= 0.4:
+            return 8.0
+        pts = (1.0 - ratio) / 0.6 * 8.0
+        return round(pts, 2)
 
     @staticmethod
     def _obv_accumulation_score(
@@ -1154,20 +1153,26 @@ class TripleConfirmationEngine:
             return 3
         return 0
 
-    def _rsi_momentum_score(self, history: list[DailyOHLCV]) -> int:
-        """RSI(14) momentum zone: 40 ≤ RSI ≤ 65 → +4.
+    def _rsi_momentum_score(self, history: list[DailyOHLCV]) -> float:
+        """RSI(14) momentum zone — continuous triangular curve.
 
-        Rationale: this range indicates healthy recovery momentum — stock has been
-        forming a base or rebounding, but has not yet entered overbought territory.
+        Peak at RSI 50–60 (4.0). Tapers linearly: 40→0 → 50→4, 60→4 → 70→0.
+        Outside 40–70: 0.
         """
         recent = sorted(history, key=lambda x: x.trade_date)
         if len(recent) < 16:
-            return 0
+            return 0.0
         closes = pd.Series([d.close for d in recent])
         rsi = self._rsi(closes, period=14)
         if rsi is None:
-            return 0
-        return 4 if 40.0 <= rsi <= 65.0 else 0
+            return 0.0
+        if 50.0 <= rsi <= 60.0:
+            return 4.0
+        if 40.0 <= rsi < 50.0:
+            return round((rsi - 40.0) / 10.0 * 4.0, 2)
+        if 60.0 < rsi <= 70.0:
+            return round((70.0 - rsi) / 10.0 * 4.0, 2)
+        return 0.0
 
     def _volume_escalation_score(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
@@ -1356,15 +1361,23 @@ class TripleConfirmationEngine:
                 bd.sbl_pressure_pts = -4
                 bd.flags.append(f"SBL_MODERATE: {proxy.sbl_ratio:.1%}")
 
-        # 9. 20日累計法人淨買超強度
+        # 9. 20日累計法人淨買超強度 — 連續評分
         cumul_net = proxy.cumul_foreign_20d + proxy.cumul_trust_20d
         if avg_vol > 0 and cumul_net > 0:
             cumul_ratio = cumul_net / avg_vol
+            if cumul_ratio >= 1.0:
+                bd.cumul_flow_pts = 8.0
+            elif cumul_ratio >= 0.1:
+                # log map: 0.1→2.0, 0.5→~6.0, 1.0→8.0
+                bd.cumul_flow_pts = round(
+                    min(8.0, math.log(cumul_ratio / 0.1) / math.log(10.0) * 6.0 + 2.0), 2
+                )
+            else:
+                bd.cumul_flow_pts = round(cumul_ratio / 0.1 * 2.0, 2)
+            # Keep flag thresholds for HTML readability
             if cumul_ratio >= 0.5:
-                bd.cumul_flow_pts = 8
                 bd.flags.append(f"CUMUL_FLOW_HOT:{cumul_ratio:.1f}x")
             elif cumul_ratio >= 0.2:
-                bd.cumul_flow_pts = 4
                 bd.flags.append(f"CUMUL_FLOW_WARM:{cumul_ratio:.1f}x")
 
         # 10. 持續蓄積：買超天數佔比高 + 近期加速
@@ -1441,23 +1454,26 @@ class TripleConfirmationEngine:
         avg_20d_vol: int,
         tiers: tuple,
         points: tuple,
-    ) -> int:
-        """Compute ratio-based institution strength points.
+    ) -> float:
+        """Compute ratio-based institution strength points — continuous linear interpolation.
 
-        tiers: (lower_bound_1, lower_bound_2, ...) — ratios above which to award each tier
-        points: (pts_at_zero_or_below, pts_tier1, pts_tier2, ...)
+        tiers: (..., max_tier) — ratios above which to award max points
+        points: (pts_at_zero, ..., pts_max) — only the final max_pts is used for scaling
+        Returns float in [0, points[-1]] linearly interpolated by ratio / max_tier.
         """
         if net_buy <= 0:
-            return 0
+            return 0.0
         if avg_20d_vol <= 0:
             # No volume reference — binary: bought → lowest positive tier
-            return points[1] if len(points) > 1 else 0
+            return float(points[1]) if len(points) > 1 else 0.0
         ratio = net_buy / avg_20d_vol
-        # Walk tiers from highest to lowest
-        for i in range(len(tiers) - 1, -1, -1):
-            if ratio > tiers[i]:
-                return points[i + 1]
-        return points[0]
+        max_pts = float(points[-1])
+        max_tier = float(tiers[-1])
+        if max_tier <= 0:
+            return 0.0
+        if ratio >= max_tier:
+            return max_pts
+        return round(ratio / max_tier * max_pts, 2)
 
     def _margin_structure_pts(self, proxy: TWSEChipProxy) -> int:
         """融資結構 scoring: price direction × margin change.
@@ -1524,29 +1540,36 @@ class TripleConfirmationEngine:
         return sum(trs) / len(trs) if trs else None
 
     @staticmethod
-    def _proximity_score(close: float, twenty_day_high: float) -> int:
-        """Reward stocks just below 20d resistance. Max 12 pts."""
+    def _proximity_score(close: float, twenty_day_high: float) -> float:
+        """Reward stocks just below 20d resistance — continuous tent.
+        0.85→0, 0.95→12 (peak), 0.99→6, ≥0.99 or <0.85 → 0.
+        """
         if twenty_day_high <= 0:
-            return 0
+            return 0.0
         ratio = close / twenty_day_high
-        if 0.92 <= ratio < 0.99:
-            return 12
-        if 0.88 <= ratio < 0.92:
-            return 6
-        return 0
+        if ratio >= 0.99 or ratio < 0.85:
+            return 0.0
+        if ratio <= 0.95:
+            pts = (ratio - 0.85) / 0.10 * 12.0
+        else:
+            pts = 12.0 - (ratio - 0.95) / 0.04 * 6.0
+        return round(max(0.0, min(12.0, pts)), 2)
 
     @staticmethod
-    def _bb_compression_score(history: list[DailyOHLCV]) -> int:
-        """Reward tight BB bands. Max 10 pts."""
+    def _bb_compression_score(history: list[DailyOHLCV]) -> float:
+        """Reward tight BB bands — continuous linear. Max 10 pts.
+        0.04→10, 0.16→0; linear inside.
+        """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         _, _, bb_width_raw, _ = TripleConfirmationEngine._calculate_bb(sorted_h)
         if bb_width_raw is None:
-            return 0
-        if bb_width_raw < 0.08:
-            return 10
-        if bb_width_raw < 0.12:
-            return 5
-        return 0
+            return 0.0
+        if bb_width_raw >= 0.16:
+            return 0.0
+        if bb_width_raw <= 0.04:
+            return 10.0
+        pts = (0.16 - bb_width_raw) / 0.12 * 10.0
+        return round(pts, 2)
 
     @staticmethod
     def _ma5_walk_score(history: list[DailyOHLCV], n: int = 10) -> int:
@@ -2294,12 +2317,12 @@ class TripleConfirmationEngine:
         return "neutral"
 
     def _map_action(
-        self, confidence: int, bd: _ScoreBreakdown | None = None, chip_pts: int = 0
+        self, confidence: int, bd: _ScoreBreakdown | None = None, chip_pts: float = 0.0
     ) -> str:
         """Map confidence score to action label using regime-adjusted thresholds.
 
-        When proximity_pts == 12 (stock in 92-99% zone), reduce the LONG threshold
-        by 5 for uptrend and neutral regimes. Downtrend keeps the conservative 70.
+        When proximity_pts is near max (>= 11.5, stock near 20d high), reduce the LONG
+        threshold by 5 for uptrend and neutral regimes. Downtrend keeps the conservative 70.
         """
         taiex = getattr(self, "_taiex_history", [])
         regime = self._compute_taiex_regime(taiex)
@@ -2310,7 +2333,7 @@ class TripleConfirmationEngine:
         else:
             long_threshold = _LONG_THRESHOLD_NEUTRAL
 
-        if bd is not None and bd.proximity_pts == 12 and regime != "downtrend":
+        if bd is not None and bd.proximity_pts >= 11.5 and regime != "downtrend":
             long_threshold = max(long_threshold - 5, _WATCH_MIN + 1)
 
         # Cross-pillar minimum: 任一 Pillar 過弱 → 最高只能 WATCH

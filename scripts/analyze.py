@@ -698,10 +698,12 @@ def main() -> None:
 
     # ── Header ───────────────────────────────────────────────────────────────
     color, label = _action_style(signal.action)
-    conf_bar = "█" * (signal.confidence // 10) + "░" * (10 - signal.confidence // 10)
+    _conf_int = int(signal.confidence)
+    _filled = max(0, min(10, _conf_int // 10))
+    conf_bar = "█" * _filled + "░" * (10 - _filled)
     title_text = (
         f"[bold]{header_name}[/bold]  [{color}]{label}[/{color}]  "
-        f"信心指數 [bold cyan]{signal.confidence}[/bold cyan]/100  "
+        f"信心指數 [bold cyan]{signal.confidence:.1f}[/bold cyan]/100  "
         f"[cyan]{conf_bar}[/cyan]  [dim]{market} · {signal.date}[/dim]"
     )
     if signal.halt_flag:

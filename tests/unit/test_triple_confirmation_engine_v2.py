@@ -486,22 +486,21 @@ class TestCloseStrength:
         assert pts == 4
         assert flag is None
 
-    def test_close_at_0_8_gives_4(self):
-        """ratio ≥ 0.8 → +4 (boundary)."""
+    def test_close_at_0_9_gives_continuous(self):
+        """Phase 4.43: continuous (ratio-0.5)*8, clamp [-2, 4].
+        ratio = 0.9 → pts = (0.9-0.5)*8 = 3.2."""
         engine = TripleConfirmationEngine()
-        # ratio = (100.8 - 99) / (101 - 99) = 1.8/2.0 = 0.9
         ohlcv = _make_ohlcv(close=100.8, high=101.0, low=99.0)
         pts, flag = engine._close_strength_score(ohlcv)
-        assert pts == 4
+        assert pts == pytest.approx(3.2, abs=0.05)
         assert flag is None
 
-    def test_close_in_0_6_to_0_8_gives_2(self):
-        """ratio in 0.6–0.8 → +2 (健康收盤)."""
+    def test_close_at_0_6_gives_continuous(self):
+        """Phase 4.43: ratio = 0.6 → pts = 0.8."""
         engine = TripleConfirmationEngine()
-        # ratio = (100.2 - 99) / (101 - 99) = 1.2/2.0 = 0.6
         ohlcv = _make_ohlcv(close=100.2, high=101.0, low=99.0)
         pts, flag = engine._close_strength_score(ohlcv)
-        assert pts == 2
+        assert pts == pytest.approx(0.8, abs=0.05)
         assert flag is None
 
     def test_close_in_0_4_to_0_6_gives_zero(self):
@@ -540,57 +539,62 @@ class TestVolumeRatio:
             for i in range(20)
         ]
 
-    def test_below_1_2x_gives_zero(self):
+    def test_below_1_0x_gives_zero(self):
+        """Phase 4.43: continuous — ratio < 1.0 → 0."""
         engine = TripleConfirmationEngine()
         history = self._history(10_000)
-        ohlcv = _make_ohlcv(volume=11_999)  # 1.1999x → 0
+        ohlcv = _make_ohlcv(volume=9_000)  # 0.9x → 0
         pts, flag = engine._volume_ratio_score(ohlcv, history)
-        assert pts == 0 and flag is None
+        assert pts == pytest.approx(0.0, abs=0.05) and flag is None
 
-    def test_at_1_2x_gives_4(self):
+    def test_at_1_2x_continuous(self):
+        """Phase 4.43: log(1.2)/log(3)*8 ≈ 1.33."""
         engine = TripleConfirmationEngine()
         history = self._history(10_000)
-        ohlcv = _make_ohlcv(volume=12_000)  # exactly 1.2x → 4
+        ohlcv = _make_ohlcv(volume=12_000)
         pts, flag = engine._volume_ratio_score(ohlcv, history)
-        assert pts == 4 and flag is None
+        assert pts == pytest.approx(1.33, abs=0.05) and flag is None
 
-    def test_between_1_2x_and_2_0x_gives_4(self):
+    def test_at_1_5x_continuous(self):
+        """Phase 4.43: log(1.5)/log(3)*8 ≈ 2.95."""
         engine = TripleConfirmationEngine()
         history = self._history(10_000)
-        ohlcv = _make_ohlcv(volume=15_000)  # 1.5x → 4
+        ohlcv = _make_ohlcv(volume=15_000)
         pts, flag = engine._volume_ratio_score(ohlcv, history)
-        assert pts == 4 and flag is None
+        assert pts == pytest.approx(2.95, abs=0.05) and flag is None
 
-    def test_at_2_0x_gives_8(self):
+    def test_at_2_0x_continuous(self):
+        """Phase 4.43: log(2)/log(3)*8 ≈ 5.05."""
         engine = TripleConfirmationEngine()
         history = self._history(10_000)
-        ohlcv = _make_ohlcv(volume=20_000)  # exactly 2.0x → 8
+        ohlcv = _make_ohlcv(volume=20_000)
         pts, flag = engine._volume_ratio_score(ohlcv, history)
-        assert pts == 8 and flag is None
+        assert pts == pytest.approx(5.05, abs=0.05) and flag is None
 
-    def test_between_2_0x_and_3_0x_gives_8(self):
+    def test_at_2_5x_continuous(self):
+        """Phase 4.43: log(2.5)/log(3)*8 ≈ 6.67."""
         engine = TripleConfirmationEngine()
         history = self._history(10_000)
-        ohlcv = _make_ohlcv(volume=25_000)  # 2.5x → 8
+        ohlcv = _make_ohlcv(volume=25_000)
         pts, flag = engine._volume_ratio_score(ohlcv, history)
-        assert pts == 8 and flag is None
+        assert pts == pytest.approx(6.67, abs=0.05) and flag is None
 
-    def test_at_3_0x_gives_5_and_exhaustion_flag(self):
-        """≥3× is 噴出型 warning: 5 pts (not 8) + VOL_EXHAUSTION_RISK flag."""
+    def test_at_3_0x_gives_peak_with_exhaustion_flag(self):
+        """Phase 4.43: 3.0x = peak 8.0 with VOL_EXHAUSTION_RISK flag."""
         engine = TripleConfirmationEngine()
         history = self._history(10_000)
-        ohlcv = _make_ohlcv(volume=30_000)  # exactly 3.0x
+        ohlcv = _make_ohlcv(volume=30_000)
         pts, flag = engine._volume_ratio_score(ohlcv, history)
-        assert pts == 5
+        assert pts == pytest.approx(8.0, abs=0.05)
         assert flag == "VOL_EXHAUSTION_RISK"
 
-    def test_above_3_0x_gives_5_and_exhaustion_flag(self):
-        """5× surge still gives 5 pts with warning, not max."""
+    def test_above_3_0x_decays_with_exhaustion_flag(self):
+        """Phase 4.43: 5x → max(4, 8-2) = 6.0, exhaust flag."""
         engine = TripleConfirmationEngine()
         history = self._history(10_000)
-        ohlcv = _make_ohlcv(volume=50_000)  # 5x
+        ohlcv = _make_ohlcv(volume=50_000)
         pts, flag = engine._volume_ratio_score(ohlcv, history)
-        assert pts == 5
+        assert pts == pytest.approx(6.0, abs=0.05)
         assert flag == "VOL_EXHAUSTION_RISK"
 
     def test_insufficient_history_gives_zero(self):
@@ -1727,17 +1731,22 @@ class TestPillar3Compression:
                           open=close, high=close+0.3, low=close-0.3, close=close, volume=5000))
         return result
 
-    def test_proximity_pts_max_when_near_high(self):
-        """close/20d_high in 92-99% -> 12 pts."""
+    def test_proximity_pts_at_0_97(self):
+        """Phase 4.43 continuous: ratio=0.97 is past peak (0.95), pts = 12 - (0.02/0.04)*6 = 9.0."""
         eng = TripleConfirmationEngine()
-        # close=97, 20d_high=100 -> ratio=0.97 -> in 92-99% zone
         pts = eng._proximity_score(close=97.0, twenty_day_high=100.0)
-        assert pts == 12
+        assert pts == pytest.approx(9.0, abs=0.05)
 
-    def test_proximity_pts_mid_when_88_92(self):
-        """close/20d_high in 88-92% -> 6 pts."""
+    def test_proximity_pts_at_0_95_peak(self):
+        """Phase 4.43 continuous: ratio=0.95 → peak 12.0."""
+        eng = TripleConfirmationEngine()
+        pts = eng._proximity_score(close=95.0, twenty_day_high=100.0)
+        assert pts == pytest.approx(12.0, abs=0.05)
+
+    def test_proximity_pts_at_0_90(self):
+        """Phase 4.43 continuous: ratio=0.90 → (0.05/0.10)*12 = 6.0."""
         pts = TripleConfirmationEngine()._proximity_score(close=90.0, twenty_day_high=100.0)
-        assert pts == 6
+        assert pts == pytest.approx(6.0, abs=0.05)
 
     def test_proximity_pts_zero_below_85(self):
         pts = TripleConfirmationEngine()._proximity_score(close=80.0, twenty_day_high=100.0)

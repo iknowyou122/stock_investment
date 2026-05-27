@@ -45,7 +45,7 @@ def record_signal(signal: SignalOutput, source: str = "live") -> str:
                     signal_id,
                     signal.ticker,
                     signal.date,
-                    signal.confidence,
+                    int(round(signal.confidence)),  # DB stores int; float precision retained in score_breakdown
                     signal.action,
                     signal.execution_plan.entry_bid_limit,
                     signal.execution_plan.stop_loss,

@@ -158,7 +158,7 @@ class SignalOutput(BaseModel):
     ticker: str
     date: date
     action: Literal["LONG", "WATCH", "CAUTION"]
-    confidence: int = Field(ge=0, le=100)
+    confidence: float = Field(ge=0)
     reasoning: Reasoning
     execution_plan: ExecutionPlan
     halt_flag: bool = False
