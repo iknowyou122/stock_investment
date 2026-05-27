@@ -154,27 +154,26 @@ class VCPDetector:
         if dist_from_trough > 0.08:
             return None
 
-        # ── Scoring ───────────────────────────────────────────────────────
+        # ── Scoring — Phase 4.46 continuous ──────────────────────────────
         flags: list[str] = ["VCP"]
-        score = 0
+        score = 0.0
 
-        # 1. Contraction count (0–25 pts)
+        # 1. Contraction count — 2→15, 3→25, 4+→capped 25
         n_contractions = len(valid_contractions)
         if n_contractions >= 3:
-            score += 25
+            score += 25.0
             flags.append(f"VCP_{n_contractions}C")
         else:
-            score += 15
+            score += 15.0
             flags.append("VCP_2C")
 
-        # 2. BB compression (0–20 pts)
+        # 2. BB compression — continuous on rank_pct: 0.50→0, 0.30→6, 0.15→12, 0.05→20
         if len(closes) >= 20:
             try:
                 recent_std = stdev(closes[-20:])
                 recent_mid = mean(closes[-20:])
                 bb_width = (4 * recent_std) / recent_mid if recent_mid > 0 else 1.0
 
-                # Compare to 60D history of BB widths
                 bb_widths_hist: list[float] = []
                 for i in range(20, min(60, len(closes))):
                     w = closes[-(i + 1):-1] if i < len(closes) - 1 else closes[-i:]
@@ -186,17 +185,23 @@ class VCPDetector:
                 if bb_widths_hist:
                     rank_pct = sum(1 for w in bb_widths_hist if w < bb_width) / len(bb_widths_hist)
                     if rank_pct <= 0.15:
-                        score += 20
+                        # 0.05→20, 0.15→12 linear
+                        if rank_pct <= 0.05:
+                            score += 20.0
+                        else:
+                            score += round(12.0 + (0.15 - rank_pct) / 0.10 * 8.0, 2)
                         flags.append("BB_VERY_TIGHT")
                     elif rank_pct <= 0.30:
-                        score += 12
+                        # 0.15→12, 0.30→6 linear
+                        score += round(6.0 + (0.30 - rank_pct) / 0.15 * 6.0, 2)
                         flags.append("BB_TIGHT")
                     elif rank_pct <= 0.50:
-                        score += 6
+                        # 0.30→6, 0.50→0 linear
+                        score += round((0.50 - rank_pct) / 0.20 * 6.0, 2)
             except Exception:
                 pass
 
-        # 3. Volume dry-up at troughs (0–20 pts)
+        # 3. Volume dry-up at troughs — continuous on ratio
         if len(valid_contractions) >= 2:
             prior = valid_contractions[-2]
             trough_vol_ratio = (
@@ -205,39 +210,55 @@ class VCPDetector:
                 else 1.0
             )
             if trough_vol_ratio < 0.40:
-                score += 20
+                # 0.20→20, 0.40→12 linear
+                if trough_vol_ratio <= 0.20:
+                    score += 20.0
+                else:
+                    score += round(12.0 + (0.40 - trough_vol_ratio) / 0.20 * 8.0, 2)
                 flags.append(f"TROUGH_VOL_DRYUP:{trough_vol_ratio:.2f}x")
             elif trough_vol_ratio < 0.65:
-                score += 12
+                # 0.40→12, 0.65→6 linear
+                score += round(6.0 + (0.65 - trough_vol_ratio) / 0.25 * 6.0, 2)
                 flags.append(f"TROUGH_VOL_LOW:{trough_vol_ratio:.2f}x")
             elif trough_vol_ratio < 0.85:
-                score += 6
+                # 0.65→6, 0.85→0 linear
+                score += round((0.85 - trough_vol_ratio) / 0.20 * 6.0, 2)
                 flags.append(f"TROUGH_VOL_DECL:{trough_vol_ratio:.2f}x")
 
-        # 4. Pullback depth tightness (0–15 pts)
+        # 4. Pullback depth tightness — continuous on pct
         pullback_pct = latest["pullback_pct"]
         if pullback_pct < 0.08:
-            score += 15
+            # 0.04→15, 0.08→8 linear
+            if pullback_pct <= 0.04:
+                score += 15.0
+            else:
+                score += round(8.0 + (0.08 - pullback_pct) / 0.04 * 7.0, 2)
             flags.append(f"PULLBACK_TIGHT:{pullback_pct:.1%}")
         elif pullback_pct < 0.12:
-            score += 8
+            # 0.08→8, 0.12→0 linear
+            score += round((0.12 - pullback_pct) / 0.04 * 8.0, 2)
             flags.append(f"PULLBACK_MOD:{pullback_pct:.1%}")
 
-        # 5. MA alignment (0–15 pts)
+        # 5. MA alignment — partial credit (7.5 per pair)
         if len(closes) >= 60:
             ma20 = mean(closes[-20:])
-            if ma5 > ma20 > ma60:
-                score += 15
+            pair_pts = 0.0
+            if ma5 > ma20:
+                pair_pts += 7.5
+            if ma20 > ma60:
+                pair_pts += 7.5
+            if pair_pts >= 15.0:
                 flags.append("MA_ALIGNED")
-            elif ma20 > ma60:
-                score += 8
+            elif pair_pts > 0:
                 flags.append("MA_PARTIAL")
+            score += pair_pts
 
+        score = round(score, 2)
         if score < self.MIN_SCORE:
             return None
 
         return {
-            "score": max(0, score),
+            "score": round(max(0.0, score), 2),
             "flags": flags,
             "contractions": n_contractions,
             "latest_pullback_pct": round(latest["pullback_pct"] * 100, 1),

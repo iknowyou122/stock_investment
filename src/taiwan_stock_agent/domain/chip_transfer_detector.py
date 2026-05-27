@@ -80,31 +80,39 @@ class ChipTransferDetector:
             if len(signals_met) < 2:
                 return None
 
-            # Scoring in OHLCV-only mode
+            # Scoring in OHLCV-only mode — Phase 4.46 continuous
             flags: list[str] = ["CHIP_TRANSFER"]
-            score = 0
+            score = 0.0
 
-            # Price stability
+            # Price stability — 0.10→0, 0.05→12, 0.02→20 linear
             if price_range_pct < 0.05:
-                score += 20
+                if price_range_pct <= 0.02:
+                    score += 20.0
+                else:
+                    score += round(12.0 + (0.05 - price_range_pct) / 0.03 * 8.0, 2)
                 flags.append(f"PRICE_STABLE_TIGHT:{price_range_pct:.1%}")
             elif signal_b:
-                score += 12
+                # 0.10→0, 0.05→12 linear
+                score += round((0.10 - price_range_pct) / 0.05 * 12.0, 2)
                 flags.append(f"PRICE_STABLE:{price_range_pct:.1%}")
 
-            # Volume contraction
+            # Volume contraction — 0.70→0, 0.50→6, 0.30→10 linear
             if vol_ratio < 0.50:
-                score += 10
+                if vol_ratio <= 0.30:
+                    score += 10.0
+                else:
+                    score += round(6.0 + (0.50 - vol_ratio) / 0.20 * 4.0, 2)
                 flags.append("VOL_CONTRACT_STRONG")
             elif vol_ratio < 0.70:
-                score += 6
+                score += round((0.70 - vol_ratio) / 0.20 * 6.0, 2)
                 flags.append("VOL_CONTRACT")
 
+            score = round(score, 2)
             if score < self.MIN_SCORE:
                 return None
 
             return {
-                "score": max(0, score),
+                "score": round(max(0.0, score), 2),
                 "flags": flags,
                 "price_range_pct": round(price_range_pct * 100, 1),
                 "vol_ratio": round(vol_ratio, 2),
@@ -148,73 +156,88 @@ class ChipTransferDetector:
         if len(signals_met) < 3:
             return None
 
-        # ── Scoring ───────────────────────────────────────────────────────
+        # ── Scoring — Phase 4.46 continuous ──────────────────────────────
         flags = ["CHIP_TRANSFER"]
-        score = 0
+        score = 0.0
 
-        # 1. Margin decline days (0–20 pts)
+        # 1. Margin decline days — 0→0, 5→12, 10+→20 linear
         if margin_streak >= 10:
-            score += 20
+            score += 20.0
             flags.append(f"MARGIN_DECLINE:{margin_streak}d")
         elif margin_streak >= 5:
-            score += 12
+            score += round(12.0 + (margin_streak - 5) / 5.0 * 8.0, 2)
             flags.append(f"MARGIN_DECLINE:{margin_streak}d")
         elif proxy.margin_balance_change < 0:
-            score += 5
+            score += 5.0
             flags.append("MARGIN_DECLINING_TODAY")
 
-        # 2. Price stability (0–20 pts)
+        # 2. Price stability — same continuous as OHLCV-only mode
         if price_range_pct < 0.05:
-            score += 20
+            if price_range_pct <= 0.02:
+                score += 20.0
+            else:
+                score += round(12.0 + (0.05 - price_range_pct) / 0.03 * 8.0, 2)
             flags.append(f"PRICE_STABLE_TIGHT:{price_range_pct:.1%}")
         elif signal_b:
-            score += 12
+            score += round((0.10 - price_range_pct) / 0.05 * 12.0, 2)
             flags.append(f"PRICE_STABLE:{price_range_pct:.1%}")
 
-        # 3. Institution buy days (0–20 pts)
+        # 3. Institution buy days — 3→8, 5→14, 8+→20 linear
         if consec_days >= 8:
-            score += 20
+            score += 20.0
             flags.append(f"INST_CONSEC:{consec_days}d")
         elif consec_days >= 5:
-            score += 14
+            score += round(14.0 + (consec_days - 5) / 3.0 * 6.0, 2)
             flags.append(f"INST_CONSEC:{consec_days}d")
         elif signal_c:
-            score += 8
+            score += round(8.0 + (consec_days - 3) / 2.0 * 6.0, 2)
             flags.append(f"INST_CONSEC:{consec_days}d")
 
-        # 4. Large holder increase (0–15 pts)
+        # 4. Large holder increase — 0→0, 1%→8, 2%+→15 linear
         if signal_d:
             chg = proxy.large_holder_chg_pct or 0.0
             if chg > 1.0:
-                score += 15
+                # 1.0→8 floor, 2.0→15
+                if chg >= 2.0:
+                    score += 15.0
+                else:
+                    score += round(8.0 + (chg - 1.0) / 1.0 * 7.0, 2)
                 flags.append(f"LARGE_HOLDER_ACCUM:{chg:+.1f}%")
             else:
-                score += 8
+                # 0→0, 1.0→8 linear
+                score += round(chg / 1.0 * 8.0, 2)
                 flags.append(f"LARGE_HOLDER_INCR:{chg:+.1f}%")
 
-        # 5. Retail decrease (0–15 pts)
+        # 5. Retail decrease — 0→0, -1%→8, -2%+→15 linear
         if signal_e:
             chg = proxy.retail_holder_chg_pct or 0.0
             if chg < -1.0:
-                score += 15
+                if chg <= -2.0:
+                    score += 15.0
+                else:
+                    score += round(8.0 + (-chg - 1.0) / 1.0 * 7.0, 2)
                 flags.append(f"RETAIL_EXIT:{chg:+.1f}%")
             else:
-                score += 8
+                score += round((-chg) / 1.0 * 8.0, 2)
                 flags.append(f"RETAIL_DECLINE:{chg:+.1f}%")
 
-        # 6. Volume contraction (0–10 pts)
+        # 6. Volume contraction — same continuous as OHLCV-only mode
         if vol_ratio < 0.50:
-            score += 10
+            if vol_ratio <= 0.30:
+                score += 10.0
+            else:
+                score += round(6.0 + (0.50 - vol_ratio) / 0.20 * 4.0, 2)
             flags.append("VOL_CONTRACT_STRONG")
         elif vol_ratio < 0.70:
-            score += 6
+            score += round((0.70 - vol_ratio) / 0.20 * 6.0, 2)
             flags.append("VOL_CONTRACT")
 
+        score = round(score, 2)
         if score < self.MIN_SCORE:
             return None
 
         return {
-            "score": max(0, score),
+            "score": round(max(0.0, score), 2),
             "flags": flags,
             "price_range_pct": round(price_range_pct * 100, 1),
             "vol_ratio": round(vol_ratio, 2),

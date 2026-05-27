@@ -89,133 +89,185 @@ class PullbackDetector:
         if not upper_bb_touched:
             return None
 
-        # ── Scoring ───────────────────────────────────────────────────────
+        # ── Scoring — Phase 4.46 continuous ──────────────────────────────
         flags: list[str] = ["PULLBACK_MA20"]
-        score = 0
+        score = 0.0
 
-        # 1. MA20 proximity — tiered (0–30 pts)
+        # 1. MA20 proximity — continuous on distance from MA20
+        # 0%→30, ±1.5%→25, ±3%→20, ±5%→10 linear
         abs_pct = abs(ma20_pct)
         if abs_pct <= 0.015:
-            score += 30
+            # 0→30, 0.015→25 (closer = better)
+            score += round(30.0 - abs_pct / 0.015 * 5.0, 2)
             flags.append("MA20_TIGHT")
         elif abs_pct <= 0.03:
-            score += 20
+            # 0.015→25, 0.03→20 linear
+            score += round(25.0 - (abs_pct - 0.015) / 0.015 * 5.0, 2)
         else:
-            score += 10   # ±3–5% zone
+            # 0.03→20, 0.05→10 linear
+            score += round(20.0 - (abs_pct - 0.03) / 0.02 * 10.0, 2)
 
-        # 2. Volume contraction during pullback (0–20 pts)
+        # 2. Volume contraction — continuous on ratio
         avg_vol = mean(vols[-20:])
         pullback_vol = mean(vols[-3:])
         if avg_vol > 0:
             vr = pullback_vol / avg_vol
             if vr < 0.5:
-                score += 20
+                # 0.3→20, 0.5→12 linear
+                if vr <= 0.3:
+                    score += 20.0
+                else:
+                    score += round(12.0 + (0.5 - vr) / 0.2 * 8.0, 2)
                 flags.append("VOL_CONTRACTION_STRONG")
             elif vr < 0.7:
-                score += 12
+                score += round((0.7 - vr) / 0.2 * 12.0, 2)
                 flags.append("VOL_CONTRACTION")
             elif vr > 1.3:
-                score -= 5
+                # 1.3→-3, 2.0+→-5
+                if vr >= 2.0:
+                    score -= 5.0
+                else:
+                    score -= round(3.0 + (vr - 1.3) / 0.7 * 2.0, 2)
                 flags.append("VOL_EXPANDING_BEARISH")
 
-        # 3. MA20 slope — uptrend strength (0–20 pts)
+        # 3. MA20 slope — continuous on magnitude
         ma20_prev = mean(closes[-40:-20])
         slope = (ma20 - ma20_prev) / ma20_prev if ma20_prev > 0 else 0.0
         if slope > 0.02:
-            score += 20
+            score += 20.0
             flags.append("STRONG_UPTREND")
         elif slope > 0.005:
-            score += 10
+            # 0.005→10, 0.02→20 linear
+            score += round(10.0 + (slope - 0.005) / 0.015 * 10.0, 2)
             flags.append("UPTREND")
+        elif slope > 0:
+            # 0→0, 0.005→10 linear
+            score += round(slope / 0.005 * 10.0, 2)
 
-        # 4. Bounce candle + volume confirm (0–20 pts)
+        # 4. Bounce candle + volume confirm
         bar = sorted_h[-1]
         is_green = bar.close > bar.open
         rng = bar.high - bar.low
         close_strength = (bar.close - bar.low) / rng if rng > 0 else 0.0
 
         if is_green:
-            score += 8
+            score += 8.0
             flags.append("BOUNCE_CANDLE")
-        if close_strength > 0.6:
-            score += 7
-            flags.append("STRONG_CLOSE")
-        elif close_strength > 0.3:
-            score += 3
-            flags.append("LONG_LOWER_SHADOW")
+        # Close strength — continuous taper
+        if close_strength > 0.3:
+            # 0.3→3, 0.6→7, 1.0→7 (cap)
+            if close_strength >= 0.6:
+                score += 7.0
+                flags.append("STRONG_CLOSE")
+            else:
+                score += round(3.0 + (close_strength - 0.3) / 0.3 * 4.0, 2)
+                flags.append("LONG_LOWER_SHADOW")
 
-        # Volume expanding on bounce day → confirms buyers stepping in
         if len(vols) >= 2 and vols[-1] > vols[-2] * 1.15 and is_green:
-            score += 5
+            # 1.15x→3, 1.5x+→5 linear
+            ratio = vols[-1] / vols[-2]
+            if ratio >= 1.5:
+                score += 5.0
+            else:
+                score += round(3.0 + (ratio - 1.15) / 0.35 * 2.0, 2)
             flags.append("VOL_BOUNCE")
 
-        # 5. MA60 uptrend (0–15 pts)
+        # 5. MA60 uptrend — continuous on slope
         if len(closes) >= 80:
             ma60_prev = mean(closes[-80:-60])
             slope60 = (ma60 - ma60_prev) / ma60_prev if ma60_prev > 0 else 0.0
             if slope60 > 0.01:
-                score += 15
+                score += 15.0
                 flags.append("LONG_TERM_UPTREND")
             elif slope60 > 0:
-                score += 5
+                # 0→0, 0.01→15 linear (but cap at 5 in old version — keep similar)
+                score += round(slope60 / 0.01 * 5.0 + 5.0, 2)
 
-        # 6. RSI reset — momentum cool-down without trend break (0–15 pts)
+        # 6. RSI reset — continuous on RSI distance from sweet spot
         rsi_now = _rsi(closes, 14)
-        # Look for prior RSI peak in last 30 bars
         rsi_peak = max(
             _rsi(closes[:-(30 - i)], 14) if len(closes) > 30 - i + 15 else 50.0
             for i in range(30)
         ) if len(closes) >= 45 else rsi_now
 
         if rsi_now < 40:
-            score -= 10
+            # 40→0, 30+→-10 linear
+            if rsi_now <= 30:
+                score -= 10.0
+            else:
+                score -= round((40 - rsi_now) / 10.0 * 10.0, 2)
             flags.append("RSI_OVERSOLD")
         elif 42 <= rsi_now <= 58 and rsi_peak >= 60:
-            score += 15
+            # 42→10, 50→15 peak, 58→10 (tent)
+            if 48 <= rsi_now <= 52:
+                score += 15.0
+            elif rsi_now < 48:
+                score += round(10.0 + (rsi_now - 42) / 6.0 * 5.0, 2)
+            else:
+                score += round(10.0 + (58 - rsi_now) / 6.0 * 5.0, 2)
             flags.append(f"RSI_RESET:{rsi_now:.0f}")
         elif 58 < rsi_now <= 68:
-            score += 8
+            # 58→8, 68→0 linear
+            score += round((68 - rsi_now) / 10.0 * 8.0, 2)
             flags.append(f"RSI_HEALTHY:{rsi_now:.0f}")
         elif rsi_now > 68:
-            # Still hot — may not have pulled back enough
-            score -= 5
+            # 68→0, 80+→-5 linear
+            if rsi_now >= 80:
+                score -= 5.0
+            else:
+                score -= round((rsi_now - 68) / 12.0 * 5.0, 2)
             flags.append("RSI_HOT")
 
-        # 7. Prior advance — did the stock earn profit to defend? (0–10 pts)
+        # 7. Prior advance — continuous
         if len(closes) >= 30:
             low_30 = min(closes[-30:])
             high_30 = max(closes[-30:])
             advance_pct = (high_30 - low_30) / low_30 if low_30 > 0 else 0.0
             if advance_pct >= 0.25:
-                score += 10
+                score += 10.0
                 flags.append(f"PRIOR_ADVANCE:{advance_pct:.0%}")
             elif advance_pct >= 0.12:
-                score += 5
+                # 0.12→5, 0.25→10 linear
+                score += round(5.0 + (advance_pct - 0.12) / 0.13 * 5.0, 2)
                 flags.append(f"PRIOR_ADVANCE:{advance_pct:.0%}")
+            elif advance_pct > 0:
+                score += round(advance_pct / 0.12 * 5.0, 2)
 
-        # 8. Pullback duration — sweet spot is 3–7 trading days (0–10 pts)
+        # 8. Pullback duration — continuous tent at sweet spot
         pullback_days = 0
         for i in range(1, min(15, len(sorted_h))):
-            bar_i = sorted_h[-(i + 1)]
-            # Walk back while price is below the local high
             if sorted_h[-i].close < sorted_h[-i - 1].close or sorted_h[-i].close < ma20:
                 pullback_days += 1
             else:
                 break
         if 3 <= pullback_days <= 7:
-            score += 10
+            # tent: 5 days peak, taper at ends
+            if 4 <= pullback_days <= 6:
+                score += 10.0
+            elif pullback_days == 3:
+                score += 8.0
+            else:  # 7
+                score += 8.0
             flags.append(f"PULLBACK_DAYS:{pullback_days}")
         elif pullback_days == 2:
-            score += 4
+            score += 4.0
             flags.append(f"PULLBACK_DAYS:{pullback_days}")
         elif pullback_days >= 10:
-            score -= 8
+            # 10→-5, 15+→-8 linear
+            if pullback_days >= 15:
+                score -= 8.0
+            else:
+                score -= round(5.0 + (pullback_days - 10) / 5.0 * 3.0, 2)
             flags.append(f"PULLBACK_LONG:{pullback_days}")
+        elif pullback_days == 8 or pullback_days == 9:
+            score += 5.0
+            flags.append(f"PULLBACK_DAYS:{pullback_days}")
 
         flags.append(f"PULLBACK_MA20_DIST:{ma20_pct:+.1%}")
 
+        score = round(score, 2)
         return {
-            "score": max(0, score),   # no upper cap — consistent with TCE
+            "score": round(max(0.0, score), 2),   # no upper cap — consistent with TCE
             "flags": flags,
             "ma20_pct": round(ma20_pct * 100, 2),
             "ma20": round(ma20, 2),
