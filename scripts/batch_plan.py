@@ -992,12 +992,119 @@ def _load_surge_from_db(analysis_date: date, min_score: int = 50) -> list[dict]:
     return results
 
 
+def _scan_early_accum_batch(
+    tickers: list[str],
+    analysis_date: date,
+    agent: "StrategistAgent",
+    market_map: dict[str, str] | None = None,
+    min_score: int = 35,
+) -> list[dict]:
+    """Run InstAccumDetector, ChipTransferDetector, VCPDetector, HTFDetector on all tickers.
+
+    Returns result dicts in the same shape as _scan_pullback_batch.
+    """
+    from taiwan_stock_agent.domain.inst_accum_detector import InstAccumDetector
+    from taiwan_stock_agent.domain.chip_transfer_detector import ChipTransferDetector
+    from taiwan_stock_agent.domain.vcp_detector import VCPDetector
+    from taiwan_stock_agent.domain.htf_detector import HTFDetector
+
+    inst_det = InstAccumDetector()
+    chip_det = ChipTransferDetector()
+    vcp_det = VCPDetector()
+    htf_det = HTFDetector()
+
+    results: list[dict] = []
+
+    for ticker in tickers:
+        try:
+            ohlcv_df = agent._finmind.fetch_ohlcv(
+                ticker,
+                analysis_date - timedelta(days=130),
+                analysis_date,
+            )
+            history = StrategistAgent._df_to_ohlcv_list(ohlcv_df, ticker)
+            if not history:
+                continue
+            sorted_h = sorted(history, key=lambda x: x.trade_date)
+            close = float(sorted_h[-1].close) if sorted_h else 0.0
+
+            # Try to get proxy (best-effort)
+            proxy = None
+            try:
+                proxy = agent._chip_proxy.fetch(ticker, analysis_date)
+            except Exception:
+                pass
+
+            # Run each detector; take the highest scorer if multiple fire
+            candidates: list[tuple[int, dict]] = []
+
+            det = inst_det.score(history, proxy)
+            if det is not None and det["score"] >= min_score:
+                candidates.append((det["score"], det))
+
+            det = chip_det.score(history, proxy)
+            if det is not None and det["score"] >= min_score:
+                candidates.append((det["score"], det))
+
+            det = vcp_det.score(history)
+            if det is not None and det["score"] >= min_score:
+                candidates.append((det["score"], det))
+
+            det = htf_det.score(history)
+            if det is not None and det["score"] >= min_score:
+                candidates.append((det["score"], det))
+
+            if not candidates:
+                continue
+
+            # Pick highest-confidence
+            candidates.sort(key=lambda x: -x[0])
+            best_score, best = candidates[0]
+            secondary = [c[1]["signal_type"] for c in candidates[1:] if c[1]["signal_type"] != best["signal_type"]]
+
+            from statistics import mean as _mean
+            closes = [d.close for d in sorted_h]
+            ma20 = _mean(closes[-20:]) if len(closes) >= 20 else close
+
+            results.append({
+                "ticker": ticker,
+                "action": "WATCH",
+                "confidence": best_score,
+                "halt": False,
+                "free_tier": None,
+                "flags": best.get("flags", []),
+                "entry_bid": round(close * 0.997, 1),
+                "stop_loss": round(ma20 * 0.97, 1),
+                "target": round(close * 1.10, 1),
+                "verdict": f"{best['signal_type']} 提前佈局",
+                "position": "",
+                "momentum": "",
+                "chip": "",
+                "risk": "",
+                "elapsed": 0.0,
+                "error": None,
+                "_signal": None,
+                "trend_score": 0,
+                "institution_continuity_pts": 0,
+                "proximity_pts": 0,
+                "signal_type": best["signal_type"],
+                "horizon": best.get("horizon", "波段"),
+                "secondary_types": secondary,
+                "change_pct": 0.0,
+            })
+        except Exception:
+            continue
+
+    return results
+
+
 def _merge_unified_signals(
     tce_results: list[dict],
     pullback_results: list[dict],
     surge_results: list[dict],
+    early_results: list[dict] | None = None,
 ) -> list[dict]:
-    """Merge TCE, pullback, and surge results into one unified list.
+    """Merge TCE, pullback, surge, and early accumulation results into one unified list.
 
     Deduplicates by ticker: keeps highest-confidence result as primary;
     appends other signal_types to secondary_types list.
@@ -1005,7 +1112,8 @@ def _merge_unified_signals(
     """
     merged: dict[str, dict] = {r["ticker"]: r for r in tce_results}
 
-    for r in [*pullback_results, *surge_results]:
+    all_others = [*pullback_results, *surge_results, *(early_results or [])]
+    for r in all_others:
         ticker = r["ticker"]
         new_conf = r.get("confidence", 0)
         if ticker not in merged:
@@ -1078,6 +1186,10 @@ _SIG_COLORS = {
     "趨勢延伸": "bright_cyan",
     "蓄積★": "bright_green",
     "蓄積": "cyan",
+    "法人建倉": "bold bright_magenta",
+    "籌碼轉移": "bold magenta",
+    "VCP": "bold bright_cyan",
+    "旗形": "bold yellow",
 }
 
 
@@ -1550,8 +1662,15 @@ def run_batch(
     if surge_db_results:
         _console.print(f"  爆量型信號: [green]{len(surge_db_results)}[/green] 檔")
 
-    # ── Merge all three signal types into one unified result list ──────────────
-    results = _merge_unified_signals(results, pullback_results, surge_db_results)
+    # ── Early accumulation scan (InstAccum, ChipTransfer, VCP, HTF) ──────────
+    _console.print("\n[bold cyan][Early Accum Scan][/bold cyan] 提前佈局偵測中…")
+    early_results = _scan_early_accum_batch(
+        tickers, analysis_date, _shared_agent, market_map=market_map
+    )
+    _console.print(f"  提前佈局信號: [green]{len(early_results)}[/green] 檔")
+
+    # ── Merge all signal types into one unified result list ────────────────────
+    results = _merge_unified_signals(results, pullback_results, surge_db_results, early_results)
 
     # --- Post-processing: sector ranking + persistence ---
     scan_data_dir = Path(__file__).resolve().parents[1] / "data" / "scans"
@@ -1600,6 +1719,37 @@ def run_batch(
     n_concept = _apply_concept_heat_bonus(results)
     if n_concept:
         _console.print(f"  [dim]↑ 熱門題材加成: {n_concept} 檔 (+3/+5 pts)[/dim]")
+
+    # ── Rotation EMERGING bonus ────────────────────────────────────────────────
+    rotation_file = Path(__file__).resolve().parents[1] / "data" / "market_heat" / "rotation_signal.json"
+    if rotation_file.exists():
+        try:
+            import json as _json_rot
+            rotation = _json_rot.loads(rotation_file.read_text(encoding="utf-8"))
+            emerging = {n for n, s in rotation.items() if s.get("status") == "EMERGING"}
+            hot = {n for n, s in rotation.items() if s.get("status") == "HOT"}
+            cooling = {n for n, s in rotation.items() if s.get("status") == "COOLING"}
+            n_rot_em = n_rot_hot = n_rot_cool = 0
+            for r in results:
+                ind = (industry_map or {}).get(r["ticker"], "")
+                if ind in emerging:
+                    r["confidence"] = r.get("confidence", 0) + 5
+                    r.setdefault("flags", []).append("ROTATION_EMERGING")
+                    n_rot_em += 1
+                elif ind in hot:
+                    r["confidence"] = r.get("confidence", 0) + 3
+                    r.setdefault("flags", []).append("ROTATION_HOT")
+                    n_rot_hot += 1
+                elif ind in cooling:
+                    r["confidence"] = max(0, r.get("confidence", 0) - 3)
+                    r.setdefault("flags", []).append("ROTATION_COOLING")
+                    n_rot_cool += 1
+            if n_rot_em or n_rot_hot or n_rot_cool:
+                _console.print(
+                    f"  [dim]↑↓ 輪動加減分: EMERGING×{n_rot_em}(+5) HOT×{n_rot_hot}(+3) COOLING×{n_rot_cool}(-3)[/dim]"
+                )
+        except Exception:
+            pass
 
     # Re-evaluate action after post-processing bonuses may have crossed a threshold.
     # A CAUTION that reaches ≥ 45 after bonuses becomes WATCH.
@@ -2228,7 +2378,7 @@ def _generate_plan_html(
             unique_industries.append(ind)
 
     # Collect unique signal types (preserve display order)
-    _sig_type_order = ["爆量★", "爆量", "趨勢延伸", "蓄積★", "蓄積", "回調"]
+    _sig_type_order = ["爆量★", "爆量", "趨勢延伸", "蓄積★", "蓄積", "法人建倉", "籌碼轉移", "VCP", "旗形", "回調"]
     _seen_sigtypes: set[str] = {r.get("signal_type", "蓄積") for r in filtered}
     unique_sig_types: list[str] = [s for s in _sig_type_order if s in _seen_sigtypes]
 
@@ -2322,6 +2472,8 @@ def _generate_plan_html(
             "爆量★": "#ff4444", "爆量": "#ff7744",
             "回調": "#ffcc44", "趨勢延伸": "#44ccff",
             "蓄積★": "#44ff88", "蓄積": "#44aaff",
+            "法人建倉": "#dd44ff", "籌碼轉移": "#aa44cc",
+            "VCP": "#44eeff", "旗形": "#ffee44",
         }
         sig_bg = sig_colors.get(sig_type, "#888888")
         horizon_bg = "#cc4444" if horizon_val == "短線" else "#226688"

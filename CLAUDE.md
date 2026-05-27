@@ -59,6 +59,7 @@ you will create drift that is expensive to fix.
 | Phase 4.39 | ✅ Done | **TREND_WALK bypass track**：`_is_trend_walk()`（G2 唯一失敗 + MA5>MA20>MA60 + proximity ≥90%）✅ · TREND_WALK 繞過 BB 壓縮門檻，捕捉沿 BB 上軌走強的趨勢股 ✅ · RSI 刻意不納入條件（趨勢股自然帶高 RSI 65–80，Pillar 1 已計分，雙重篩選會阻擋目標設置）✅ · `score_full` 修正：TREND_WALK 加入 bypass-track 傳播列表（`data_quality_flags`）✅ · 7 個 TestTrendWalkTrack 單元測試（含整合測試）✅ · 620 unit tests passing ✅ |
 | Phase 4.40 | ✅ Done | **統一掃描輸出**：PullbackDetector（MA20回調型偵測）✅ · signal_type/horizon 欄位（蓄積/回調/爆量/趨勢延伸）✅ · `make plan` 直接整合 TCE + Pullback + SurgeRadar 三引擎（同一批 tickers，一個指令全包）✅ · 成長股基本面★標記（所有信號類型）✅ · 終端輸出新增 型態/持倉/基本面 欄位 ✅ · HTML 信號類型徽章 ✅ · `make flow` 移除獨立 surge 步驟 ✅ · 626 unit tests passing ✅ |
 | Phase 4.41 | ✅ Done | **門檻校準（小型股友善）**：TCE G3 TSE 流動性門檻 15M→8M（與 TPEx 對齊，捕捉日均 6–14M 小型早期佈局股）✅ · TCE G5 頭部壓力門檻 85%→80%（20D/60D 高點比值，捕捉尚未完全突破但籌碼乾淨的標的）✅ · PullbackDetector Gate 2 ±3%→±5% / Gate 3 lookback 10→20 bar ✅ · RSI reset / prior advance / pullback duration / VOL_BOUNCE 因子 ✅ · 623 unit tests passing ✅ |
+| Phase 4.42 | ✅ Done | **七大提前佈局策略**：`InstAccumDetector`（法人建倉：距60D高點-15~-40%，法人連買≥3天）✅ · `ChipTransferDetector`（籌碼轉移：K-of-N 5訊號，融資連降+法人買+大戶增+散戶退）✅ · `VCPDetector`（Minervini VCP波動收縮：連續回調幅度遞減+量能乾涸）✅ · `HTFDetector`（旗形：先漲25%+再低量整理<15%）✅ · `_scan_early_accum_batch` 整合進 `make plan`（同批 tickers 四引擎並跑）✅ · 產業輪動加分（ROTATION_EMERGING +5 / HOT +3 / COOLING -3，讀 rotation_signal.json）✅ · 新信號類型：法人建倉/籌碼轉移/VCP/旗形（HTML + 終端顯示）✅ · 30 新單元測試 ✅ · 653 unit tests passing ✅ |
 
 **免費 vs 付費因子說明：**
 
