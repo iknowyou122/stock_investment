@@ -561,7 +561,7 @@ def _precompute_today_snapshot(
     return snapshot
 
 
-def _print_score_health(scores: list[int], label: str = "信心分數分布") -> None:
+def _print_score_health(scores: list[float], label: str = "信心分數分布") -> None:
     """Print P25/P50/P75/P95 and warn if top-quartile spread < 10 pts (clustering risk)."""
     if len(scores) < 5:
         return
@@ -575,9 +575,9 @@ def _print_score_health(scores: list[int], label: str = "信心分數分布") ->
     status = "✅" if ok else "⚠ 頂端聚集"
     _console.print(
         f"  [dim]📊 {label}  "
-        f"P25=[cyan]{p25}[/cyan]  P50=[cyan]{p50}[/cyan]  "
-        f"P75=[cyan]{p75}[/cyan]  P95=[cyan]{p95}[/cyan]  │  "
-        f"頂端壓縮 [{color}]{spread}pts {status}[/{color}][/dim]"
+        f"P25=[cyan]{p25:.1f}[/cyan]  P50=[cyan]{p50:.1f}[/cyan]  "
+        f"P75=[cyan]{p75:.1f}[/cyan]  P95=[cyan]{p95:.1f}[/cyan]  │  "
+        f"頂端壓縮 [{color}]{spread:.1f}pts {status}[/{color}][/dim]"
     )
     if not ok:
         _console.print(
@@ -623,7 +623,7 @@ def _print_surge_table(results: list[dict], scan_date: str, name_map: dict[str, 
             f"[{style}]{ticker}[/{style}]",
             name,
             f"[{style}]{grade_zh}[/{style}]",
-            str(r.get("score", 0)),
+            f"{r.get('score', 0):.1f}",
             f"{r.get('vol_ratio', 0):.2f}",
             f"{r.get('day_chg_pct', 0):+.2f}",
             f"{r.get('close_strength', 0):.2f}",

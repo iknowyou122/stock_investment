@@ -168,86 +168,128 @@ class SurgeRadar:
 
     def _score_vol_ratio(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45: log curve, peak at 3-4x (IDEAL zone).
+        1.5x→6 / 2x→8 / 3x→10 / 5x+→fades to 8 (exhaustion-aware)
+        """
         vol_20ma = self._vol_20ma(history)
         if vol_20ma <= 0:
-            return 0, []
+            return 0.0, []
         ratio = ohlcv.volume / vol_20ma
         f = self._params.get("factors", {})
-        # 爆量分級：5x+ 是主力啟動訊號（前提是 G3 已確保收盤在上半段）
-        # 3-5x 為理想爆量（最佳 T+2 勝率帶），2-3x 為有效爆量，1.5-2x 為輕度放量
-        if ratio >= 5.0:
-            return f.get("vol_ratio_surge", 8), [f"VOL_SURGE:{ratio:.2f}x"]
-        if ratio >= 3.0:
-            return f.get("vol_ratio_ideal", 10), [f"VOL_IDEAL:{ratio:.2f}x"]
-        if ratio >= 2.0:
-            return f.get("vol_ratio_solid", 8), [f"VOL_SOLID:{ratio:.2f}x"]
-        if ratio >= 1.5:
-            return f.get("vol_ratio_mild", 6), [f"VOL_MILD:{ratio:.2f}x"]
-        return 0, [f"VOL_LOW:{ratio:.2f}x"]
+        # tier peaks: tunable via params
+        peak_ideal = float(f.get("vol_ratio_ideal", 10))
+        peak_surge = float(f.get("vol_ratio_surge", 8))
 
-    def _score_close_strength(self, ohlcv: DailyOHLCV) -> tuple[int, list[str]]:
+        if ratio < 1.5:
+            # 1.0→0, 1.5→6 linear
+            if ratio < 1.0:
+                return 0.0, [f"VOL_LOW:{ratio:.2f}x"]
+            mild = float(f.get("vol_ratio_mild", 6))
+            pts = round(mild * (ratio - 1.0) / 0.5, 2)
+            return pts, [f"VOL_LOW:{ratio:.2f}x"]
+        if ratio < 3.0:
+            # 1.5→6, 3.0→10 linear
+            mild = float(f.get("vol_ratio_mild", 6))
+            pts = round(mild + (ratio - 1.5) / 1.5 * (peak_ideal - mild), 2)
+            label = "VOL_SOLID" if ratio >= 2.0 else "VOL_MILD"
+            return pts, [f"{label}:{ratio:.2f}x"]
+        if ratio <= 5.0:
+            # 3.0→10 peak, 5.0→8 fade
+            pts = round(peak_ideal - (ratio - 3.0) / 2.0 * (peak_ideal - peak_surge), 2)
+            return pts, [f"VOL_IDEAL:{ratio:.2f}x"]
+        # >5x: continued fade by 1pt per +1x past 5x, floor at 5.0
+        pts = round(max(5.0, peak_surge - (ratio - 5.0) * 1.0), 2)
+        return pts, [f"VOL_SURGE:{ratio:.2f}x"]
+
+    def _score_close_strength(self, ohlcv: DailyOHLCV) -> tuple[float, list[str]]:
+        """Phase 4.45: continuous (ratio-0.3)*11.4, clamp [2, 8]."""
         bar_range = ohlcv.high - ohlcv.low
         if bar_range <= 0:
-            return 0, []
+            return 0.0, []
         ratio = (ohlcv.close - ohlcv.low) / bar_range
         f = self._params.get("factors", {})
+        soft = float(f.get("close_soft", 2))
+        strong = float(f.get("close_strong", 8))
+        # 0.3→soft (2), 1.0→strong (8); linear, clamp
+        pts = soft + (ratio - 0.3) / 0.7 * (strong - soft)
+        pts = max(soft, min(strong, pts))
+        pts = round(pts, 2)
         if ratio >= 0.8:
-            return f.get("close_strong", 8), [f"CLOSE_STRONG:{ratio:.2f}"]
+            return pts, [f"CLOSE_STRONG:{ratio:.2f}"]
         if ratio >= 0.6:
-            return f.get("close_healthy", 5), [f"CLOSE_HEALTHY:{ratio:.2f}"]
-        return f.get("close_soft", 2), [f"CLOSE_SOFT:{ratio:.2f}"]
+            return pts, [f"CLOSE_HEALTHY:{ratio:.2f}"]
+        return pts, [f"CLOSE_SOFT:{ratio:.2f}"]
 
     def _score_inst_buy_fresh(
         self, proxy: TWSEChipProxy | None
-    ) -> tuple[int, list[str]]:
-        """Reward institutional buying — day 1 is the highest-value signal (起漲點)."""
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous: net_buy / avg_vol intensity + fresh-day bonus.
+        Day 1: 1x intensity → 8, Day 2: scaled to 7, Day 3+: 6.
+        """
         if proxy is None or not proxy.is_available:
-            return 0, []
+            return 0.0, []
         f = self._params.get("factors", {})
         days = max(proxy.foreign_consecutive_buy_days, proxy.trust_consecutive_buy_days)
+        if days < 1:
+            return 0.0, []
+        # Day base (peak): 1→8, 2→7, 3+→6
+        base_d1 = float(f.get("inst_buy_fresh_1d", 8))
+        base_d2 = float(f.get("inst_buy_fresh_2d", 7))
+        base_d3 = float(f.get("inst_buy_fresh_3d", 6))
         if days == 1:
-            return f.get("inst_buy_fresh_1d", 8), [f"INST_FRESH:{days}D"]
-        if days == 2:
-            return f.get("inst_buy_fresh_2d", 7), [f"INST_FRESH:{days}D"]
-        if days >= 3:
-            return f.get("inst_buy_fresh_3d", 6), [f"INST_FRESH:{days}D"]
-        return 0, []
+            base = base_d1
+        elif days == 2:
+            base = base_d2
+        else:
+            base = base_d3
+
+        # Intensity multiplier: net_buy / avg_vol; scale 0→0.5, 0.05→1.0 (cap)
+        avg = float(proxy.avg_20d_volume) or 0.0
+        net = max(proxy.foreign_net_buy, proxy.trust_net_buy, 0)
+        if avg <= 0 or net <= 0:
+            # No volume/net-buy data — return base unmodified (cannot compute intensity)
+            return round(base, 2), [f"INST_FRESH:{days}D"]
+        intensity = min(1.0, max(0.5, 0.5 + (net / avg) / 0.05 * 0.5))
+        return round(base * intensity, 2), [f"INST_FRESH:{days}D"]
 
     def _score_industry_strength(
         self, industry_rank_pct: float | None
-    ) -> tuple[int, list[str]]:
-        """Reward stocks in industries trading hot today.
-
-        industry_rank_pct: percentile rank of stock's industry in today's
-        industry heat (0 = weakest, 100 = strongest).
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous: linear on industry heat percentile.
+        60→5, 80→10 (linear up), <60→linear toward 0.
         """
         if industry_rank_pct is None:
-            return 0, []
+            return 0.0, []
         f = self._params.get("factors", {})
+        hot = float(f.get("industry_top_20pct", 10))
+        warm = float(f.get("industry_top_40pct", 5))
         if industry_rank_pct >= 80:
-            return f.get("industry_top_20pct", 10), [f"IND_HOT:{industry_rank_pct:.0f}"]
+            return hot, [f"IND_HOT:{industry_rank_pct:.0f}"]
         if industry_rank_pct >= 60:
-            return f.get("industry_top_40pct", 5), [f"IND_WARM:{industry_rank_pct:.0f}"]
-        return 0, [f"IND_COLD:{industry_rank_pct:.0f}"]
+            # 60→warm, 80→hot linear
+            pts = round(warm + (industry_rank_pct - 60) / 20 * (hot - warm), 2)
+            return pts, [f"IND_WARM:{industry_rank_pct:.0f}"]
+        if industry_rank_pct >= 40:
+            # 40→0, 60→warm linear
+            pts = round((industry_rank_pct - 40) / 20 * warm, 2)
+            return pts, [f"IND_COLD:{industry_rank_pct:.0f}"]
+        return 0.0, [f"IND_COLD:{industry_rank_pct:.0f}"]
 
     def _score_pocket_pivot(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> tuple[int, list[str]]:
-        """Pocket pivot: today's up-volume > max down-volume in last 10 days,
-        close in upper half, price above MA10."""
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45: gates kept, score scales with vol over max_down_vol ratio."""
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         if len(sorted_h) < 11:
-            return 0, []
+            return 0.0, []
         last10 = sorted_h[-10:]
-        # Taiwan daily data has no intraday tick split, so total volume proxies up-volume.
-        # On strong up-days selling pressure is low, so total ≈ up-volume (O'Neil proxy).
         down_vols = [
             b.volume for i, b in enumerate(last10)
             if i > 0 and b.close < last10[i - 1].close
         ]
         if not down_vols:
-            return 0, []
+            return 0.0, []
         max_down_vol = max(down_vols)
 
         prev_close = sorted_h[-1].close
@@ -263,82 +305,129 @@ class SurgeRadar:
             and ohlcv.close >= ma10
         ):
             f = self._params.get("factors", {})
-            return f.get("pocket_pivot", 12), ["POCKET_PIVOT"]
-        return 0, []
+            peak = float(f.get("pocket_pivot", 12))
+            # Continuous on vol multiple over max_down_vol: 1.0→peak*0.7, 2.0+→peak
+            if max_down_vol > 0:
+                mult = ohlcv.volume / max_down_vol
+                if mult >= 2.0:
+                    pts = peak
+                else:
+                    pts = round(peak * 0.7 + (mult - 1.0) / 1.0 * peak * 0.3, 2)
+            else:
+                pts = peak
+            return pts, ["POCKET_PIVOT"]
+        return 0.0, []
 
     def _score_breakaway_gap(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> tuple[int, list[str]]:
-        """Gap-up with follow-through: open > prev_close*1.01, low > prev_close,
-        close > open (gap held)."""
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous on gap_pct magnitude."""
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         if not sorted_h:
-            return 0, []
+            return 0.0, []
         prev_close = sorted_h[-1].close
         if prev_close <= 0:
-            return 0, []
+            return 0.0, []
         gap_pct = (ohlcv.open / prev_close - 1) * 100
         f = self._params.get("factors", {})
+        full = float(f.get("breakaway_gap_full", 8))
+        partial = float(f.get("breakaway_gap_partial", 4))
         if gap_pct >= 1.0 and ohlcv.low > prev_close and ohlcv.close > ohlcv.open:
-            return f.get("breakaway_gap_full", 8), [f"GAP_FULL:{gap_pct:.1f}%"]
+            # 1.0%→full, 3.0%+→ peak (full + 2 bonus capped)
+            if gap_pct >= 3.0:
+                return full, [f"GAP_FULL:{gap_pct:.1f}%"]
+            pts = round(full * (0.7 + (gap_pct - 1.0) / 2.0 * 0.3), 2)
+            return pts, [f"GAP_FULL:{gap_pct:.1f}%"]
         if gap_pct >= 0.5 and ohlcv.close > ohlcv.open:
-            return f.get("breakaway_gap_partial", 4), [f"GAP_PARTIAL:{gap_pct:.1f}%"]
-        return 0, []
+            # 0.5→partial*0.7, 1.0→partial
+            pts = round(partial * (0.7 + (gap_pct - 0.5) / 0.5 * 0.3), 2)
+            return pts, [f"GAP_PARTIAL:{gap_pct:.1f}%"]
+        return 0.0, []
 
     def _score_relative_strength(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV], taiex_history: list[DailyOHLCV]
-    ) -> tuple[int, list[str]]:
-        """Stock's today-return > TAIEX today-return by >= 0.5%."""
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous on diff magnitude.
+        0.5%→4, 2.0%→8, >3%→8 cap.
+        """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         sorted_t = sorted(taiex_history, key=lambda x: x.trade_date)
         if not sorted_h or len(sorted_t) < 2:
-            return 0, []
+            return 0.0, []
         stock_prev = sorted_h[-1].close
         if stock_prev <= 0:
-            return 0, []
+            return 0.0, []
         stock_chg = (ohlcv.close / stock_prev - 1) * 100
 
         taiex_prev, taiex_today = sorted_t[-2].close, sorted_t[-1].close
         if taiex_prev <= 0:
-            return 0, []
+            return 0.0, []
         taiex_chg = (taiex_today / taiex_prev - 1) * 100
 
         diff = stock_chg - taiex_chg
-        if diff >= 0.5:
-            f = self._params.get("factors", {})
-            return f.get("relative_strength", 8), [f"RS:+{diff:.1f}%"]
-        return 0, [f"RS:{diff:+.1f}%"]
+        if diff < 0.5:
+            return 0.0, [f"RS:{diff:+.1f}%"]
+        f = self._params.get("factors", {})
+        peak = float(f.get("relative_strength", 8))
+        # 0.5%→peak*0.5, 2.0%+→peak
+        if diff >= 2.0:
+            pts = peak
+        else:
+            pts = round(peak * 0.5 + (diff - 0.5) / 1.5 * peak * 0.5, 2)
+        return pts, [f"RS:+{diff:.1f}%"]
 
     def _score_breakout_20d(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> tuple[int, list[str]]:
-        """Close breaks above max(high) of last 20 bars (excluding today)."""
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45: continuous on breakout magnitude.
+        Just-above (0%)→base 6, +5%→peak 10.
+        """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         if len(sorted_h) < 20:
-            return 0, []
+            return 0.0, []
         prior_20d_high = max(b.high for b in sorted_h[-20:])
-        if ohlcv.close > prior_20d_high:
-            f = self._params.get("factors", {})
-            return f.get("breakout_20d", 10), [f"BREAKOUT_20D:{ohlcv.close:.2f}>{prior_20d_high:.2f}"]
-        return 0, []
+        if prior_20d_high <= 0 or ohlcv.close <= prior_20d_high:
+            return 0.0, []
+        f = self._params.get("factors", {})
+        peak = float(f.get("breakout_20d", 10))
+        # 0%→6, 5%+→peak (10)
+        excess = (ohlcv.close - prior_20d_high) / prior_20d_high
+        pts = round(min(peak, 6.0 + excess / 0.05 * (peak - 6.0)), 2)
+        return pts, [f"BREAKOUT_20D:{ohlcv.close:.2f}>{prior_20d_high:.2f}"]
 
     def _score_rsi_healthy(
         self, history: list[DailyOHLCV]
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous triangular: peak at 60-70 → 5, RSI>70 → 3 (breakout), <55 → linear taper."""
         rsi = self._rsi(history)
         if rsi is None:
-            return 0, []
+            return 0.0, []
         f = self._params.get("factors", {})
-        # RSI > 70 on surge day = momentum confirmation, not overbought warning
+        healthy = float(f.get("rsi_healthy", 5))
+        breakout = float(f.get("rsi_breakout", 3))
         if rsi > 70:
-            return f.get("rsi_breakout", 3), [f"RSI_BREAKOUT:{rsi}"]
+            # 70+ is breakout territory; only fade if extremely overbought (>95)
+            if rsi >= 95:
+                pts = max(1.0, breakout - 1.0)
+            else:
+                pts = breakout
+            return pts, [f"RSI_BREAKOUT:{rsi}"]
         if rsi >= 55:
-            return f.get("rsi_healthy", 5), [f"RSI_HEALTHY:{rsi}"]
-        return 0, [f"RSI_WEAK:{rsi}"]
+            # 55→healthy floor 4, 65-70→peak 5
+            if rsi >= 65:
+                pts = healthy
+            else:
+                pts = round(4.0 + (rsi - 55) / 10.0 * (healthy - 4.0), 2)
+            return pts, [f"RSI_HEALTHY:{rsi}"]
+        if rsi >= 40:
+            # 40→0, 55→4 (linear taper)
+            pts = round((rsi - 40) / 15.0 * 4.0, 2)
+            return pts, [f"RSI_WEAK:{rsi}"]
+        return 0.0, [f"RSI_WEAK:{rsi}"]
 
     def _score_bb_squeeze_breakout(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[float, list[str]]:
         """Reward breakouts from prior Bollinger Band compression.
 
         On the surge day BBs are already expanding, so we look back to check
@@ -387,64 +476,91 @@ class SurgeRadar:
 
         f = self._params.get("factors", {})
         label = f"BB:{recent_min:.3f}→{current_width:.3f}"
+        strong = float(f.get("bb_squeeze_strong", 8))
+        mild = float(f.get("bb_squeeze_mild", 4))
 
-        if recent_min <= p25 and current_width >= recent_min * 1.5:
-            return f.get("bb_squeeze_strong", 8), [f"BB_SQUEEZE_BREAK:{label}"]
-        if recent_min <= p40 and current_width >= recent_min * 1.3:
-            return f.get("bb_squeeze_mild", 4), [f"BB_SQUEEZE_EXPAND:{label}"]
-        return 0, [f"BB_WIDE:{current_width:.3f}"]
+        # Phase 4.45 continuous on expansion ratio
+        if recent_min > 0:
+            expansion = current_width / recent_min
+            if recent_min <= p25 and expansion >= 1.5:
+                # 1.5→mild+2, 2.5→strong, 3.0+→strong cap
+                if expansion >= 2.5:
+                    pts = strong
+                else:
+                    pts = round((mild + 2.0) + (expansion - 1.5) / 1.0 * (strong - mild - 2.0), 2)
+                return pts, [f"BB_SQUEEZE_BREAK:{label}"]
+            if recent_min <= p40 and expansion >= 1.3:
+                # 1.3→mild*0.5, 1.5→mild
+                if expansion >= 1.5:
+                    pts = mild
+                else:
+                    pts = round(mild * 0.5 + (expansion - 1.3) / 0.2 * mild * 0.5, 2)
+                return pts, [f"BB_SQUEEZE_EXPAND:{label}"]
+        return 0.0, [f"BB_WIDE:{current_width:.3f}"]
 
     def _score_margin_not_hot(
         self, proxy: TWSEChipProxy | None
-    ) -> tuple[int, list[str]]:
-        """Margin utilization tiers: <15% cool (+4), 15-20% warm (+2), >20% hot (0)."""
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous: 0→4, 0.15→3, 0.20→2, 0.25→0 (linear taper)."""
         if proxy is None or not proxy.is_available:
-            return 0, []
+            return 0.0, []
         util = proxy.margin_utilization_rate
         if util is None:
-            return 0, []
+            return 0.0, []
         f = self._params.get("factors", {})
+        cool = float(f.get("margin_not_hot", 4))
+        warm = float(f.get("margin_warm", 2))
+        if util >= 0.25:
+            return 0.0, [f"MARGIN_HOT:{util*100:.1f}%"]
         if util < 0.15:
-            return f.get("margin_not_hot", 4), [f"MARGIN_COOL:{util*100:.1f}%"]
+            # 0→cool peak, 0.15→3 (linear taper to ~75%)
+            pts = round(cool - util / 0.15 * 1.0, 2)
+            return max(warm + 1.0, pts), [f"MARGIN_COOL:{util*100:.1f}%"]
         if util < 0.20:
-            return f.get("margin_warm", 2), [f"MARGIN_WARM:{util*100:.1f}%"]
-        return 0, [f"MARGIN_HOT:{util*100:.1f}%"]
+            # 0.15→3, 0.20→warm
+            pts = round(3.0 - (util - 0.15) / 0.05 * (3.0 - warm), 2)
+            return pts, [f"MARGIN_WARM:{util*100:.1f}%"]
+        # 0.20-0.25: linear to 0
+        pts = round(warm - (util - 0.20) / 0.05 * warm, 2)
+        return max(0.0, pts), [f"MARGIN_WARM:{util*100:.1f}%"]
 
     def _score_inst_synergy(
         self, proxy: TWSEChipProxy | None
-    ) -> tuple[int, list[str]]:
-        """土洋合作 + 法人買超佔比。
-
-        外資+投信同日雙買（土洋合作）: 籌碼最強訊號。
-        法人買超佔比 (inst_buy_pct) = (外資+投信淨買) / 今日成交量。
-        """
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous: synergy base + pct linear scaling."""
         if proxy is None or not proxy.is_available:
-            return 0, []
+            return 0.0, []
         f = self._params.get("factors", {})
-        pts = 0
+        pts = 0.0
         flags: list[str] = []
 
         if proxy.foreign_and_trust_both_buy:
-            pts += f.get("inst_synergy_both", 5)
+            pts += float(f.get("inst_synergy_both", 5))
             flags.append("INST_SYNERGY")
 
         pct = proxy.inst_buy_pct
         if pct is not None and pct > 0:
+            high = float(f.get("inst_pct_high", 6))
+            # 0%→0, 5%→2, 10%→4, 15%+→6 linear
             if pct >= 0.15:
-                pts += f.get("inst_pct_high", 6)
+                pts += high
                 flags.append(f"INST_PCT_HIGH:{pct*100:.1f}%")
-            elif pct >= 0.10:
-                pts += f.get("inst_pct_mid", 4)
-                flags.append(f"INST_PCT_MID:{pct*100:.1f}%")
             elif pct >= 0.05:
-                pts += f.get("inst_pct_low", 2)
-                flags.append(f"INST_PCT_LOW:{pct*100:.1f}%")
+                # 0.05→2, 0.15→6 (linear with high as ceiling)
+                pct_pts = 2.0 + (pct - 0.05) / 0.10 * (high - 2.0)
+                pts += round(pct_pts, 2)
+                if pct >= 0.10:
+                    flags.append(f"INST_PCT_MID:{pct*100:.1f}%")
+                else:
+                    flags.append(f"INST_PCT_LOW:{pct*100:.1f}%")
+            else:
+                pts += round(pct / 0.05 * 2.0, 2)
 
-        return pts, flags
+        return round(pts, 2), flags
 
     def _score_margin_declining(
         self, proxy: TWSEChipProxy | None
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[float, list[str]]:
         """融資餘額今日下降 — 浮額持續被清洗，籌碼沉澱訊號。"""
         if proxy is None or not proxy.is_available:
             return 0, []
@@ -455,7 +571,7 @@ class SurgeRadar:
 
     def _score_inst_cumulative_flow(
         self, proxy: TWSEChipProxy | None
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[float, list[str]]:
         """20日累計法人淨買超 — 靜默蓄積型態偵測。
 
         連買天數遇到任一賣超日就歸零，無法捕捉「買多賣少、整體持續增持」型機構。
@@ -468,53 +584,73 @@ class SurgeRadar:
           2. inst_flow_accel >= 1.5 + 累計為正 → FLOW_ACCEL +3 (爆量日加速確認)
           3. inst_buy_days_ratio >= 55% + 累計正 + 未減速 → QUIET_ACCUM +6
         """
+        """Phase 4.45 continuous: log curve on cumul intensity, scaled on accel + ratio."""
         if proxy is None or not proxy.is_available:
-            return 0, []
+            return 0.0, []
 
         f = self._params.get("factors", {})
-        pts = 0
+        pts = 0.0
         flags: list[str] = []
 
         cumul_net = proxy.cumul_foreign_20d + proxy.cumul_trust_20d
-        avg_vol = proxy.avg_20d_volume  # shares (same unit as cumul_* raw T86 values)
+        avg_vol = proxy.avg_20d_volume
 
-        # 1. Cumulative intensity
+        # 1. Cumulative intensity — log map
         if avg_vol > 0 and cumul_net > 0:
             cumul_ratio = cumul_net / avg_vol
+            peak_hot = float(f.get("cumul_flow_hot", 8))
+            warm = float(f.get("cumul_flow_warm", 4))
+            if cumul_ratio >= 1.0:
+                pts += peak_hot
+            elif cumul_ratio >= 0.2:
+                # 0.2→warm, 0.5→6, 1.0→peak_hot (log scaled)
+                import math as _m
+                pts += round(warm + _m.log(cumul_ratio / 0.2) / _m.log(5.0) * (peak_hot - warm), 2)
+            else:
+                pts += round(cumul_ratio / 0.2 * warm, 2)
             if cumul_ratio >= 0.5:
-                pts += f.get("cumul_flow_hot", 8)
                 flags.append(f"CUMUL_FLOW_HOT:{cumul_ratio:.1f}x")
             elif cumul_ratio >= 0.2:
-                pts += f.get("cumul_flow_warm", 4)
                 flags.append(f"CUMUL_FLOW_WARM:{cumul_ratio:.1f}x")
 
-        # 2. Acceleration on surge day (near-5d avg >> 20d avg)
+        # 2. Acceleration on surge day — continuous on accel magnitude
         if proxy.inst_flow_accel >= 1.5 and cumul_net > 0:
-            pts += f.get("flow_accel_bonus", 3)
+            peak_accel = float(f.get("flow_accel_bonus", 3))
+            # 1.5→2.0, 3.0+→peak
+            if proxy.inst_flow_accel >= 3.0:
+                pts += peak_accel
+            else:
+                pts += round(2.0 + (proxy.inst_flow_accel - 1.5) / 1.5 * (peak_accel - 2.0), 2)
             flags.append(f"FLOW_ACCEL:{proxy.inst_flow_accel:.1f}x")
 
-        # 3. Quiet accumulation pattern: consistent buying across the window
+        # 3. Quiet accumulation — continuous on inst_buy_days_ratio
         if (proxy.inst_buy_days_ratio >= 0.55
                 and cumul_net > 0
                 and proxy.inst_flow_accel >= 0.8):
-            pts += f.get("quiet_accum", 6)
+            peak_quiet = float(f.get("quiet_accum", 6))
+            # 0.55→4, 0.80+→peak
+            if proxy.inst_buy_days_ratio >= 0.80:
+                pts += peak_quiet
+            else:
+                pts += round(4.0 + (proxy.inst_buy_days_ratio - 0.55) / 0.25 * (peak_quiet - 4.0), 2)
             flags.append(f"QUIET_ACCUM:{proxy.inst_buy_days_ratio:.0%}")
 
-        return pts, flags
+        return round(pts, 2), flags
 
     def _score_ownership_concentration(
         self, proxy: TWSEChipProxy | None
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[float, list[str]]:
         """集保大戶進、散戶退 — 週級籌碼集中度，雙向評分。
 
         加分：大戶增持 / 散戶退出
         扣分：散戶週增（主力尚未進場或正在出貨）
         聯合懲罰：融資高 + 散戶增 = 散戶用槓桿追高，最危險組合
         """
+        """Phase 4.45 continuous: linear on holdings_chg magnitudes."""
         if proxy is None or not proxy.is_available:
-            return 0, []
+            return 0.0, []
         f = self._params.get("factors", {})
-        pts = 0
+        pts = 0.0
         flags: list[str] = []
 
         large = proxy.large_holder_chg_pct
@@ -522,33 +658,50 @@ class SurgeRadar:
 
         # ── 加分 ──────────────────────────────────────────────────────────────
         if large is not None and large > 0:
-            pts += f.get("chip_large_holder_up", 5)
+            peak_large = float(f.get("chip_large_holder_up", 5))
+            # 0→0, 0.5%→peak (linear)
+            if large >= 0.5:
+                pts += peak_large
+            else:
+                pts += round(large / 0.5 * peak_large, 2)
             flags.append(f"CHIP_LARGE_UP:{large:+.2f}%")
         if retail is not None and retail < 0:
-            pts += f.get("chip_retail_exit", 3)
+            peak_exit = float(f.get("chip_retail_exit", 3))
+            abs_r = -retail
+            if abs_r >= 0.5:
+                pts += peak_exit
+            else:
+                pts += round(abs_r / 0.5 * peak_exit, 2)
             flags.append(f"CHIP_RETAIL_OUT:{retail:+.2f}%")
 
         # ── 扣分：散戶流入 ────────────────────────────────────────────────────
         if retail is not None and retail > 0:
+            penalty_surge = float(f.get("chip_retail_surge_penalty", -5))
+            penalty_in = float(f.get("chip_retail_in_penalty", -3))
             if retail > 0.5:
-                pts += f.get("chip_retail_surge_penalty", -5)
+                # 0.5→penalty_in, 1.0+→penalty_surge
+                if retail >= 1.0:
+                    pts += penalty_surge
+                else:
+                    pts += round(penalty_in + (retail - 0.5) / 0.5 * (penalty_surge - penalty_in), 2)
                 flags.append(f"CHIP_RETAIL_SURGE:{retail:+.2f}%")
             else:
-                pts += f.get("chip_retail_in_penalty", -3)
+                # 0→0, 0.5→penalty_in linear
+                pts += round(retail / 0.5 * penalty_in, 2)
                 flags.append(f"CHIP_RETAIL_IN:{retail:+.2f}%")
 
         # ── 聯合懲罰：融資過熱 + 散戶增 ──────────────────────────────────────
         margin_util = proxy.margin_utilization_rate
         if (retail is not None and retail > 0
                 and margin_util is not None and margin_util > 0.20):
-            pts += f.get("retail_leverage_trap_penalty", -5)
+            pts += float(f.get("retail_leverage_trap_penalty", -5))
             flags.append(f"RETAIL_LEVERAGE_TRAP:{margin_util*100:.1f}%")
 
-        return pts, flags
+        return round(pts, 2), flags
 
     def _score_daytrade_penalty(
         self, proxy: TWSEChipProxy | None
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[float, list[str]]:
         """當沖比例高 = 籌碼不穩、散戶頻繁進出，扣分。"""
         if proxy is None or not proxy.is_available:
             return 0, []
@@ -564,30 +717,31 @@ class SurgeRadar:
 
     def _score_ma5_walk(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV], n: int = 10
-    ) -> tuple[int, list[str]]:
-        """Quality confirmer: close walking MA5 after surge indicates sustained demand."""
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous: 0.5→0, 0.8→1.0, 1.0→2.0; <0.5 + below MA5 → -1."""
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         all_bars = sorted_h + [ohlcv]
         closes = pd.Series([d.close for d in all_bars])
         if len(closes) < 5:
-            return 0, []
+            return 0.0, []
         ma5 = closes.rolling(5).mean()
         window = min(n, len(closes))
         close_win = closes.iloc[-window:]
         ma5_win = ma5.iloc[-window:]
         valid = ma5_win.notna()
         if valid.sum() == 0:
-            return 0, []
+            return 0.0, []
         ratio = float((close_win[valid] >= ma5_win[valid]).mean())
-        if ratio >= 0.8:
-            return 2, ["MA5_WALK"]
-        # Only penalise if surge-day close is itself below MA5 (downtrend still active).
-        # Stocks recovering from a crash base will have a low historical ratio but their
-        # surge-day close may already be above MA5 — don't penalise that breakout.
+        if ratio >= 0.5:
+            # 0.5→0, 1.0→2.0 (linear)
+            pts = round((ratio - 0.5) / 0.5 * 2.0, 2)
+            if pts > 0:
+                return pts, ["MA5_WALK"]
+            return 0.0, []
         current_ma5 = ma5.iloc[-1]
-        if ratio < 0.5 and pd.notna(current_ma5) and ohlcv.close < current_ma5:
-            return -1, ["MA5_BREAK"]
-        return 0, []
+        if pd.notna(current_ma5) and ohlcv.close < current_ma5:
+            return -1.0, ["MA5_BREAK"]
+        return 0.0, []
 
     def _score_bb_upper_walk(
         self,
@@ -595,7 +749,7 @@ class SurgeRadar:
         surge_day: int,
         n: int = 5,
         tolerance: float = 0.03,
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[float, list[str]]:
         """BB upper walk: MOMENTUM_WALK tag on surge_day<=2; exhaustion deduction on day>=3."""
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         closes = pd.Series([d.close for d in sorted_h])
@@ -612,15 +766,17 @@ class SurgeRadar:
         bb_upper_rising = float(bb_upper.iloc[-1]) > float(bb_upper.iloc[-n])
         if near_upper >= 3 and bb_upper_rising:
             if surge_day >= 3:
-                return -3, ["BB_UPPER_EXHAUSTION"]
-            return 0, ["MOMENTUM_WALK"]
-        return 0, []
+                # Phase 4.45: scale exhaustion by surge_day depth: day3→-2, day5+→-3
+                penalty = max(-3.0, -2.0 - (surge_day - 3) * 0.5)
+                return round(penalty, 2), ["BB_UPPER_EXHAUSTION"]
+            return 0.0, ["MOMENTUM_WALK"]
+        return 0.0, []
 
     # ------------------------------------------------------------------
     # Grade + aggregate
     # ------------------------------------------------------------------
 
-    def _grade(self, score: int) -> str | None:
+    def _grade(self, score: float) -> str | None:
         t = self._params.get("grade_thresholds", {})
         if score >= t.get("SURGE_ALPHA", 55):
             return "SURGE_ALPHA"
@@ -632,67 +788,74 @@ class SurgeRadar:
 
     def _score_foreign_trend(
         self, proxy: TWSEChipProxy | None
-    ) -> tuple[int, list[str]]:
-        """Factor A: 外資W1/W2趨勢加速比 (0 to +4)."""
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous: 1.0→0, 1.3→2.0, 2.0+→4.0 linear."""
         if proxy is None or not proxy.is_available:
-            return 0, []
+            return 0.0, []
         accel = proxy.foreign_trend_accel
-        if accel <= 0:
-            return 0, []
+        if accel <= 1.0:
+            return 0.0, []
         if accel >= 2.0:
-            return 4, [f"FOREIGN_ACCEL:{accel:.1f}x"]
+            return 4.0, [f"FOREIGN_ACCEL:{accel:.1f}x"]
         if accel >= 1.3:
-            return 2, [f"FOREIGN_ACCEL_MILD:{accel:.1f}x"]
-        return 0, []
+            pts = round(2.0 + (accel - 1.3) / 0.7 * 2.0, 2)
+            return pts, [f"FOREIGN_ACCEL_MILD:{accel:.1f}x"]
+        # 1.0→0, 1.3→2.0
+        pts = round((accel - 1.0) / 0.3 * 2.0, 2)
+        return pts, []
 
     def _score_short_cover(
         self, proxy: TWSEChipProxy | None
-    ) -> tuple[int, list[str]]:
-        """Factor B: 融券回補率 (空頭投降訊號) (0 to +4)."""
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous: 0.10→2.0, 0.20+→4.0 linear."""
         if proxy is None or not proxy.is_available:
-            return 0, []
+            return 0.0, []
         rate = proxy.short_cover_rate
-        if rate > 0.20:
-            return 4, [f"SHORT_CAPITULATION:{rate:.0%}"]
-        if rate > 0.10:
-            return 2, [f"SHORT_COVER:{rate:.0%}"]
-        return 0, []
+        if rate <= 0.10:
+            return 0.0, []
+        if rate >= 0.20:
+            return 4.0, [f"SHORT_CAPITULATION:{rate:.0%}"]
+        pts = round(2.0 + (rate - 0.10) / 0.10 * 2.0, 2)
+        return pts, [f"SHORT_COVER:{rate:.0%}"]
 
     def _score_large_2w_trend(
         self, proxy: TWSEChipProxy | None
-    ) -> tuple[int, list[str]]:
-        """Factor C: 400張+大戶兩週持股趨勢 (0 to +5)."""
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous: 0→0, 0.5→3.0, 1.5+→5.0 linear."""
         if proxy is None or not proxy.is_available:
-            return 0, []
+            return 0.0, []
         trend = proxy.large_holder_2w_trend
-        if trend is None:
-            return 0, []
-        if trend > 1.5:
-            return 5, [f"HOLDER_2W_UPTREND:{trend:+.2f}%"]
+        if trend is None or trend <= 0:
+            return 0.0, []
+        if trend >= 1.5:
+            return 5.0, [f"HOLDER_2W_UPTREND:{trend:+.2f}%"]
         if trend > 0.5:
-            return 3, [f"HOLDER_2W_UP:{trend:+.2f}%"]
-        if trend > 0:
-            return 1, []
-        return 0, []
+            pts = round(3.0 + (trend - 0.5) / 1.0 * 2.0, 2)
+            return pts, [f"HOLDER_2W_UP:{trend:+.2f}%"]
+        # 0→0, 0.5→3.0 linear
+        pts = round(trend / 0.5 * 3.0, 2)
+        return pts, []
 
     def _score_inst_accel_short(
         self, proxy: TWSEChipProxy | None
-    ) -> tuple[int, list[str]]:
-        """Factor D: 法人短窗加速 3d/10d (0 to +4)."""
+    ) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous: 1.0→0, 1.3→2.0, 2.0+→4.0 linear."""
         if proxy is None or not proxy.is_available:
-            return 0, []
+            return 0.0, []
         accel = proxy.inst_accel_3d_10d
-        if accel <= 0:
-            return 0, []
+        if accel <= 1.0:
+            return 0.0, []
         if accel >= 2.0:
-            return 4, [f"INST_SURGE:{accel:.1f}x"]
+            return 4.0, [f"INST_SURGE:{accel:.1f}x"]
         if accel >= 1.3:
-            return 2, [f"INST_ACCEL_SHORT:{accel:.1f}x"]
-        return 0, []
+            pts = round(2.0 + (accel - 1.3) / 0.7 * 2.0, 2)
+            return pts, [f"INST_ACCEL_SHORT:{accel:.1f}x"]
+        pts = round((accel - 1.0) / 0.3 * 2.0, 2)
+        return pts, []
 
     def _score_taifex_context(
         self, heat_context: dict | None
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[float, list[str]]:
         """Factor E: 台指期外資淨多單 + 大盤融資維持率壓力懲罰."""
         if not heat_context:
             return 0, []
@@ -710,47 +873,51 @@ class SurgeRadar:
                 flags.append("MARKET_MARGIN_STRESS")
         return pts, flags
 
-    def _score_market_heat(self, ctx: dict | None) -> tuple[int, list[str]]:
-        """Bonus from overnight market heat snapshot (industry 5d trend + concepts + intl).
-
-        ctx keys (all optional):
-            ind_5d_rank_pct  float  — industry 5d momentum percentile (0–100)
-            accelerating     bool   — industry 1d > 5d/5 by > 0.5%
-            hot_concepts     list   — concept keys with rank_pct >= 70
-            intl_tailwind    int    — sum of overseas tailwind scores for this ticker
-        """
+    def _score_market_heat(self, ctx: dict | None) -> tuple[float, list[str]]:
+        """Phase 4.45 continuous: linear on industry rank + log on concept count + capped intl."""
         if not ctx:
-            return 0, []
-        pts, flags = 0, []
+            return 0.0, []
+        pts = 0.0
+        flags: list[str] = []
         f = self._params.get("factors", {})
 
         ind_rank = ctx.get("ind_5d_rank_pct", 0) or 0
+        hot = float(f.get("heat_ind_hot", 3))
+        warm = float(f.get("heat_ind_warm", 2))
         if ind_rank >= 80:
-            pts += f.get("heat_ind_hot", 3)
+            pts += hot
             flags.append(f"IND_HEAT_HOT:{ind_rank:.0f}")
         elif ind_rank >= 60:
-            pts += f.get("heat_ind_warm", 2)
+            # 60→warm, 80→hot linear
+            pts += round(warm + (ind_rank - 60) / 20.0 * (hot - warm), 2)
             flags.append(f"IND_HEAT_WARM:{ind_rank:.0f}")
+        elif ind_rank >= 40:
+            # 40→0, 60→warm linear
+            pts += round((ind_rank - 40) / 20.0 * warm, 2)
 
         if ctx.get("accelerating"):
-            pts += f.get("heat_ind_accel", 2)
+            pts += float(f.get("heat_ind_accel", 2))
             flags.append("IND_ACCEL")
 
         hot_concepts = ctx.get("hot_concepts") or []
         if hot_concepts:
-            base = f.get("heat_concept", 8)
-            bonus = f.get("heat_concept_multi", 5) if len(hot_concepts) >= 2 else 0
-            pts += base + bonus
+            base = float(f.get("heat_concept", 8))
+            multi = float(f.get("heat_concept_multi", 5))
+            # 1 concept → base, 2 → base+multi, 3+ → base+multi+small bonus (capped)
+            extra = multi if len(hot_concepts) >= 2 else 0.0
+            if len(hot_concepts) >= 3:
+                extra = min(multi + 2.0, multi + (len(hot_concepts) - 2) * 1.0)
+            pts += base + extra
             label = f"{hot_concepts[0]}" + (f"+{len(hot_concepts)-1}more" if len(hot_concepts) > 1 else "")
             flags.append(f"CONCEPT_HOT:{label}")
 
         intl = ctx.get("intl_tailwind", 0) or 0
         if intl > 0:
-            bonus = min(intl, f.get("heat_intl_max", 2))
+            bonus = min(float(intl), float(f.get("heat_intl_max", 2)))
             pts += bonus
             flags.append(f"INTL_TAIL:+{intl}")
 
-        return pts, flags
+        return round(pts, 2), flags
 
     def score_full(
         self,
@@ -769,8 +936,8 @@ class SurgeRadar:
             return None
 
         all_flags: list[str] = gate_flags[:]
-        breakdown: dict[str, int] = {}
-        raw = 0
+        breakdown: dict[str, float] = {}
+        raw = 0.0
 
         consec = self._consecutive_surge_days(ohlcv, history)
 
@@ -810,7 +977,8 @@ class SurgeRadar:
             all_flags.extend(flags)
 
         raw_max = self._params.get("raw_max_pts", 87)
-        score = min(100, round(raw / raw_max * 100))
+        # Phase 4.45: keep continuous score (no min(100, ...)) for finer differentiation
+        score = round(raw / raw_max * 100, 2)
         grade = self._grade(score)
 
         if grade is None:
