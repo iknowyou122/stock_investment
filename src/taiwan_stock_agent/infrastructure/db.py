@@ -24,11 +24,12 @@ def _get_dsn() -> str:
     return dsn
 
 
-def init_pool(minconn: int = 1, maxconn: int = 5) -> None:
+def init_pool(minconn: int = 1, maxconn: int = 16) -> None:
     """Initialize the global connection pool.
 
     Call once at application startup before using get_connection().
     Safe to call multiple times — subsequent calls are no-ops.
+    maxconn=16 is large enough for 8-worker batch scans with headroom.
     """
     global _connection_pool
     if _connection_pool is not None:
