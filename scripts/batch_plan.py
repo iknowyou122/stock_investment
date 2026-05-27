@@ -2227,6 +2227,20 @@ def _generate_plan_html(
             _seen_inds.add(ind)
             unique_industries.append(ind)
 
+    # Collect all unique concept names for filter pills (hot-first, then alphabetical)
+    _seen_cnames: set[str] = set()
+    _all_concepts_hot: list[str] = []
+    _all_concepts_cold: list[str] = []
+    for r in filtered:
+        for cname, chot in ticker_concepts.get(r["ticker"], []):
+            if cname not in _seen_cnames:
+                _seen_cnames.add(cname)
+                if chot:
+                    _all_concepts_hot.append(cname)
+                else:
+                    _all_concepts_cold.append(cname)
+    all_concept_names: list[str] = sorted(_all_concepts_hot) + sorted(_all_concepts_cold)
+
     cards: list[str] = []
     for i, r in enumerate(filtered):
         ticker = r["ticker"]
@@ -2281,6 +2295,7 @@ def _generate_plan_html(
         ctags: list[tuple[str, bool]] = list(ticker_concepts.get(ticker, []))
         # hot concepts first, then cold; cap at 6 total
         ctags_sorted = sorted(ctags, key=lambda x: (not x[1], x[0]))[:6]
+        concept_names_joined = ",".join(n for n, _ in ctags_sorted)
         concept_html = (
             '<div class="ctag-row">' +
             "".join(
@@ -2325,7 +2340,7 @@ def _generate_plan_html(
             fund_badge = ""
 
         cards.append(f"""
-    <div class="card" data-action="{action}" data-conf="{conf}" data-industry="{_esc(raw_industry)}" style="animation-delay:{delay}s">
+    <div class="card" data-action="{action}" data-conf="{conf}" data-industry="{_esc(raw_industry)}" data-concepts="{_esc(concept_names_joined)}" style="animation-delay:{delay}s">
       <div class="card-header">
         <div class="rank">{i+1}</div>
         <div class="info">
@@ -2361,9 +2376,10 @@ def _generate_plan_html(
     </div>""")
 
     # Build rotation radar HTML for header
-    def _heat_badge(label: str, cls: str, title: str = "") -> str:
+    def _heat_badge(label: str, cls: str, title: str = "", concept: str = "") -> str:
         t = f' title="{_esc(title)}"' if title else ""
-        return f'<span class="hbadge {cls}"{t}>{_esc(label)}</span>'
+        c = f' data-concept="{_esc(concept)}" onclick="toggleConceptBadge(this)"' if concept else ""
+        return f'<span class="hbadge {cls}"{t}{c}>{_esc(label)}</span>'
 
     radar_rows: list[str] = []
     hot_inds = hs.get("hot_industries", [])
@@ -2388,7 +2404,7 @@ def _generate_plan_html(
                 return _esc(c["name_zh"])
             sign = "+" if ret >= 0 else ""
             return f'{_esc(c["name_zh"])} {sign}{ret:.1f}%'
-        badges = "".join(_heat_badge(_fmt_concept(c), "hb-concept") for c in hot_concepts)
+        badges = "".join(_heat_badge(_fmt_concept(c), "hb-concept", concept=c["name_zh"]) for c in hot_concepts)
         radar_rows.append(f'<div class="radar-row"><span class="radar-label">💡 熱門題材</span>{badges}</div>')
     if rotation_candidates:
         def _fmt_cand(c: dict) -> str:
@@ -2396,7 +2412,7 @@ def _generate_plan_html(
             star = "★" if state == "EMERGING" else ""
             triggers = "、".join(c.get("trigger_labels", [])[:2])
             tip = f'觸發: {triggers} | 預期{c.get("avg_lag_weeks",2):.0f}週 | {c.get("note","")}'
-            return _heat_badge(f'{star}{c["label"]}', "hb-rotation", tip)
+            return _heat_badge(f'{star}{c["label"]}', "hb-rotation", tip, concept=c["label"])
         badges = "".join(_fmt_cand(c) for c in rotation_candidates)
         radar_rows.append(f'<div class="radar-row"><span class="radar-label">📡 輪動候選</span>{badges}</div>')
     radar_html = (
@@ -2424,11 +2440,13 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .radar-row{{display:flex;align-items:center;flex-wrap:wrap;gap:6px}}
 .radar-label{{font-size:11px;color:#8b949e;min-width:80px;flex-shrink:0}}
 .hbadge{{display:inline-block;font-size:11px;font-weight:600;padding:3px 10px;border-radius:12px;white-space:nowrap}}
-.hb-hot{{background:rgba(248,81,73,.12);color:#ff7b7b;border:1px solid rgba(248,81,73,.25)}}
+.hb-hot{{background:rgba(248,81,73,.12);color:#ff7b7b;border:1px solid rgba(248,81,73,.25);cursor:pointer;transition:all .15s}}
 .hb-warm{{background:rgba(63,185,80,.10);color:#52c261;border:1px solid rgba(63,185,80,.25)}}
 .hb-cooling{{background:rgba(210,153,34,.10);color:#d29922;border:1px solid rgba(210,153,34,.25)}}
-.hb-concept{{background:rgba(163,113,247,.12);color:#a78bfa;border:1px solid rgba(163,113,247,.25)}}
-.hb-rotation{{background:rgba(56,139,253,.12);color:#58a6ff;border:1px solid rgba(56,139,253,.25);cursor:default}}
+.hb-concept{{background:rgba(163,113,247,.12);color:#a78bfa;border:1px solid rgba(163,113,247,.25);cursor:pointer;transition:all .15s}}
+.hb-rotation{{background:rgba(56,139,253,.12);color:#58a6ff;border:1px solid rgba(56,139,253,.25);cursor:pointer;transition:all .15s}}
+.hbadge.hb-active{{outline:2px solid #fff;outline-offset:1px;opacity:1!important}}
+.hbadge:hover:not(.hb-active){{opacity:.75}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:16px;padding:24px}}
 .card{{background:#161b22;border:1px solid #21262d;border-radius:12px;overflow:hidden;
   transition:border-color .2s,transform .2s;animation:fadeIn .5s ease forwards;opacity:0}}
@@ -2534,6 +2552,10 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
       {"".join(f'<option value="{_esc(ind)}">{_esc(ind)}</option>' for ind in unique_industries)}
     </select>
   </div>
+  {(('<div class="fb-group" id="conceptFilterGroup"><span class="fb-label">題材</span>' +
+     "".join(f'<button class="fb-pill concept-pill" data-concept="{_esc(n)}">{_esc(n)}</button>'
+             for n in all_concept_names) +
+     '</div>') if all_concept_names else "")}
   <div class="fb-count">顯示 <span id="visCount">{len(filtered)}</span> / {len(filtered)} 支</div>
 </div>
 <div class="grid" id="cardGrid">
@@ -2582,6 +2604,7 @@ document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.ob
   var activeAction = "ALL";
   var minConf = {min_confidence};
   var activeInd = "";
+  var selectedConcepts = new Set();
 
   function applyFilters() {{
     var cards = document.querySelectorAll("#cardGrid .card");
@@ -2590,14 +2613,45 @@ document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.ob
       var a = c.dataset.action;
       var conf = parseInt(c.dataset.conf, 10);
       var ind = c.dataset.industry;
+      var cardConceptsRaw = c.dataset.concepts || "";
+      var cardConcepts = cardConceptsRaw ? new Set(cardConceptsRaw.split(",")) : new Set();
+      var conceptMatch = selectedConcepts.size === 0
+        || [...selectedConcepts].every(function(sc) {{ return cardConcepts.has(sc); }});
       var show = (activeAction === "ALL" || a === activeAction)
                && conf >= minConf
-               && (activeInd === "" || ind === activeInd);
+               && (activeInd === "" || ind === activeInd)
+               && conceptMatch;
       c.classList.toggle("hidden", !show);
       if (show) visible++;
     }});
     document.getElementById("visCount").textContent = visible;
   }}
+
+  function toggleConcept(name) {{
+    var pill = document.querySelector('.concept-pill[data-concept="' + CSS.escape(name) + '"]');
+    if (selectedConcepts.has(name)) {{
+      selectedConcepts.delete(name);
+      if (pill) pill.classList.remove("active");
+    }} else {{
+      selectedConcepts.add(name);
+      if (pill) pill.classList.add("active");
+    }}
+    // sync radar badges
+    document.querySelectorAll('.hbadge[data-concept]').forEach(function(b) {{
+      b.classList.toggle("hb-active", selectedConcepts.has(b.dataset.concept));
+    }});
+    applyFilters();
+  }}
+
+  window.toggleConceptBadge = function(badge) {{
+    toggleConcept(badge.dataset.concept);
+  }};
+
+  document.querySelectorAll(".concept-pill").forEach(function(btn) {{
+    btn.addEventListener("click", function() {{
+      toggleConcept(btn.dataset.concept);
+    }});
+  }});
 
   document.querySelectorAll("[data-filter-action]").forEach(function(btn) {{
     btn.addEventListener("click", function() {{
