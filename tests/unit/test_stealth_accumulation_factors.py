@@ -161,15 +161,16 @@ class TestHolderCountDeclining:
 # ---------------------------------------------------------------------------
 
 class TestChipConcentrationAccel:
-    def test_acceleration_with_super_large_gives_6pts(self):
-        # this_week=1.0%, last_week=0.3% → acceleration; super_large also up
+    def test_acceleration_with_super_large_continuous(self):
+        """Phase 4.44 continuous: this_week=1.0%, peak=6.0 at 1.5%, linear floor 3.0 at 0.5%.
+        1.0% → 3.0 + (1.0-0.5)/1.0*(6-3) = 4.5."""
         proxy = _proxy(
             large_holder_chg_pct=1.0,
-            large_holder_2w_trend=1.3,    # 2wk trend = 1.0 + 0.3 → last_week=0.3
+            large_holder_2w_trend=1.3,
             super_large_holder_chg_pct=0.5,
         )
         pts, flag = TCE._chip_concentration_accel_score(proxy)
-        assert pts == 6
+        assert pts == pytest.approx(4.5, abs=0.05)
         assert "CHIP_ACCEL_PRIME" in flag
 
     def test_acceleration_without_super_large_gives_3pts(self):
@@ -216,10 +217,11 @@ class TestShortSqueezeSetup:
         assert pts == 5
         assert "SHORT_SQUEEZE_SETUP" in flag
 
-    def test_medium_ratio_medium_cover_gives_3pts(self):
+    def test_medium_ratio_medium_cover_continuous(self):
+        """Phase 4.44: 0.25→3.0, 0.40→5.0. SMR=0.30 → 3.0 + (0.30-0.25)/0.15*2 = 3.67."""
         proxy = _proxy(short_margin_ratio=0.30, short_cover_rate=0.10)
         pts, flag = TCE._short_squeeze_setup_score(proxy)
-        assert pts == 3
+        assert pts == pytest.approx(3.67, abs=0.05)
         assert "SHORT_SQUEEZE_SETUP" in flag
 
     def test_low_ratio_gives_zero(self):
@@ -292,7 +294,7 @@ class TestStealthAccumComposite:
         history = _history(15, base_close=100.0, flat=True)
         today = _ohlcv(100.2)
         pts, flag = TCE._stealth_accum_composite_score(bd, today, history, None)
-        assert isinstance(pts, int)
+        assert isinstance(pts, (int, float))  # Phase 4.44: now float
 
     def test_price_surge_breaks_condition_6_and_drops_to_zero(self):
         # Only 3/6 conditions met: [5] dryup, [3] holder, [4] accel

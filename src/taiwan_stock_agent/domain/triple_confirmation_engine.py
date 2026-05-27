@@ -1004,15 +1004,15 @@ class TripleConfirmationEngine:
     @staticmethod
     def _obv_accumulation_score(
         ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> tuple[int, str | None]:
-        """OBV 20d 斜率向上 = 橫盤中大戶暗吸。
-        OBV 上升 + 股價橫盤 → 籌碼正在被吸收。
-        Scores: PRIME（橫盤+強斜率）→ +5, 斜率正 → +3/+2.
+    ) -> tuple[float, str | None]:
+        """OBV 20d 斜率 — continuous on normalized_slope.
+        + side: 0.02→2.0, 0.05→3.0/5.0(PRIME), 0.08+→ peak
+        - side: -0.05→-3.0 (distribution)
         """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         bars = sorted_h[-20:] if len(sorted_h) >= 20 else sorted_h
         if len(bars) < 10:
-            return 0, None
+            return 0.0, None
 
         obv = 0
         obv_series: list[float] = [0.0]
@@ -1024,7 +1024,6 @@ class TripleConfirmationEngine:
                 obv -= curr.volume
             obv_series.append(float(obv))
 
-        # Append today's bar
         if ohlcv.close > bars[-1].close:
             obv += ohlcv.volume
         elif ohlcv.close < bars[-1].close:
@@ -1035,38 +1034,47 @@ class TripleConfirmationEngine:
         all_bars = bars + [ohlcv]
         avg_vol = sum(b.volume for b in all_bars) / len(all_bars)
         if avg_vol <= 0:
-            return 0, None
+            return 0.0, None
 
         normalized_slope = (obv_series[-1] - obv_series[0]) / (n * avg_vol)
 
-        # Detect consolidation: price range < 10% over window
         closes = [b.close for b in all_bars]
         lo = min(closes)
         price_range_pct = (max(closes) - lo) / lo if lo > 0 else 1.0
         in_consolidation = price_range_pct < 0.10
 
-        if normalized_slope > 0.05:
-            return (5, "OBV_ACCUM_PRIME") if in_consolidation else (3, "OBV_ACCUM")
+        # Positive side — continuous
         if normalized_slope > 0.02:
-            return 2, "OBV_ACCUM"
-        # 明顯出貨：OBV 斜率大幅負值 → 扣分
-        if normalized_slope < -0.05:
-            return -3, "OBV_DIST"
-        return 0, None
+            # base: 0.02→2.0, 0.05→3.0, 0.08+→3.5 (regular OBV_ACCUM)
+            if normalized_slope >= 0.08:
+                base = 3.5
+            elif normalized_slope >= 0.05:
+                base = round(3.0 + (normalized_slope - 0.05) / 0.03 * 0.5, 2)
+            else:
+                base = round(2.0 + (normalized_slope - 0.02) / 0.03 * 1.0, 2)
+            # PRIME bonus when in consolidation and strong slope (≥0.05)
+            if in_consolidation and normalized_slope >= 0.05:
+                # boost to 5.0 ceiling
+                return round(min(5.0, base + 1.5), 2), "OBV_ACCUM_PRIME"
+            return base, "OBV_ACCUM"
+        # Negative side — continuous deduction
+        if normalized_slope < -0.02:
+            # -0.02→0, -0.05→-3.0, beyond→max -3.0 floor
+            pts = max(-3.0, round((normalized_slope + 0.02) / 0.03 * 3.0, 2))
+            return pts, "OBV_DIST"
+        return 0.0, None
 
     @staticmethod
     def _vol_asymmetry_score(
         ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> tuple[int, str | None]:
-        """上漲日均量 vs 下跌日均量。
-        上漲日平均量 ÷ 下跌日平均量 ≥ 1.5 → +4 ; ≥ 1.2 → +2.
-        大戶在下跌日吸貨（量大）、上漲日讓股價輕鬆漲（量小）時比值 < 1（反向），
-        此處偵測的是「買盤強於賣壓」型的正向不對稱。
+    ) -> tuple[float, str | None]:
+        """上漲日均量 / 下跌日均量 — continuous on log ratio.
+        ratio 1.2 → 2.0, 1.5 → 4.0; 0.7 → -2.0, 0.5 → -4.0; flat ~1.0 → 0.
         """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         bars = (sorted_h[-20:] if len(sorted_h) >= 20 else sorted_h) + [ohlcv]
         if len(bars) < 8:
-            return 0, None
+            return 0.0, None
 
         up_vols: list[int] = []
         down_vols: list[int] = []
@@ -1078,60 +1086,76 @@ class TripleConfirmationEngine:
                 down_vols.append(curr.volume)
 
         if len(up_vols) < 3 or len(down_vols) < 3:
-            return 0, None
+            return 0.0, None
 
         avg_up = sum(up_vols) / len(up_vols)
         avg_down = sum(down_vols) / len(down_vols)
         if avg_down <= 0:
-            return 0, None
+            return 0.0, None
 
         ratio = avg_up / avg_down
-        if ratio >= 1.5:
-            return 4, f"VOL_ASYM:{ratio:.1f}x"
         if ratio >= 1.2:
-            return 2, f"VOL_ASYM:{ratio:.1f}x"
-        # 下跌日量能明顯大於上漲日 → 賣壓沉重
-        if ratio < 0.5:
-            return -4, f"VOL_ASYM_WEAK:{ratio:.1f}x"
+            # 1.2→2.0, 1.5→4.0, cap 4.0
+            if ratio >= 1.5:
+                pts = 4.0
+            else:
+                pts = round(2.0 + (ratio - 1.2) / 0.3 * 2.0, 2)
+            return pts, f"VOL_ASYM:{ratio:.1f}x"
         if ratio < 0.7:
-            return -2, f"VOL_ASYM_WEAK:{ratio:.1f}x"
-        return 0, None
+            # 0.7→-2.0, 0.5→-4.0, cap -4.0
+            if ratio < 0.5:
+                pts = -4.0
+            else:
+                pts = round(-2.0 - (0.7 - ratio) / 0.2 * 2.0, 2)
+            return pts, f"VOL_ASYM_WEAK:{ratio:.1f}x"
+        return 0.0, None
 
     @staticmethod
-    def _volume_climax_score(history: list[DailyOHLCV]) -> int:
-        """Prior spike day + current dryup. Max 4 pts."""
+    def _volume_climax_score(history: list[DailyOHLCV]) -> float:
+        """Prior spike + current dryup — continuous, max 4 pts.
+        spike_strength × dryup_strength scaled to [0, 4].
+        """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         if len(sorted_h) < 20:
-            return 0
+            return 0.0
         vols = [d.volume for d in sorted_h]
         avg_20d = sum(vols[-20:]) / 20
         if avg_20d <= 0:
-            return 0
-        has_prior_climax = any(v > avg_20d * 2.0 for v in vols[-20:-5])
+            return 0.0
+        # Spike strength: max prior vol / avg, capped at 3x → 1.0
+        prior_max = max(vols[-20:-5]) if len(vols) >= 5 else 0
+        spike_ratio = prior_max / avg_20d
+        spike_strength = min(1.0, max(0.0, (spike_ratio - 1.5) / 1.5))  # 1.5x→0, 3.0x→1.0
         avg_5d = sum(vols[-5:]) / 5
-        has_current_dryup = (avg_5d / avg_20d) < 0.80
-        return 4 if (has_prior_climax and has_current_dryup) else 0
+        dryup_ratio = avg_5d / avg_20d
+        dryup_strength = min(1.0, max(0.0, (1.0 - dryup_ratio) / 0.4))  # 1.0→0, 0.6→1.0
+        return round(spike_strength * dryup_strength * 4.0, 2)
 
     def _vwap_advantage_score(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> tuple[int, str | None]:
-        """VWAP advantage: close > 5d_avg_vwap → +6.
-        Intraday VWAP unavailable on T+1 daily data so only 5d tier is used.
+    ) -> tuple[float, str | None]:
+        """VWAP advantage — continuous on (close-vwap)/vwap.
+        Linear: 0% above → 0, +6% above → 6.0 (cap).
         """
         vwap_5d = self._vwap_5d(history)
-        if vwap_5d is None:
-            return 0, "INSUFFICIENT_HISTORY_VWAP5D"
-        return (6, None) if ohlcv.close > vwap_5d else (0, None)
+        if vwap_5d is None or vwap_5d <= 0:
+            return 0.0, "INSUFFICIENT_HISTORY_VWAP5D"
+        if ohlcv.close <= vwap_5d:
+            return 0.0, None
+        excess = (ohlcv.close - vwap_5d) / vwap_5d  # 0.0..0.06+
+        pts = min(6.0, excess / 0.06 * 6.0)
+        return round(pts, 2), None
 
     def _trend_continuity_score(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> int:
-        """Trend continuity: 3 consec up → +3; 4-of-last-5 bars up → +5 (takes precedence)."""
+    ) -> float:
+        """Trend continuity — continuous on % up days in last 5.
+        Linear: ≥4 up bars → 5.0 (max); 3 consec up → at least 3.0 floor.
+        """
         all_bars = sorted(history, key=lambda x: x.trade_date) + [ohlcv]
         if len(all_bars) < 3:
-            return 0
+            return 0.0
 
-        # Count consecutive up days from the end
         consec = 0
         for i in range(len(all_bars) - 1, 0, -1):
             if all_bars[i].close > all_bars[i - 1].close:
@@ -1139,19 +1163,18 @@ class TripleConfirmationEngine:
             else:
                 break
 
+        pts = 0.0
         if len(all_bars) >= 5:
-            # Count up bars in last 5 (excluding today as that's in all_bars[-1])
             last5 = all_bars[-5:]
             up_count = sum(
                 1 for i in range(1, len(last5))
                 if last5[i].close > last5[i - 1].close
             )
-            if up_count >= 4:
-                return 5
-
+            # 0..4 up bars → 0..5.0 pts
+            pts = up_count / 4.0 * 5.0
         if consec >= 3:
-            return 3
-        return 0
+            pts = max(pts, 3.0)
+        return round(min(5.0, pts), 2)
 
     def _rsi_momentum_score(self, history: list[DailyOHLCV]) -> float:
         """RSI(14) momentum zone — continuous triangular curve.
@@ -1176,21 +1199,25 @@ class TripleConfirmationEngine:
 
     def _volume_escalation_score(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> int:
-        """Volume escalation: T-3 < T-2 < T-1 → +3; + today > T-1 → +5."""
+    ) -> float:
+        """Volume escalation — continuous on slope of t-3..t-1 + today.
+        Strict gate: T-3 < T-2 < T-1 still required; then continuous on strength.
+        """
         sorted_history = sorted(history, key=lambda x: x.trade_date)
-        # Need at least 4 sessions before today (T-3, T-2, T-1, and today context)
         prev_days = [d for d in sorted_history if d.trade_date < ohlcv.trade_date]
         if len(prev_days) < 3:
-            return 0
-        t1 = prev_days[-1].volume  # yesterday
-        t2 = prev_days[-2].volume  # 2 days ago
-        t3 = prev_days[-3].volume  # 3 days ago
-        if t3 < t2 < t1:
-            if ohlcv.volume > t1:
-                return 5
-            return 3
-        return 0
+            return 0.0
+        t1 = prev_days[-1].volume
+        t2 = prev_days[-2].volume
+        t3 = prev_days[-3].volume
+        if not (t3 < t2 < t1):
+            return 0.0
+        # Base 3.0 for the escalation pattern, plus up to 2.0 bonus on today vs t1
+        base = 3.0
+        if ohlcv.volume > t1 and t1 > 0:
+            extra = min(2.0, (ohlcv.volume - t1) / t1 / 0.5 * 2.0)
+            return round(base + max(0.0, extra), 2)
+        return round(base, 2)
 
     # ------------------------------------------------------------------
     # Pillar 2A: Paid chip scoring
@@ -1198,28 +1225,31 @@ class TripleConfirmationEngine:
 
     def _apply_paid_chip(self, bd: _ScoreBreakdown, chip_report: ChipReport) -> None:
         """Apply FinMind paid chip scoring to breakdown (in-place)."""
-        # 1. Breadth: net_buyer_count_diff tiers
+        # 1. Breadth — continuous on net_buyer_count_diff
+        # 0→0, 1→1.0, 10→5.0, ≥20→10.0
         diff = chip_report.net_buyer_count_diff
-        if diff > 10:
-            bd.breadth_pts = 10
-        elif diff >= 1:
-            bd.breadth_pts = 5
+        if diff <= 0:
+            bd.breadth_pts = 0.0
+        elif diff >= 20:
+            bd.breadth_pts = 10.0
         else:
-            bd.breadth_pts = 0
+            bd.breadth_pts = round(diff / 20.0 * 10.0, 2)
 
-        # 2. Concentration quality (with thin-market cap)
+        # 2. Concentration — continuous on concentration_top15 (with thin-market cap)
         if chip_report.active_branch_count >= 10:
             conc = chip_report.concentration_top15
-            if conc > 0.35:
-                bd.concentration_pts = 10
-            elif conc >= 0.25:
-                bd.concentration_pts = 5
+            # 0.20→0, 0.30→5, 0.45→10 (linear)
+            if conc <= 0.20:
+                bd.concentration_pts = 0.0
+            elif conc >= 0.45:
+                bd.concentration_pts = 10.0
             else:
-                bd.concentration_pts = 0
+                bd.concentration_pts = round((conc - 0.20) / 0.25 * 10.0, 2)
         elif chip_report.active_branch_count > 0:
-            # Thin market: cap at +5 if concentration is strong
-            if chip_report.concentration_top15 > 0.35:
-                bd.concentration_pts = 5
+            # Thin market: cap at 5
+            conc = chip_report.concentration_top15
+            if conc > 0.20:
+                bd.concentration_pts = round(min(5.0, (conc - 0.20) / 0.25 * 10.0), 2)
             bd.flags.append(
                 f"THIN_MARKET: only {chip_report.active_branch_count} active branches "
                 "— concentration capped at 5"
@@ -1230,18 +1260,18 @@ class TripleConfirmationEngine:
         # 3. Continuity: top-5 buyer overlap with prior days
         bd.continuity_pts = self._compute_continuity_pts(chip_report)
 
-        # 4. 隔日沖 filter
+        # 4. 隔日沖 filter (binary regulatory flag — keep)
         top3 = chip_report.top_buyers[:3]
         daytrade_in_top3 = any(b.label == "隔日沖" for b in top3)
         if not daytrade_in_top3:
-            bd.daytrade_filter_pts = 7
+            bd.daytrade_filter_pts = 7.0
         else:
-            bd.daytrade_risk = 25
+            bd.daytrade_risk = 25.0
             top3_names = [b.branch_name for b in top3 if b.label == "隔日沖"]
             bd.flags.append(f"隔日沖_TOP3: {', '.join(top3_names)}")
             chip_report.risk_flags.append("隔日沖_TOP3")
 
-        # 5. Known FII branch detection
+        # 5. Known FII branch detection — continuous on concentration
         top_buyers = chip_report.top_buyers
         fii_in_top3 = any(
             b.branch_code in _KNOWN_FII_BRANCH_CODES for b in top3
@@ -1254,45 +1284,44 @@ class TripleConfirmationEngine:
                 if b.branch_code in _KNOWN_FII_BRANCH_CODES
             ]
             bd.flags.append(f"FII_PRESENT: {', '.join(fii_names)}")
-            if fii_in_top3 and chip_report.concentration_top15 > 0.35:
-                bd.foreign_broker_pts = 5
+            conc = chip_report.concentration_top15
+            # FII in top3 + strong conc → up to 5.0; else baseline 3.0
+            if fii_in_top3 and conc > 0.25:
+                # 0.25→3.0, 0.45→5.0
+                bd.foreign_broker_pts = round(min(5.0, 3.0 + (conc - 0.25) / 0.20 * 2.0), 2)
             else:
-                bd.foreign_broker_pts = 3
+                bd.foreign_broker_pts = 3.0
 
-    def _compute_continuity_pts(self, chip_report: ChipReport) -> int:
-        """Main force continuity: top-5 buyer overlap with previous days.
+    def _compute_continuity_pts(self, chip_report: ChipReport) -> float:
+        """Main force continuity — continuous on overlap counts.
 
-        Uses chip_report.historical_top5_buyers (index 0 = yesterday, etc.)
-        Returns 0/3/5/8.
+        Yesterday overlap × 1.5 (max 5 at overlap=3+) + 3-day avg overlap bonus
+        (linear: 1.5→0, 3.0→3.0). Total capped at 8.
         """
         if not chip_report.historical_top5_buyers:
-            return 0
+            return 0.0
 
         today_codes = {b.branch_code for b in chip_report.top_buyers[:5]}
 
-        # Yesterday overlap
+        # Yesterday overlap (0-5 → 0-5 pts linearly, cap at 5.0)
         yesterday_top5 = chip_report.historical_top5_buyers[0]
         yesterday_codes = {b.branch_code for b in yesterday_top5[:5]}
         yesterday_overlap = len(today_codes & yesterday_codes)
+        base = min(5.0, yesterday_overlap * 1.67)  # 0→0, 1→1.67, 2→3.34, 3→5.0
 
-        if yesterday_overlap == 0:
-            base = 0
-        elif yesterday_overlap == 1:
-            base = 3
-        else:  # >= 2
-            base = 5
-
-        # 3-day average overlap bonus
+        # 3-day average overlap bonus — linear on average
         if len(chip_report.historical_top5_buyers) >= 3:
             overlaps = []
             for day_list in chip_report.historical_top5_buyers[:3]:
                 prior_codes = {b.branch_code for b in day_list[:5]}
                 overlaps.append(len(today_codes & prior_codes))
             avg_overlap = sum(overlaps) / len(overlaps)
-            if avg_overlap >= 2.0:
-                base = min(8, base + 3)
+            # avg 1.5→0 bonus, 3.0→3.0 bonus
+            if avg_overlap > 1.5:
+                bonus = min(3.0, (avg_overlap - 1.5) / 1.5 * 3.0)
+                base = min(8.0, base + bonus)
 
-        return base
+        return round(base, 2)
 
     # ------------------------------------------------------------------
     # Pillar 2B: Free-tier chip scoring
@@ -1317,18 +1346,24 @@ class TripleConfirmationEngine:
             proxy.dealer_net_buy, avg_vol, tiers=(0.0, 0.03), points=(0, 2, 4)
         )
 
-        # 4. Institution continuity
-        consec_pts = 0
-        if proxy.foreign_consecutive_buy_days >= 3:
-            consec_pts += 4
-        if proxy.trust_consecutive_buy_days >= 3:
-            consec_pts += 3
-        if proxy.dealer_consecutive_buy_days >= 3:
-            consec_pts += 1
-        bd.institution_continuity_pts = consec_pts
+        # 4. Institution continuity — continuous on consecutive_buy_days
+        # Foreign: ≥3 days base 4.0, scale linearly past that to 6.0 at 7 days
+        # Trust: ≥3 days base 3.0, scale to 4.5 at 7 days
+        # Dealer: ≥3 days base 1.0, scale to 1.5 at 7 days
+        def _cont(days: int, base: float, peak: float) -> float:
+            if days < 3:
+                return 0.0
+            if days >= 7:
+                return peak
+            return round(base + (days - 3) / 4.0 * (peak - base), 2)
+        consec_pts = (
+            _cont(proxy.foreign_consecutive_buy_days, 4.0, 6.0)
+            + _cont(proxy.trust_consecutive_buy_days, 3.0, 4.5)
+            + _cont(proxy.dealer_consecutive_buy_days, 1.0, 1.5)
+        )
+        bd.institution_continuity_pts = round(min(8.0, consec_pts), 2)
 
-        # 5. Three-institution consensus
-        # All three net buy, and at least two at medium+ strength
+        # 5. Three-institution consensus — continuous on medium_count + bonus
         foreign_medium = bd.foreign_strength_pts >= 4
         trust_medium = bd.trust_strength_pts >= 3
         dealer_medium = bd.dealer_strength_pts >= 2
@@ -1338,28 +1373,44 @@ class TripleConfirmationEngine:
             and proxy.dealer_net_buy > 0
         )
         medium_count = sum([foreign_medium, trust_medium, dealer_medium])
-        if all_net_buy and medium_count >= 2:
-            bd.institution_consensus_pts = 4
+        if all_net_buy:
+            # 0→0, 2→3.0, 3→4.0 (linear after 2-medium gate)
+            if medium_count >= 2:
+                bd.institution_consensus_pts = round(3.0 + (medium_count - 2) * 1.0, 2)
+            elif medium_count == 1:
+                bd.institution_consensus_pts = 1.5  # partial credit for 1-medium
+            else:
+                bd.institution_consensus_pts = 0.5  # all buying but none medium
 
         # 6. Margin structure (price direction × margin change)
         bd.margin_structure_pts = self._margin_structure_pts(proxy)
 
-        # 7. Margin utilization
+        # 7. Margin utilization — continuous on rate
+        # <0.10 → 4.0, 0.30 → 0, >0.80 → -4.0
         if proxy.margin_utilization_rate is not None:
-            if proxy.margin_utilization_rate < 0.20:
-                bd.margin_utilization_pts = 4
-            elif proxy.margin_utilization_rate > 0.80:
-                bd.margin_utilization_pts = -4
-                bd.flags.append(f"MARGIN_HIGH_UTIL: {proxy.margin_utilization_rate:.1%}")
+            rate = proxy.margin_utilization_rate
+            if rate < 0.30:
+                # 0.0→4.0, 0.30→0
+                bd.margin_utilization_pts = round((0.30 - rate) / 0.20 * 4.0, 2)
+                bd.margin_utilization_pts = round(min(4.0, max(0.0, bd.margin_utilization_pts)), 2)
+            elif rate > 0.60:
+                # 0.60→0, 1.00→-4.0
+                bd.margin_utilization_pts = round(-(rate - 0.60) / 0.40 * 4.0, 2)
+                bd.margin_utilization_pts = round(max(-4.0, bd.margin_utilization_pts), 2)
+                if rate > 0.80:
+                    bd.flags.append(f"MARGIN_HIGH_UTIL: {rate:.1%}")
 
-        # 8. SBL pressure
+        # 8. SBL pressure — continuous on ratio (negative deduction)
         if proxy.sbl_available:
-            if proxy.sbl_ratio > 0.10:
-                bd.sbl_pressure_pts = -8
-                bd.flags.append(f"SBL_HEAVY: {proxy.sbl_ratio:.1%}")
-            elif proxy.sbl_ratio > 0.05:
-                bd.sbl_pressure_pts = -4
-                bd.flags.append(f"SBL_MODERATE: {proxy.sbl_ratio:.1%}")
+            r = proxy.sbl_ratio
+            if r > 0.05:
+                # 0.05→0, 0.10→-4, 0.20→-8
+                pts = -((r - 0.05) / 0.15 * 8.0)
+                bd.sbl_pressure_pts = round(max(-8.0, pts), 2)
+                if r > 0.10:
+                    bd.flags.append(f"SBL_HEAVY: {r:.1%}")
+                elif r > 0.05:
+                    bd.flags.append(f"SBL_MODERATE: {r:.1%}")
 
         # 9. 20日累計法人淨買超強度 — 連續評分
         cumul_net = proxy.cumul_foreign_20d + proxy.cumul_trust_20d
@@ -1380,69 +1431,97 @@ class TripleConfirmationEngine:
             elif cumul_ratio >= 0.2:
                 bd.flags.append(f"CUMUL_FLOW_WARM:{cumul_ratio:.1f}x")
 
-        # 10. 持續蓄積：買超天數佔比高 + 近期加速
-        if (proxy.inst_buy_days_ratio >= 0.55          # 超過半數日子法人買
-                and proxy.inst_flow_accel >= 0.8        # 近5日不明顯減速
-                and cumul_net > 0):                     # 整體方向向上
-            bd.consistent_accum_pts = 6
+        # 10. 持續蓄積 — gate-and-scale: gates required, then continuous on inst_buy_days_ratio
+        if (proxy.inst_buy_days_ratio >= 0.55
+                and proxy.inst_flow_accel >= 0.8
+                and cumul_net > 0):
+            # 0.55→4.0, 0.80→6.0
+            ratio = proxy.inst_buy_days_ratio
+            bd.consistent_accum_pts = round(min(6.0, 4.0 + (ratio - 0.55) / 0.25 * 2.0), 2)
             bd.flags.append(
                 f"CONSISTENT_ACCUM:{proxy.inst_buy_days_ratio:.0%}"
                 f"@{proxy.inst_flow_accel:.1f}x"
             )
 
-        # 11. 土洋合作 + 法人買超佔比
+        # 11. 土洋合作 + 法人買超佔比 — synergy base + continuous on inst_buy_pct
         if proxy.foreign_and_trust_both_buy:
-            bd.inst_synergy_pts += 5
+            bd.inst_synergy_pts += 5.0
             bd.flags.append("INST_SYNERGY")
         if proxy.inst_buy_pct is not None and proxy.inst_buy_pct > 0:
-            if proxy.inst_buy_pct >= 0.15:
-                bd.inst_synergy_pts += 6
-                bd.flags.append(f"INST_PCT_HIGH:{proxy.inst_buy_pct*100:.1f}%")
-            elif proxy.inst_buy_pct >= 0.10:
-                bd.inst_synergy_pts += 4
-                bd.flags.append(f"INST_PCT_MID:{proxy.inst_buy_pct*100:.1f}%")
-            elif proxy.inst_buy_pct >= 0.05:
-                bd.inst_synergy_pts += 2
-                bd.flags.append(f"INST_PCT_LOW:{proxy.inst_buy_pct*100:.1f}%")
+            pct = proxy.inst_buy_pct
+            # 0%→0, 5%→2, 10%→4, 15%→6 (linear)
+            if pct >= 0.15:
+                bd.inst_synergy_pts += 6.0
+                bd.flags.append(f"INST_PCT_HIGH:{pct*100:.1f}%")
+            elif pct >= 0.05:
+                bd.inst_synergy_pts += round((pct - 0.05) / 0.10 * 4.0 + 2.0, 2)
+                if pct >= 0.10:
+                    bd.flags.append(f"INST_PCT_MID:{pct*100:.1f}%")
+                else:
+                    bd.flags.append(f"INST_PCT_LOW:{pct*100:.1f}%")
+            else:
+                bd.inst_synergy_pts += round(pct / 0.05 * 2.0, 2)
 
-        # 12. 融資餘額今日下降
+        # 12. 融資餘額今日下降 — keep binary (signed event)
         if proxy.margin_balance_change < 0:
-            bd.margin_declining_pts = 3
+            bd.margin_declining_pts = 3.0
             bd.flags.append("MARGIN_DECLINING")
 
-        # 13. 集保大戶增持 / 散戶退出（週級籌碼集中度）
+        # 13. 集保大戶增持 / 散戶退出 — continuous on chg_pct magnitudes
         large = proxy.large_holder_chg_pct
         retail = proxy.retail_holder_chg_pct
         if large is not None and large > 0:
-            bd.ownership_concentration_pts += 5
+            # 0→0, 0.2%→3, 0.5%+→5
+            if large >= 0.5:
+                bd.ownership_concentration_pts += 5.0
+            else:
+                bd.ownership_concentration_pts += round(large / 0.5 * 5.0, 2)
             bd.flags.append(f"CHIP_LARGE_UP:{large:+.2f}%")
         if retail is not None and retail < 0:
-            bd.ownership_concentration_pts += 3
+            # 0→0, -0.2%→2, -0.5%+→3
+            abs_r = -retail
+            if abs_r >= 0.5:
+                bd.ownership_concentration_pts += 3.0
+            else:
+                bd.ownership_concentration_pts += round(abs_r / 0.5 * 3.0, 2)
             bd.flags.append(f"CHIP_RETAIL_OUT:{retail:+.2f}%")
         if retail is not None and retail > 0:
-            penalty = -5 if retail > 0.5 else -3
+            # 0→0, 0.5%→-3, 1.0%+→-5
+            if retail >= 1.0:
+                penalty = -5.0
+            else:
+                penalty = round(-retail * 5.0, 2)
             bd.ownership_concentration_pts += penalty
             bd.flags.append(f"CHIP_RETAIL_IN:{retail:+.2f}%")
         if (retail is not None and retail > 0
                 and proxy.margin_utilization_rate is not None
                 and proxy.margin_utilization_rate > 0.20):
-            bd.ownership_concentration_pts += -5
+            bd.ownership_concentration_pts += -5.0
             bd.flags.append(f"RETAIL_LEVERAGE_TRAP:{proxy.margin_utilization_rate*100:.1f}%")
 
-        # 14. 外資+投信雙向 20D 累積確認（兩者獨立正值 = 外資投信同步吸籌）
+        # 14. 外資+投信雙向 20D 累積確認 — continuous on min(F,T) intensity
         if proxy.cumul_foreign_20d > 0 and proxy.cumul_trust_20d > 0:
-            if avg_vol > 0 and (
-                proxy.cumul_foreign_20d / avg_vol >= 0.05
-                and proxy.cumul_trust_20d / avg_vol >= 0.05
-            ):
-                bd.dual_inst_flow_pts = 5
-                bd.flags.append(
-                    f"DUAL_FLOW_STRONG:"
-                    f"F+{proxy.cumul_foreign_20d//1000}K"
-                    f"/T+{proxy.cumul_trust_20d//1000}K"
-                )
+            if avg_vol > 0:
+                f_ratio = proxy.cumul_foreign_20d / avg_vol
+                t_ratio = proxy.cumul_trust_20d / avg_vol
+                min_ratio = min(f_ratio, t_ratio)
+                # 0→0, 0.05→3, 0.20→5 (linear)
+                if min_ratio >= 0.20:
+                    bd.dual_inst_flow_pts = 5.0
+                elif min_ratio >= 0.05:
+                    bd.dual_inst_flow_pts = round(3.0 + (min_ratio - 0.05) / 0.15 * 2.0, 2)
+                else:
+                    bd.dual_inst_flow_pts = round(min_ratio / 0.05 * 3.0, 2)
+                if min_ratio >= 0.05:
+                    bd.flags.append(
+                        f"DUAL_FLOW_STRONG:"
+                        f"F+{proxy.cumul_foreign_20d//1000}K"
+                        f"/T+{proxy.cumul_trust_20d//1000}K"
+                    )
+                else:
+                    bd.flags.append("DUAL_FLOW")
             else:
-                bd.dual_inst_flow_pts = 3
+                bd.dual_inst_flow_pts = 3.0
                 bd.flags.append("DUAL_FLOW")
 
         for flag in proxy.data_quality_flags:
@@ -1475,47 +1554,24 @@ class TripleConfirmationEngine:
             return max_pts
         return round(ratio / max_tier * max_pts, 2)
 
-    def _margin_structure_pts(self, proxy: TWSEChipProxy) -> int:
-        """融資結構 scoring: price direction × margin change.
-
-        Uses margin_balance_change sign as margin direction proxy.
-        '大增' = >5% single-day increase; we approximate from margin_balance_change sign
-        and the proxy field `short_balance_increased` (reused semantically).
-
-        v2 definition:
-        - 股價漲 + 融資減/持平 → +8
-        - 股價漲 + 融資小增 → +3
-        - 股價漲 + 融資大增 → -4
-        - 股價跌 + 融資大減 → +2
-        - 股價跌 + 融資不減 → -3
+    def _margin_structure_pts(self, proxy: TWSEChipProxy) -> float:
+        """融資結構 — categorical (kept as small-discrete float values).
+        Bucket is signal-type rather than magnitude — keep tiers but as floats.
         """
-        price_up = proxy.foreign_net_buy >= 0  # fallback: use proxy attribute
-        # We don't have prev_close in TWSEChipProxy directly; use margin_balance_change
-        # sign-only approach with magnitude classification:
-        # large = abs(change) > 5% of balance approximated by short_balance_increased flag
-        # small = change > 0 but not large
         margin_up = proxy.margin_balance_change > 0
         margin_down = proxy.margin_balance_change < 0
-        # margin_large_change: we reuse short_balance_increased as the "large" signal
-        # (caller is responsible for populating this correctly)
         margin_large = proxy.short_balance_increased
 
-        # Determine "stock price direction" from proxy: if foreign is net buy → up, else down
-        # This is an approximation — callers should ensure margin_balance_change reflects
-        # today's margin change and short_balance_increased reflects a large margin increase
         if margin_up:
             if margin_large:
-                return -4  # 融資大增
-            return 3       # 融資小增
+                return -4.0
+            return 3.0
         elif margin_down:
             if margin_large:
-                # short_balance_increased here reused as "large decrease" signal
-                # (caller sets to True for large magnitude regardless of direction)
-                return 2   # 融資大減 (washout — positive)
-            return 8       # 融資減/持平 → best case
+                return 2.0
+            return 8.0
         else:
-            # margin_balance_change == 0 → 持平
-            return 8
+            return 8.0
 
     # ------------------------------------------------------------------
     # Pillar 3: Compression Structure scoring methods
@@ -1572,69 +1628,87 @@ class TripleConfirmationEngine:
         return round(pts, 2)
 
     @staticmethod
-    def _ma5_walk_score(history: list[DailyOHLCV], n: int = 10) -> int:
-        """Close >= MA5 for >= 80% of last n days → +2 pts (short-term trend quality)."""
+    def _ma5_walk_score(history: list[DailyOHLCV], n: int = 10) -> float:
+        """Close >= MA5 ratio of last n days — continuous. Max 2 pts.
+        Linear scaling: 0.5 ratio → 0, 1.0 ratio → 2.0.
+        """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         closes = pd.Series([d.close for d in sorted_h])
         if len(closes) < 5:
-            return 0
+            return 0.0
         ma5 = closes.rolling(5).mean()
         window = min(n, len(closes))
         close_win = closes.iloc[-window:]
         ma5_win = ma5.iloc[-window:]
         valid = ma5_win.notna()
         if valid.sum() == 0:
-            return 0
+            return 0.0
         ratio = float((close_win[valid] >= ma5_win[valid]).mean())
-        return 2 if ratio >= 0.8 else 0
+        if ratio <= 0.5:
+            return 0.0
+        pts = (ratio - 0.5) / 0.5 * 2.0
+        return round(min(2.0, pts), 2)
 
     @staticmethod
     def _bb_upper_walk_score(
         history: list[DailyOHLCV], n: int = 5, tolerance: float = 0.03
-    ) -> int:
-        """3 of last n days close >= BB_upper*(1-tol) AND BB_upper rising → +3 pts."""
+    ) -> float:
+        """BB upper walk — continuous on near_upper/n ratio.
+        Gates: ≥3 near + rising BB upper. Then linear: 3→2.0, 5→3.0.
+        """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         closes = pd.Series([d.close for d in sorted_h])
         if len(closes) < 20:
-            return 0
+            return 0.0
         ma = closes.rolling(20).mean()
         std = closes.rolling(20).std(ddof=0)
         bb_upper = ma + 2 * std
         if len(bb_upper.dropna()) < n:
-            return 0
+            return 0.0
         window_upper = bb_upper.iloc[-n:]
         window_close = closes.iloc[-n:]
         near_upper = int((window_close >= window_upper * (1 - tolerance)).sum())
         bb_upper_rising = float(bb_upper.iloc[-1]) > float(bb_upper.iloc[-n])
-        return 3 if (near_upper >= 3 and bb_upper_rising) else 0
+        if near_upper < 3 or not bb_upper_rising:
+            return 0.0
+        # 3→2.0, 5→3.0 (linear)
+        if near_upper >= n:
+            return 3.0
+        return round(2.0 + (near_upper - 3) / (n - 3) * 1.0, 2)
 
     @staticmethod
-    def _ma_convergence_score(history: list[DailyOHLCV]) -> int:
-        """MA5/MA10/MA20 converging. Max 8 pts."""
+    def _ma_convergence_score(history: list[DailyOHLCV]) -> float:
+        """MA convergence — continuous on (1 - spread/0.05). Max 8 pts.
+        spread 0.02→8.0, 0.05→0.
+        """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         closes = [d.close for d in sorted_h]
         if len(closes) < 20:
-            return 0
+            return 0.0
         ma5 = sum(closes[-5:]) / 5
         ma10 = sum(closes[-10:]) / 10
         ma20 = sum(closes[-20:]) / 20
         if ma20 == 0:
-            return 0
+            return 0.0
         spread = (max(ma5, ma10, ma20) - min(ma5, ma10, ma20)) / ma20
-        if spread < 0.02:
-            return 8
-        if spread < 0.05:
-            return 4
-        return 0
+        if spread >= 0.05:
+            return 0.0
+        if spread <= 0.02:
+            return 8.0
+        # 0.02→8.0, 0.05→0
+        pts = (0.05 - spread) / 0.03 * 8.0
+        return round(pts, 2)
 
-    def _consolidation_weeks_score(self, history: list[DailyOHLCV]) -> int:
-        """Count consecutive days of compression (BB<12% AND range<1.5xATR). Max 6 pts."""
+    def _consolidation_weeks_score(self, history: list[DailyOHLCV]) -> float:
+        """Consolidation days count — continuous. Max 6 pts.
+        weeks 2.0→3.0, 4.0→6.0 (linear); count <10 → 0.
+        """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         if len(sorted_h) < 21:
-            return 0
+            return 0.0
         atr = self._atr_20(sorted_h)
         if atr is None or atr <= 0:
-            return 0
+            return 0.0
         count = 0
         for i in range(len(sorted_h) - 1, max(len(sorted_h) - 61, 20), -1):
             window = sorted_h[max(0, i - 19) : i + 1]
@@ -1652,18 +1726,20 @@ class TripleConfirmationEngine:
                 break
             count += 1
         weeks = count / 5
+        if weeks < 2:
+            return 0.0
         if weeks >= 4:
-            return 6
-        if weeks >= 2:
-            return 3
-        return 0
+            return 6.0
+        # 2.0→3.0, 4.0→6.0
+        pts = 3.0 + (weeks - 2.0) / 2.0 * 3.0
+        return round(pts, 2)
 
     @staticmethod
-    def _inside_bar_streak_score(history: list[DailyOHLCV]) -> int:
-        """Count consecutive inside bars. Max 5 pts."""
+    def _inside_bar_streak_score(history: list[DailyOHLCV]) -> float:
+        """Count consecutive inside bars — already continuous-ish, ensure float. Max 5 pts."""
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         if len(sorted_h) < 2:
-            return 0
+            return 0.0
         streak = 0
         for i in range(len(sorted_h) - 1, 0, -1):
             bar = sorted_h[i]
@@ -1672,87 +1748,102 @@ class TripleConfirmationEngine:
                 streak += 1
             else:
                 break
-        return min(streak, 5)
+        return float(min(streak, 5))
 
     @staticmethod
-    def _prior_advance_score(history: list[DailyOHLCV]) -> int:
-        """Prior advance >= 20% in 60 bars before current consolidation. Max 5 pts."""
+    def _prior_advance_score(history: list[DailyOHLCV]) -> float:
+        """Prior advance — continuous on advance %. Max 5 pts.
+        0.10→2.0, 0.20→5.0 (linear above 10% advance).
+        """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         if len(sorted_h) < 120:
-            return 0
+            return 0.0
         prior_window = sorted_h[-120:-60]
         base_close = prior_window[0].close
         if base_close <= 0:
-            return 0
+            return 0.0
         peak_close = max(d.close for d in prior_window)
         advance = (peak_close - base_close) / base_close
+        if advance < 0.10:
+            return 0.0
         if advance >= 0.20:
-            return 5
-        if advance >= 0.10:
-            return 2
-        return 0
+            return 5.0
+        pts = 2.0 + (advance - 0.10) / 0.10 * 3.0
+        return round(pts, 2)
 
     def _ma_alignment_score(
         self, history: list[DailyOHLCV]
-    ) -> tuple[int, str | None]:
-        """均線多頭排列: MA5 > MA10 > MA20 → +5 pts (≥20 sessions required)."""
+    ) -> tuple[float, str | None]:
+        """均線多頭排列 — partial credit per pair.
+        MA5>MA10: 2.5 pts. MA10>MA20: 2.5 pts. Both → 5.0.
+        """
         recent = sorted(history, key=lambda x: x.trade_date)
         if len(recent) < 20:
-            return 0, "INSUFFICIENT_HISTORY_MA_ALIGNMENT"
+            return 0.0, "INSUFFICIENT_HISTORY_MA_ALIGNMENT"
         closes = pd.Series([d.close for d in recent])
         ma5 = closes.rolling(5).mean().iloc[-1]
         ma10 = closes.rolling(10).mean().iloc[-1]
         ma20 = closes.rolling(20).mean().iloc[-1]
         if pd.isna(ma5) or pd.isna(ma10) or pd.isna(ma20):
-            return 0, "MA_ALIGNMENT_NAN"
-        return (5, None) if ma5 > ma10 > ma20 else (0, None)
+            return 0.0, "MA_ALIGNMENT_NAN"
+        pts = 0.0
+        if ma5 > ma10:
+            pts += 2.5
+        if ma10 > ma20:
+            pts += 2.5
+        return pts, None
 
-    def _ma20_slope_score(self, history: list[DailyOHLCV]) -> tuple[int, str | None]:
-        """MA20 slope: +5 pts if MA20 is rising vs 5 sessions ago."""
+    def _ma20_slope_score(self, history: list[DailyOHLCV]) -> tuple[float, str | None]:
+        """MA20 slope — continuous on slope magnitude.
+        slope normalized: 0→0, 0.02 (2% over 5d)→5.0 (cap).
+        """
         slope = self._ma20_slope(history)
         if slope is None:
-            return 0, "INSUFFICIENT_HISTORY_MA20_SLOPE"
-        return (5, None) if slope > 0 else (0, None)
+            return 0.0, "INSUFFICIENT_HISTORY_MA20_SLOPE"
+        if slope <= 0:
+            return 0.0, None
+        # slope is fractional change; 0→0, 0.02→5.0
+        pts = min(5.0, slope / 0.02 * 5.0)
+        return round(pts, 2), None
 
     def _relative_strength_score(
         self,
         ohlcv: DailyOHLCV,
         history: list[DailyOHLCV],
         taiex_history: list[DailyOHLCV],
-    ) -> tuple[int, str | None]:
-        """RS vs 大盤: 0–20% outperform → +3, >20% → +5."""
+    ) -> tuple[float, str | None]:
+        """RS vs 大盤 — continuous on outperform magnitude.
+        0→0, 10%→3.0, 20%+→5.0 (linear).
+        """
         stock_bars = sorted(history, key=lambda x: x.trade_date)
         taiex_bars = sorted(taiex_history, key=lambda x: x.trade_date)
         if len(stock_bars) < 5 or len(taiex_bars) < 5:
-            return 0, "INSUFFICIENT_HISTORY_RS"
+            return 0.0, "INSUFFICIENT_HISTORY_RS"
         stock_base = stock_bars[-5].close
         taiex_base = taiex_bars[-5].close
         if stock_base <= 0 or taiex_base <= 0:
-            return 0, "RS_SCORE_ZERO_BASE"
+            return 0.0, "RS_SCORE_ZERO_BASE"
         stock_ret = (ohlcv.close - stock_base) / stock_base
         taiex_ret = (taiex_bars[-1].close - taiex_base) / taiex_base
         outperform = stock_ret - taiex_ret
-        if outperform > 0.20:
-            return 5, None
-        if outperform > 0:
-            return 3, None
-        return 0, None
+        if outperform <= 0:
+            return 0.0, None
+        if outperform >= 0.20:
+            return 5.0, None
+        if outperform >= 0.10:
+            pts = 3.0 + (outperform - 0.10) / 0.10 * 2.0
+        else:
+            pts = outperform / 0.10 * 3.0
+        return round(pts, 2), None
 
     @staticmethod
     def _longterm_rs_score(
         ohlcv: DailyOHLCV,
         history: list[DailyOHLCV],
         taiex_history: list[DailyOHLCV],
-    ) -> tuple[int, str | None]:
-        """Long-term relative strength: 60d + 120d weighted excess return vs TAIEX.
-
-        Weighted excess = 0.4 * excess_60d + 0.6 * excess_120d
-        (120d weight higher; longer lead = stronger signal)
-
-        ≥ +20%  → +8  RS_LEADER
-        ≥ +10%  → +5  RS_STRONG
-        ≥ +3%   → +3  RS_POSITIVE
-        < +3%   → 0
+    ) -> tuple[float, str | None]:
+        """Long-term RS — continuous on weighted 60d+120d excess.
+        0→0, 0.03→3.0, 0.10→5.0, 0.20+→8.0
         """
         stock_bars = sorted(history, key=lambda x: x.trade_date)
         taiex_bars = sorted(taiex_history, key=lambda x: x.trade_date)
@@ -1772,69 +1863,58 @@ class TripleConfirmationEngine:
         ex120 = _excess(120)
 
         if ex60 is None and ex120 is None:
-            return 0, "INSUFFICIENT_HISTORY_LRS"
+            return 0.0, "INSUFFICIENT_HISTORY_LRS"
         if ex120 is None:
-            weighted = ex60  # only 60d available
+            weighted = ex60
         elif ex60 is None:
             weighted = ex120
         else:
             weighted = 0.4 * ex60 + 0.6 * ex120
 
+        if weighted < 0.03:
+            return 0.0, None
         if weighted >= 0.20:
-            return 8, "RS_LEADER"
+            return 8.0, "RS_LEADER"
         if weighted >= 0.10:
-            return 5, "RS_STRONG"
-        if weighted >= 0.03:
-            return 3, "RS_POSITIVE"
-        return 0, None
+            # 0.10→5.0, 0.20→8.0
+            pts = 5.0 + (weighted - 0.10) / 0.10 * 3.0
+            return round(pts, 2), "RS_STRONG"
+        # 0.03→3.0, 0.10→5.0
+        pts = 3.0 + (weighted - 0.03) / 0.07 * 2.0
+        return round(pts, 2), "RS_POSITIVE"
 
     @staticmethod
     def _near_highhist_score(
         ohlcv: DailyOHLCV,
         history: list[DailyOHLCV],
-    ) -> tuple[int, str | None]:
-        """Proximity to N-day historical high (all available sessions, up to ~130d).
-
-        Requires ≥ 20 sessions. Uses high-of-day to build the N-day high.
-
-        ≥ 95% of N-day high → +5  NEAR_HIST_HIGH
-        ≥ 90% of N-day high → +3  WITHIN_HIST_HIGH_10PCT
-        < 90%               → 0
+    ) -> tuple[float, str | None]:
+        """Near historical high — continuous on ratio.
+        0.90→3.0, 0.95→5.0 (linear), <0.90→0.
         """
         bars = sorted(history, key=lambda x: x.trade_date)
         if len(bars) < 20:
-            return 0, None
+            return 0.0, None
         n_day_high = max((b.high for b in bars if b.high > 0), default=0.0)
         if n_day_high <= 0:
-            return 0, None
+            return 0.0, None
         ratio = ohlcv.close / n_day_high
         n = len(bars)
+        if ratio < 0.90:
+            return 0.0, None
         if ratio >= 0.95:
-            return 5, f"NEAR_HIST_HIGH:{n}d"
-        if ratio >= 0.90:
-            return 3, f"WITHIN_HIST_HIGH_10PCT:{n}d"
-        return 0, None
+            # 0.95→5.0, ratio cap at 1.0 (5.0 max)
+            pts = 5.0
+            return pts, f"NEAR_HIST_HIGH:{n}d"
+        # 0.90→3.0, 0.95→5.0
+        pts = 3.0 + (ratio - 0.90) / 0.05 * 2.0
+        return round(pts, 2), f"WITHIN_HIST_HIGH_10PCT:{n}d"
 
     @staticmethod
-    def _chip_cleanliness_score(proxy: TWSEChipProxy) -> tuple[int, str | None]:
-        """K-of-6 composite chip cleanliness score.
+    def _chip_cleanliness_score(proxy: TWSEChipProxy) -> tuple[float, str | None]:
+        """K-of-6 composite chip cleanliness — continuous partial credit.
 
-        Counts how many of 6 structural cleanliness signals are present.
-        Skips signals whose data is unavailable (None) rather than penalising.
-
-        Signals:
-          1. margin_utilization_rate < 0.20  (融資使用率低)
-          2. margin_balance_change < 0       (融資餘額下降)
-          3. daytrade_ratio < 0.15           (當沖比低)
-          4. sbl_ratio < 0.03               (借券賣出比低)
-          5. large_holder_chg_pct > 0        (大戶週增持)
-          6. retail_holder_chg_pct < 0       (散戶週出清)
-
-        Scoring (by count met):
-          ≥ 5 → +10  CHIP_ULTRA_CLEAN
-          ≥ 4 → +7   CHIP_CLEAN
-          ≥ 3 → +4   CHIP_FAIR
-          < 3 → 0
+        Each signal contributes ~1.67 pts (10/6) so count=3→5.0, 4→6.67, 5→8.33, 6→10.
+        Gates retained: ≥3 signals required to start scoring (signal label).
         """
         count = 0
         if proxy.margin_utilization_rate is not None and proxy.margin_utilization_rate < 0.20:
@@ -1850,158 +1930,186 @@ class TripleConfirmationEngine:
         if proxy.retail_holder_chg_pct is not None and proxy.retail_holder_chg_pct < 0:
             count += 1
 
+        if count < 3:
+            return 0.0, None
+        pts = round(count / 6.0 * 10.0, 2)
         if count >= 5:
-            return 10, f"CHIP_ULTRA_CLEAN:{count}/6"
+            return pts, f"CHIP_ULTRA_CLEAN:{count}/6"
         if count >= 4:
-            return 7, f"CHIP_CLEAN:{count}/6"
-        if count >= 3:
-            return 4, f"CHIP_FAIR:{count}/6"
-        return 0, None
+            return pts, f"CHIP_CLEAN:{count}/6"
+        return pts, f"CHIP_FAIR:{count}/6"
 
     @staticmethod
     def _turnover_score(
         ohlcv: DailyOHLCV,
         ohlcv_history: list[DailyOHLCV],
         total_shares: int,
-    ) -> tuple[int, str | None]:
-        """換手率因子: 籌碼鎖定 / 突破確認 / 出貨警告.
-
-        turnover_rate = volume / total_shares (both in shares).
+    ) -> tuple[float, str | None]:
+        """換手率因子 — continuous on rate within each regime.
+        Distribution warning, breakout confirmation, and lock-in zones each scale linearly.
         """
         if total_shares <= 0 or ohlcv.volume <= 0:
-            return 0, None
+            return 0.0, None
 
         today_rate = ohlcv.volume / total_shares
 
-        # 近5日平均換手率（不含今日，用於判斷盤整期鎖籌狀態）
         recent = [b for b in ohlcv_history[-5:] if b.volume > 0]
         avg_recent = (
             sum(b.volume / total_shares for b in recent) / len(recent)
             if recent else today_rate
         )
 
-        # 1. 出貨警告優先（高換手 + 收黑 → 主力倒貨，最高優先級負信號）
-        if today_rate > 0.060:          # > 6%，不論漲跌都是異常換手
-            return -3, "TURNOVER_DIST_WARN"
+        # 1. Distribution warning — continuous on excess turnover
+        if today_rate > 0.060:
+            # 0.06→-3.0, 0.10+→max -3.0 floor (already there)
+            return -3.0, "TURNOVER_DIST_WARN"
         if today_rate > 0.030 and ohlcv.close < ohlcv.open:
-            return -2, "TURNOVER_EXCESS_DOWN"
+            # 0.030→-1.0, 0.060→-2.0
+            pts = round(-1.0 - (today_rate - 0.030) / 0.030 * 1.0, 2)
+            return max(-2.0, pts), "TURNOVER_EXCESS_DOWN"
 
-        # 2. 突破確認（今日換手率高 → 真實買盤，非假突破）
-        if today_rate >= 0.020:         # ≥ 2%
-            return 4, "TURNOVER_BREAKOUT"
-        if today_rate >= 0.010:         # ≥ 1%
-            return 2, "TURNOVER_CONFIRM"
+        # 2. Breakout confirmation — continuous on today's rate
+        if today_rate >= 0.010:
+            # 0.010→2.0, 0.020→4.0, 0.030→4.0 (cap before distribution zone)
+            if today_rate >= 0.020:
+                pts = 4.0
+            else:
+                pts = round(2.0 + (today_rate - 0.010) / 0.010 * 2.0, 2)
+            return pts, "TURNOVER_BREAKOUT" if today_rate >= 0.020 else "TURNOVER_CONFIRM"
 
-        # 3. 籌碼鎖定（近5日均換手率低 → 浮額稀少、主力鎖股）
-        if avg_recent < 0.003:          # < 0.3%
-            return 4, "TURNOVER_ULTRA_LOCK"
-        if avg_recent < 0.008:          # 0.3–0.8%
-            return 2, "TURNOVER_LOCKED"
+        # 3. Lock-in — continuous on inverse of avg_recent
+        if avg_recent < 0.008:
+            # 0.008→2.0, 0.003→4.0 (lower turnover = tighter lock)
+            if avg_recent < 0.003:
+                pts = 4.0
+            else:
+                pts = round(2.0 + (0.008 - avg_recent) / 0.005 * 2.0, 2)
+            return pts, "TURNOVER_ULTRA_LOCK" if avg_recent < 0.003 else "TURNOVER_LOCKED"
 
-        return 0, None
+        return 0.0, None
 
     @staticmethod
-    def _super_large_score(proxy: "TWSEChipProxy") -> tuple[int, str | None]:
-        """千張大戶動向因子 (-4/0/+4/+8).
-
-        千張 = 1,000,000 shares (≥1000張)，機構/主力等級持股人。
-        同時追蹤持股比例與人數變化：
-          - 比例增 + 人數增 → 新機構發現並進場，最強訊號
-          - 比例增（人數持平）→ 現有大戶加碼
-          - 比例減 → 大戶出場，負訊號
+    def _super_large_score(proxy: "TWSEChipProxy") -> tuple[float, str | None]:
+        """千張大戶動向因子 — continuous on pct_chg magnitude.
+        pct +0→0, +1.0%→4.0, +2.0%+→peak (8 with count+, 4 without)
+        pct -1.0→-2.0, -2.0%+→-4.0 floor
         """
         pct_chg = proxy.super_large_holder_chg_pct
         count_chg = proxy.super_large_holder_count_chg
 
         if pct_chg is None:
-            return 0, None
+            return 0.0, None
 
-        # 雙重確認：持股比例增 + 人數增（新機構進場）
-        if pct_chg > 0.5 and count_chg is not None and count_chg > 0:
-            return 8, f"SUPER_HOLDER_ACCUM:{pct_chg:+.2f}%,+{count_chg}戶"
-        # 持股比例明顯增加（現有大戶加碼）
-        if pct_chg > 0.5:
-            return 4, f"SUPER_HOLDER_INC:{pct_chg:+.2f}%"
-        # 輕微增持
         if pct_chg > 0:
-            return 2, f"SUPER_HOLDER_MILD:{pct_chg:+.2f}%"
-        # 大戶明顯減持（出貨）
-        if pct_chg < -1.0:
-            return -4, f"SUPER_HOLDER_EXIT:{pct_chg:+.2f}%"
-
-        return 0, None
+            # 0→0, 1.0→4.0, 2.0+→ peak
+            base = min(4.0, round(pct_chg / 1.0 * 4.0, 2))
+            if pct_chg > 0.5 and count_chg is not None and count_chg > 0:
+                # Add up to +4 bonus for new-holder entry
+                bonus = min(4.0, round(pct_chg / 2.0 * 4.0, 2))
+                return round(min(8.0, base + bonus), 2), f"SUPER_HOLDER_ACCUM:{pct_chg:+.2f}%,+{count_chg}戶"
+            if pct_chg > 0.5:
+                return base, f"SUPER_HOLDER_INC:{pct_chg:+.2f}%"
+            return base, f"SUPER_HOLDER_MILD:{pct_chg:+.2f}%"
+        if pct_chg < 0:
+            # 0→0, -1.0→-2.0, -2.0+→-4.0 floor
+            pts = max(-4.0, round(pct_chg * 2.0, 2))
+            if pct_chg < -1.0:
+                return pts, f"SUPER_HOLDER_EXIT:{pct_chg:+.2f}%"
+        return 0.0, None
 
     @staticmethod
-    def _foreign_trend_score(proxy: "TWSEChipProxy") -> tuple[int, str | None]:
-        """外資W1/W2趨勢加速因子 (-2 to +4).
-
-        foreign_trend_accel = W1(近10日) / W2(遠10日) 外資累積比
-        >1 = 加速買進, <1 = 減速
+    def _foreign_trend_score(proxy: "TWSEChipProxy") -> tuple[float, str | None]:
+        """外資W1/W2加速 — continuous on accel ratio.
+        1.0→0, 1.3→2.0, 2.0+→4.0; 0.5→-2.0 (FADE only if cumul negative)
         """
         accel = proxy.foreign_trend_accel
         if accel <= 0:
-            return 0, None
-        if accel >= 2.0:
-            return 4, f"FOREIGN_ACCEL:{accel:.1f}x"
-        if accel >= 1.3:
-            return 2, f"FOREIGN_ACCEL_MILD:{accel:.1f}x"
+            return 0.0, None
+        if accel >= 1.0:
+            if accel >= 2.0:
+                pts = 4.0
+            elif accel >= 1.3:
+                pts = round(2.0 + (accel - 1.3) / 0.7 * 2.0, 2)
+            else:
+                pts = round((accel - 1.0) / 0.3 * 2.0, 2)
+            if accel >= 1.3:
+                label = "FOREIGN_ACCEL" if accel >= 2.0 else "FOREIGN_ACCEL_MILD"
+                return pts, f"{label}:{accel:.1f}x"
+            return pts, None
         if accel < 0.5 and proxy.cumul_foreign_20d < 0:
-            return -2, "FOREIGN_FADE"
-        return 0, None
+            # 0.5→-1.0, 0.0→-2.0
+            pts = round(-1.0 - (0.5 - accel) / 0.5 * 1.0, 2)
+            return max(-2.0, pts), "FOREIGN_FADE"
+        return 0.0, None
 
     @staticmethod
-    def _short_cover_score(proxy: "TWSEChipProxy") -> tuple[int, str | None]:
-        """融券回補率因子 (空頭投降訊號) (0 to +4).
-
-        short_cover_rate = 融券買進 / 融券前日餘額
+    def _short_cover_score(proxy: "TWSEChipProxy") -> tuple[float, str | None]:
+        """融券回補率 — continuous on rate.
+        0.10→2.0, 0.20→4.0 (cap)
         """
         rate = proxy.short_cover_rate
-        if rate > 0.20:
-            return 4, f"SHORT_CAPITULATION:{rate:.0%}"
         if rate > 0.10:
-            return 2, f"SHORT_COVER:{rate:.0%}"
-        return 0, None
+            if rate >= 0.20:
+                pts = 4.0
+            else:
+                pts = round(2.0 + (rate - 0.10) / 0.10 * 2.0, 2)
+            label = "SHORT_CAPITULATION" if rate > 0.20 else "SHORT_COVER"
+            return pts, f"{label}:{rate:.0%}"
+        return 0.0, None
 
     @staticmethod
-    def _large_2w_trend_score(proxy: "TWSEChipProxy") -> tuple[int, str | None]:
-        """400張+大戶兩週持股趨勢因子 (-3 to +5).
-
-        large_holder_2w_trend = this_week_pct - two_weeks_ago_pct
+    def _large_2w_trend_score(proxy: "TWSEChipProxy") -> tuple[float, str | None]:
+        """400張+大戶兩週趨勢 — continuous on trend % magnitude.
+        +0.5→3.0, +1.5+→5.0; -1.5+→-3.0
         """
         trend = proxy.large_holder_2w_trend
         if trend is None:
-            return 0, None
-        if trend > 1.5:
-            return 5, f"HOLDER_2W_UPTREND:{trend:+.2f}%"
-        if trend > 0.5:
-            return 3, f"HOLDER_2W_UP:{trend:+.2f}%"
+            return 0.0, None
         if trend > 0:
-            return 1, None
-        if trend < -1.5:
-            return -3, f"HOLDER_2W_DOWNTREND:{trend:+.2f}%"
-        return 0, None
+            if trend >= 1.5:
+                pts = 5.0
+            elif trend >= 0.5:
+                pts = round(3.0 + (trend - 0.5) / 1.0 * 2.0, 2)
+            else:
+                pts = round(trend / 0.5 * 3.0, 2)
+            if trend > 0.5:
+                label = "HOLDER_2W_UPTREND" if trend > 1.5 else "HOLDER_2W_UP"
+                return pts, f"{label}:{trend:+.2f}%"
+            return min(1.0, pts), None
+        if trend < 0:
+            # 0→0, -1.5→-3.0
+            pts = max(-3.0, round(trend / 1.5 * 3.0, 2))
+            if trend < -1.5:
+                return pts, f"HOLDER_2W_DOWNTREND:{trend:+.2f}%"
+        return 0.0, None
 
     @staticmethod
-    def _inst_accel_short_score(proxy: "TWSEChipProxy") -> tuple[int, str | None]:
-        """法人短窗加速因子 (3d/10d) (-2 to +4).
-
-        inst_accel_3d_10d = 近3日法人日均 / 近10日法人日均
-        >1 = 加速, <1 = 減速
+    def _inst_accel_short_score(proxy: "TWSEChipProxy") -> tuple[float, str | None]:
+        """法人 3d/10d 加速 — continuous on accel.
+        1.0→0, 1.3→2.0, 2.0+→4.0; 0.5→-2.0
         """
         accel = proxy.inst_accel_3d_10d
         if accel <= 0:
-            return 0, None
-        if accel >= 2.0:
-            return 4, f"INST_SURGE:{accel:.1f}x"
-        if accel >= 1.3:
-            return 2, f"INST_ACCEL_SHORT:{accel:.1f}x"
+            return 0.0, None
+        if accel >= 1.0:
+            if accel >= 2.0:
+                pts = 4.0
+            elif accel >= 1.3:
+                pts = round(2.0 + (accel - 1.3) / 0.7 * 2.0, 2)
+            else:
+                pts = round((accel - 1.0) / 0.3 * 2.0, 2)
+            if accel >= 1.3:
+                label = "INST_SURGE" if accel >= 2.0 else "INST_ACCEL_SHORT"
+                return pts, f"{label}:{accel:.1f}x"
+            return pts, None
         if accel < 0.5:
-            return -2, "INST_FADE_SHORT"
-        return 0, None
+            pts = round(-2.0 + (accel / 0.5) * 1.0, 2)  # 0→-2, 0.5→-1
+            return max(-2.0, pts), "INST_FADE_SHORT"
+        return 0.0, None
 
     def _dmi_initiation_score(
         self, history: list[DailyOHLCV]
-    ) -> tuple[int, str | None]:
+    ) -> tuple[float, str | None]:
         """Legacy entry point — computes DMI from scratch."""
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         dmi_now = self._calculate_dmi(sorted_h)
@@ -2016,43 +2124,39 @@ class TripleConfirmationEngine:
     def _dmi_initiation_score_cached(
         dmi_now: tuple[float | None, float | None, float | None],
         dmi_5d_ago: tuple[float | None, float | None, float | None],
-    ) -> tuple[int, str | None]:
-        """Score DMI trend initiation from pre-computed DMI values.
+    ) -> tuple[float, str | None]:
+        """Score DMI trend initiation — continuous on ADX magnitude.
 
-        Scoring:
-          +DI <= -DI OR ADX < 20       → 0
-          ADX >= 20 + fresh DI cross    → 6 (DMI_FRESH_CROSS)
-          ADX >= 20 + ADX rising        → 6 (DMI_TREND_INIT)
-          ADX 20-55 + stale cross       → 4 (DMI_TREND_CONT)
-          ADX > 55 (near exhaustion)    → 2 (DMI_TREND_CONT)
+        Strict gates: +DI <= -DI OR ADX < 20 → 0.
+        Above gate, base pts scale by ADX strength + flag for cross/init type.
         """
         plus_di, minus_di, adx = dmi_now
         if plus_di is None or minus_di is None or adx is None:
-            return 0, None
+            return 0.0, None
         if plus_di <= minus_di:
-            return 0, None
+            return 0.0, None
         if adx < 20:
-            return 0, None
+            return 0.0, None
 
-        # ADX > 55: trend likely near exhaustion (also gets -6 risk deduction)
         if adx > 55:
-            return 2, "DMI_TREND_CONT"
+            return 2.0, "DMI_TREND_CONT"
 
         plus_di_5d, minus_di_5d, adx_5d = dmi_5d_ago
 
-        # Fresh crossover: 5 days ago +DI was NOT above -DI → cross within 5d
+        # ADX strength: 20→0.6x scale, 25+→1.0x scale (most setups land at ADX 25+)
+        adx_scale = min(1.0, max(0.6, (adx - 20.0) / 5.0 * 0.4 + 0.6))
+
         if (
             plus_di_5d is not None
             and minus_di_5d is not None
             and plus_di_5d <= minus_di_5d
         ):
-            return 6, "DMI_FRESH_CROSS"
+            return round(6.0 * adx_scale, 2), "DMI_FRESH_CROSS"
 
-        # ADX rising = trend strengthening
         if adx_5d is not None and adx > adx_5d:
-            return 6, "DMI_TREND_INIT"
+            return round(6.0 * adx_scale, 2), "DMI_TREND_INIT"
 
-        return 4, "DMI_TREND_CONT"
+        return round(4.0 * adx_scale, 2), "DMI_TREND_CONT"
 
     def _bb_squeeze_breakout_score(
         self, ohlcv: DailyOHLCV, history: list[DailyOHLCV]
@@ -2168,11 +2272,13 @@ class TripleConfirmationEngine:
         vol_20ma = self._volume_20ma(history)
         cs_ratio = self._close_strength_ratio(ohlcv)
 
-        # 1. 長上影放量: vol > 1.5×avg AND close_strength < 0.4
+        # 1. 長上影放量 — continuous on (1 - cs_ratio) when vol gates pass
+        # cs_ratio 0.4→4.0, 0.0→8.0 (linear)
         if vol_20ma is not None and vol_20ma > 0:
             if ohlcv.volume > vol_20ma * 1.5:
                 if cs_ratio is not None and cs_ratio < 0.4:
-                    bd.long_upper_shadow = 8
+                    # 0.4→4.0, 0.0→8.0
+                    bd.long_upper_shadow = round(4.0 + (0.4 - cs_ratio) / 0.4 * 4.0, 2)
                     bd.flags.append("LONG_UPPER_SHADOW")
 
         # 2. 過熱乖離 (v2 historical: data shows these are positive trend signals, removing deductions)
@@ -2196,8 +2302,10 @@ class TripleConfirmationEngine:
                 and ohlcv.close >= volume_profile.twenty_day_high * 0.99
             )
             if twse_proxy.daytrade_ratio > 0.35 and not above_20d:
-                bd.daytrade_heat = 5
-                bd.flags.append(f"DAYTRADE_HEAT: {twse_proxy.daytrade_ratio:.1%}")
+                # 0.35→3.0, 0.50→5.0 (continuous penalty by heat)
+                ratio = twse_proxy.daytrade_ratio
+                bd.daytrade_heat = round(min(5.0, 3.0 + max(0.0, ratio - 0.35) / 0.15 * 2.0), 2)
+                bd.flags.append(f"DAYTRADE_HEAT: {ratio:.1%}")
 
         # 4. 借券放空 + 突破失敗
         if twse_proxy is not None and twse_proxy.sbl_available and twse_proxy.sbl_ratio > 0.10:
@@ -2206,7 +2314,9 @@ class TripleConfirmationEngine:
                 and ohlcv.close >= volume_profile.twenty_day_high * 0.99
             )
             if not above_20d:
-                bd.sbl_breakout_fail = 8
+                # 0.10→6.0, 0.20→8.0 (continuous on SBL pressure)
+                r = twse_proxy.sbl_ratio
+                bd.sbl_breakout_fail = round(min(8.0, 6.0 + max(0.0, r - 0.10) / 0.10 * 2.0), 2)
                 bd.flags.append("SBL_BREAKOUT_FAIL")
 
         # 5. 融資追價過熱: price up + 融資大增 + margin_util > 60%
@@ -2217,7 +2327,9 @@ class TripleConfirmationEngine:
                 and twse_proxy.margin_utilization_rate is not None
                 and twse_proxy.margin_utilization_rate > 0.60
             ):
-                bd.margin_chase_heat = 5
+                # 0.60→3.0, 0.85→5.0 (continuous on util heat)
+                util = twse_proxy.margin_utilization_rate
+                bd.margin_chase_heat = round(min(5.0, 3.0 + max(0.0, util - 0.60) / 0.25 * 2.0), 2)
                 bd.flags.append("MARGIN_CHASE_HEAT")
 
         # 6. ADX 過熱耗竭: ADX > 55 (trend likely exhausted)
@@ -2227,8 +2339,13 @@ class TripleConfirmationEngine:
         else:
             sorted_hist = sorted(history, key=lambda x: x.trade_date)
             plus_di, minus_di, adx = self._calculate_dmi(sorted_hist)
+        # ADX 過熱 — continuous on ADX magnitude above 55
+        # 55→4.0, 65+→6.0 (cap)
         if adx is not None and adx > 55:
-            bd.adx_exhaustion_deduction = 6
+            if adx >= 65:
+                bd.adx_exhaustion_deduction = 6.0
+            else:
+                bd.adx_exhaustion_deduction = round(4.0 + (adx - 55) / 10.0 * 2.0, 2)
             bd.flags.append(f"ADX_EXHAUSTION:{adx:.1f}")
 
         # 7. DMI 背離: +DI falling while -DI rising (momentum weakening)
@@ -2251,13 +2368,14 @@ class TripleConfirmationEngine:
                 and len(sorted_for_prev) >= 2
                 and ohlcv.close >= sorted_for_prev[-2].close  # but price still up
             ):
-                bd.dmi_divergence_deduction = 4
+                bd.dmi_divergence_deduction = 4.0
                 bd.flags.append("DMI_DIVERGENCE")
 
         # 8. 連續爆量 ≥3 日：框架第3根不追（量 > 1.5× 20d avg 連續天數含今日）
         consec = self._vol_consecutive_surge_count(ohlcv, history)
         if consec >= 3:
-            bd.vol_consecutive_surge = 5
+            # 3→4.0, 5+→5.0 (longer streak = larger penalty)
+            bd.vol_consecutive_surge = round(min(5.0, 4.0 + (consec - 3) * 0.5), 2)
             bd.flags.append(f"VOL_DAY{consec}_NO_CHASE")
 
         # 9. 追高懲罰：近20日從最低收盤價漲幅過大
@@ -2269,32 +2387,27 @@ class TripleConfirmationEngine:
     @staticmethod
     def _recent_advance_deduction(
         ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> tuple[int, str | None]:
-        """追高懲罰：近20日從最低收盤漲幅過大 → 高基期風險。
-
-        > 40% → 扣 10 分，HIGH_BASE_RISK
-        > 25% → 扣 5 分，MOD_BASE_RISK
-        否則 → 0
-
-        邏輯：使用近20日歷史+今日的最低收盤價作為基期，
-        衡量目前股價距底部的漲幅。不懲罰健康蓄積的股票，
-        只懲罰「已在山頂再加倉」的場景。
+    ) -> tuple[float, str | None]:
+        """追高懲罰 — continuous on advance %.
+        <25% → 0, 25%→5.0, 40%+→10.0 (cap).
         """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         recent = sorted_h[-20:] if len(sorted_h) >= 20 else sorted_h
         if len(recent) < 5:
-            return 0, None
+            return 0.0, None
 
         low_close = min(b.close for b in recent)
         if low_close <= 0:
-            return 0, None
+            return 0.0, None
 
         advance_pct = (ohlcv.close - low_close) / low_close
+        if advance_pct < 0.25:
+            return 0.0, None
         if advance_pct >= 0.40:
-            return 10, f"HIGH_BASE_RISK:{advance_pct:.0%}"
-        if advance_pct >= 0.25:
-            return 5, f"MOD_BASE_RISK:{advance_pct:.0%}"
-        return 0, None
+            return 10.0, f"HIGH_BASE_RISK:{advance_pct:.0%}"
+        # 0.25→5.0, 0.40→10.0
+        pts = 5.0 + (advance_pct - 0.25) / 0.15 * 5.0
+        return round(pts, 2), f"MOD_BASE_RISK:{advance_pct:.0%}"
 
     # ------------------------------------------------------------------
     # Signal building
@@ -3106,11 +3219,10 @@ class TripleConfirmationEngine:
     @staticmethod
     def _obv_stealth_score(
         ohlcv: DailyOHLCV, history: list[DailyOHLCV]
-    ) -> tuple[int, str | None]:
+    ) -> tuple[float, str | None]:
         """OBV 10d 斜率正 AND 股價 10d 報酬 < 2% → 偷吸信號。
 
-        區別於 obv_accumulation_score（20d window + range）:
-        此因子用 10d 短窗口 + 看 return 方向（橫盤而非振幅）。
+        Binary gate (3.0 if conditions met). Kept binary since it's a setup type.
         """
         sorted_h = sorted(history, key=lambda x: x.trade_date)
         bars = (sorted_h[-10:] if len(sorted_h) >= 10 else sorted_h)
@@ -3153,79 +3265,77 @@ class TripleConfirmationEngine:
         return 0, None
 
     @staticmethod
-    def _margin_persist_decline_score(proxy: TWSEChipProxy) -> int:
-        """融資連跌天數加分。
-
-        streak ≥ 5 → +4 (融資洗盤完成)
-        streak ≥ 3 → +2 (持續洗盤中)
+    def _margin_persist_decline_score(proxy: TWSEChipProxy) -> float:
+        """融資連跌天數 — continuous on streak.
+        3→2.0, 5→4.0, 8+→ cap 4.0
         """
         streak = proxy.margin_decline_streak
+        if streak < 3:
+            return 0.0
         if streak >= 5:
-            return 4
-        if streak >= 3:
-            return 2
-        return 0
+            return 4.0
+        return round(2.0 + (streak - 3) / 2.0 * 2.0, 2)
 
     @staticmethod
-    def _holder_count_declining_score(proxy: TWSEChipProxy) -> tuple[int, str | None]:
-        """總股東人數連週下降 = 籌碼集中最純粹的訊號。
-
-        需付費 FinMind；無 API Key 則返回 0（不扣分）。
+    def _holder_count_declining_score(proxy: TWSEChipProxy) -> tuple[float, str | None]:
+        """總股東人數連週下降 — continuous on weeks.
+        1w→3.0, 2w+→5.0
         """
         weeks = proxy.holder_count_decline_weeks
         chg = proxy.holder_count_chg_weekly
         if chg is None:
-            return 0, None
+            return 0.0, None
         if weeks >= 2:
-            return 5, f"HOLDER_SHRINK:2w({chg:+d})"
+            return 5.0, f"HOLDER_SHRINK:2w({chg:+d})"
         if weeks >= 1:
-            return 3, f"HOLDER_SHRINK:1w({chg:+d})"
-        return 0, None
+            return 3.0, f"HOLDER_SHRINK:1w({chg:+d})"
+        return 0.0, None
 
     @staticmethod
-    def _chip_concentration_accel_score(proxy: TWSEChipProxy) -> tuple[int, str | None]:
-        """大戶持股本週加速集中：本週變化 > 上週變化（加速度）。
-
-        large_holder_2w_trend = this_week_pct - two_weeks_ago_pct
-        last_week_chg = large_holder_2w_trend - large_holder_chg_pct
-        acceleration = this_week > last_week AND this_week ≥ 0.5%
+    def _chip_concentration_accel_score(proxy: TWSEChipProxy) -> tuple[float, str | None]:
+        """大戶加速集中 — continuous on this_week magnitude (gated by acceleration).
         """
         this_week = proxy.large_holder_chg_pct
         trend_2w = proxy.large_holder_2w_trend
         if this_week is None or trend_2w is None:
-            return 0, None
+            return 0.0, None
         if this_week < 0.5:
-            return 0, None
+            return 0.0, None
 
         last_week = trend_2w - this_week
         if this_week <= last_week:
-            return 0, None
+            return 0.0, None
 
-        # 加速確認：千張大戶同向
         super_also_up = (
             proxy.super_large_holder_chg_pct is not None
             and proxy.super_large_holder_chg_pct >= 0.3
         )
+        # this_week 0.5→3.0, 1.5+→peak (3 or 6 depending on super alignment)
+        peak = 6.0 if super_also_up else 3.0
+        if this_week >= 1.5:
+            pts = peak
+        else:
+            pts = round(3.0 + (this_week - 0.5) / 1.0 * (peak - 3.0), 2)
         if super_also_up:
-            return 6, f"CHIP_ACCEL_PRIME:{this_week:+.2f}%/wk"
-        return 3, f"CHIP_ACCEL:{this_week:+.2f}%/wk"
+            return pts, f"CHIP_ACCEL_PRIME:{this_week:+.2f}%/wk"
+        return pts, f"CHIP_ACCEL:{this_week:+.2f}%/wk"
 
     @staticmethod
-    def _short_squeeze_setup_score(proxy: TWSEChipProxy) -> tuple[int, str | None]:
-        """券資比高 + 空頭開始回補 = 軋空潛力。
-
-        區別於 sbl_pressure_pts（借券賣出，懲罰型）:
-        此因子看融券/融資比 + 回補率，是潛在彈力的正面信號。
+    def _short_squeeze_setup_score(proxy: TWSEChipProxy) -> tuple[float, str | None]:
+        """軋空潛力 — continuous on SMR magnitude past gate.
+        SMR 0.25/SCR 0.08→3.0, SMR 0.40/SCR 0.15→5.0
         """
         smr = proxy.short_margin_ratio
         scr = proxy.short_cover_rate
         if smr <= 0:
-            return 0, None
+            return 0.0, None
         if smr > 0.40 and scr > 0.15:
-            return 5, f"SHORT_SQUEEZE_SETUP:SMR={smr:.2f}/SCR={scr:.2f}"
+            return 5.0, f"SHORT_SQUEEZE_SETUP:SMR={smr:.2f}/SCR={scr:.2f}"
         if smr > 0.25 and scr > 0.08:
-            return 3, f"SHORT_SQUEEZE_SETUP:SMR={smr:.2f}"
-        return 0, None
+            # 0.25→3.0, 0.40→5.0
+            pts = round(3.0 + (smr - 0.25) / 0.15 * 2.0, 2)
+            return min(5.0, pts), f"SHORT_SQUEEZE_SETUP:SMR={smr:.2f}"
+        return 0.0, None
 
     @staticmethod
     def _stealth_accum_composite_score(
@@ -3233,7 +3343,7 @@ class TripleConfirmationEngine:
         ohlcv: "DailyOHLCV",
         history: list["DailyOHLCV"],
         proxy: "TWSEChipProxy | None",
-    ) -> tuple[int, str | None]:
+    ) -> tuple[float, str | None]:
         """K-of-6 隱蔽吸籌複合分。
 
         6 個條件：
@@ -3271,11 +3381,13 @@ class TripleConfirmationEngine:
             if base > 0 and abs((ohlcv.close - base) / base) < 0.03:
                 count += 1
 
+        if count < 4:
+            return 0.0, None
+        # 4→6.0, 5→8.0, 6→10.0
+        pts = round(6.0 + (count - 4) * 2.0, 2)
         if count >= 5:
-            return 10, f"STEALTH_ACCUM_PRIME:{count}/6"
-        if count >= 4:
-            return 6, f"STEALTH_ACCUM:{count}/6"
-        return 0, None
+            return pts, f"STEALTH_ACCUM_PRIME:{count}/6"
+        return pts, f"STEALTH_ACCUM:{count}/6"
 
     @staticmethod
     def _make_execution_plan(

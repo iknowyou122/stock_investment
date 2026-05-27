@@ -733,26 +733,28 @@ class TestMarginStructure:
 # ---------------------------------------------------------------------------
 
 class TestMarginUtilization:
-    def test_low_utilization_gives_plus4(self):
+    def test_low_utilization_gives_continuous(self):
+        """Phase 4.44: 0→4.0, 0.30→0 (linear). 0.15→2.0."""
         bd = _ScoreBreakdown()
         engine = TripleConfirmationEngine()
-        proxy = _make_twse_proxy(margin_utilization_rate=0.15)  # 15% < 20%
+        proxy = _make_twse_proxy(margin_utilization_rate=0.15)
         engine._apply_free_chip(bd, proxy)
-        assert bd.margin_utilization_pts == 4
+        assert bd.margin_utilization_pts == pytest.approx(3.0, abs=0.05)
 
     def test_mid_utilization_gives_zero(self):
         bd = _ScoreBreakdown()
         engine = TripleConfirmationEngine()
-        proxy = _make_twse_proxy(margin_utilization_rate=0.50)  # 50% in neutral zone
+        proxy = _make_twse_proxy(margin_utilization_rate=0.50)
         engine._apply_free_chip(bd, proxy)
-        assert bd.margin_utilization_pts == 0
+        assert bd.margin_utilization_pts == pytest.approx(0.0, abs=0.05)
 
-    def test_high_utilization_gives_minus4(self):
+    def test_high_utilization_gives_continuous_minus(self):
+        """Phase 4.44: 0.60→0, 1.00→-4.0. 0.85→-2.5."""
         bd = _ScoreBreakdown()
         engine = TripleConfirmationEngine()
-        proxy = _make_twse_proxy(margin_utilization_rate=0.85)  # 85% > 80%
+        proxy = _make_twse_proxy(margin_utilization_rate=0.85)
         engine._apply_free_chip(bd, proxy)
-        assert bd.margin_utilization_pts == -4
+        assert bd.margin_utilization_pts == pytest.approx(-2.5, abs=0.05)
 
     def test_none_utilization_gives_zero(self):
         bd = _ScoreBreakdown()
@@ -762,20 +764,20 @@ class TestMarginUtilization:
         assert bd.margin_utilization_pts == 0
 
     def test_boundary_exactly_20pct(self):
-        """Exactly 20% → 0 (not in the <20% zone)."""
+        """Phase 4.44: 0.20 falls in low-util slope: (0.30-0.20)/0.20*4 = 2.0."""
         bd = _ScoreBreakdown()
         engine = TripleConfirmationEngine()
         proxy = _make_twse_proxy(margin_utilization_rate=0.20)
         engine._apply_free_chip(bd, proxy)
-        assert bd.margin_utilization_pts == 0
+        assert bd.margin_utilization_pts == pytest.approx(2.0, abs=0.05)
 
     def test_boundary_exactly_80pct(self):
-        """Exactly 80% → 0 (not in the >80% zone)."""
+        """Phase 4.44: 0.80 in high-util slope: -(0.80-0.60)/0.40*4 = -2.0."""
         bd = _ScoreBreakdown()
         engine = TripleConfirmationEngine()
         proxy = _make_twse_proxy(margin_utilization_rate=0.80)
         engine._apply_free_chip(bd, proxy)
-        assert bd.margin_utilization_pts == 0
+        assert bd.margin_utilization_pts == pytest.approx(-2.0, abs=0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -1150,19 +1152,21 @@ class TestSBLPressure:
         engine._apply_free_chip(bd, proxy)
         assert bd.sbl_pressure_pts == 0
 
-    def test_sbl_between_5_and_10pct_gives_minus4(self):
+    def test_sbl_between_5_and_10pct_continuous(self):
+        """Phase 4.44: 0.05→0, 0.20→-8 linear. 0.07→-1.07."""
         bd = _ScoreBreakdown()
         engine = TripleConfirmationEngine()
         proxy = _make_twse_proxy(sbl_ratio=0.07, sbl_available=True)
         engine._apply_free_chip(bd, proxy)
-        assert bd.sbl_pressure_pts == -4
+        assert bd.sbl_pressure_pts == pytest.approx(-1.07, abs=0.05)
 
-    def test_sbl_above_10pct_gives_minus8(self):
+    def test_sbl_above_10pct_continuous(self):
+        """Phase 4.44: 0.12 → -(0.12-0.05)/0.15*8 = -3.73."""
         bd = _ScoreBreakdown()
         engine = TripleConfirmationEngine()
         proxy = _make_twse_proxy(sbl_ratio=0.12, sbl_available=True)
         engine._apply_free_chip(bd, proxy)
-        assert bd.sbl_pressure_pts == -8
+        assert bd.sbl_pressure_pts == pytest.approx(-3.73, abs=0.05)
 
     def test_sbl_not_available_gives_zero(self):
         bd = _ScoreBreakdown()
@@ -2808,10 +2812,11 @@ class TestRecentAdvanceDeduction:
         assert flag is None
 
     def test_moderate_deduction_25_to_40pct(self):
+        """Phase 4.44 continuous: 0.25→5.0, 0.40→10.0. 0.30 → 5 + (0.05/0.15)*5 = 6.67."""
         hist = self._make_hist(100.0)
         ohlcv = _make_ohlcv(close=130.0)  # +30%
         pts, flag = TripleConfirmationEngine._recent_advance_deduction(ohlcv, hist)
-        assert pts == 5
+        assert pts == pytest.approx(6.67, abs=0.05)
         assert flag is not None and "MOD_BASE_RISK" in flag
 
     def test_high_deduction_above_40pct(self):
