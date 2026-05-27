@@ -143,7 +143,7 @@ _MA20_SLOPE_DIFF_DAYS = 5       # compare MA20 today vs 5 sessions ago
 # Amount-based instead of share-count so high-priced stocks aren't over-filtered
 # and low-priced stocks aren't under-filtered.
 _LIQUIDITY_THRESHOLDS: dict[str, float] = {
-    "TSE":  15_000_000.0,   # NT$ 15M/day — viable for early position building; 40M was too strict for small-caps
+    "TSE":   8_000_000.0,   # NT$ 8M/day — captures small-caps in early accumulation; was 15M (Phase 4.41)
     "TPEx":  8_000_000.0,   # NT$ 8M/day — TPEx minimum for position building
 }
 _DEFAULT_MARKET = "TSE"
@@ -651,7 +651,7 @@ class TripleConfirmationEngine:
             if volume_profile.sixty_day_sessions >= 40 and volume_profile.sixty_day_high > 0:
                 required += 1
                 ratio_60d = volume_profile.twenty_day_high / volume_profile.sixty_day_high
-                if ratio_60d >= 0.85:
+                if ratio_60d >= 0.80:
                     conditions_met += 1
                     detail_flags.append(f"GATE_PASS:G5_NO_OVERHEAD:{ratio_60d*100:.1f}%")
                 else:

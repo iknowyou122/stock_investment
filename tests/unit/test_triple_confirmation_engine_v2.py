@@ -1447,7 +1447,7 @@ def _history_with_turnover(avg_turnover: float, n: int = 70) -> list[DailyOHLCV]
 class TestLiquidityGate:
     def test_tse_below_threshold_triggers_low_liquidity(self):
         engine = TripleConfirmationEngine()
-        history = _history_with_turnover(avg_turnover=10_000_000)  # 1000萬 < 1500萬 TSE threshold
+        history = _history_with_turnover(avg_turnover=5_000_000)  # 500萬 < 800萬 TSE threshold (was 1500萬)
         today = _make_ohlcv(close=50.0, volume=200_000, trade_date=date(2025, 3, 13))
         signal = engine.score(
             ohlcv=today, ohlcv_history=history,
@@ -2460,10 +2460,11 @@ class TestChipLoadingTrack:
     # --- integration: full engine (flat history → G2 passes, G5 fails from 60D data) ---
 
     def test_chip_loading_gives_watch_not_caution(self):
-        # flat history: BB width=0 → G2 passes; sixty_day_high > twenty_day_high → G5 fails
-        history = _make_history(65, base_close=90.0, flat=True)
+        # flat history: BB width=0 → G2 passes; sixty_day_high >> twenty_day_high → G5 fails (<80%)
+        # base_vol=100_000 × base_close=90 = 9M/day → G3 passes TSE 8M threshold
+        history = _make_history(65, base_close=90.0, base_vol=100_000, flat=True)
         ohlcv = _make_ohlcv(close=98.0, high=100.0, low=96.0, volume=600_000)
-        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=120.0, sixty_day_sessions=60)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=130.0, sixty_day_sessions=60)
         chip = _make_chip_report()
         proxy = self._strong_proxy(foreign_consec=4)
 
@@ -2479,9 +2480,9 @@ class TestChipLoadingTrack:
         assert "CHIP_LOADING" in signal.data_quality_flags
 
     def test_chip_loading_surfaces_gate_flags(self):
-        history = _make_history(65, base_close=90.0, flat=True)
+        history = _make_history(65, base_close=90.0, base_vol=100_000, flat=True)
         ohlcv = _make_ohlcv(close=98.0, high=100.0, low=96.0, volume=600_000)
-        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=120.0, sixty_day_sessions=60)
+        vp = _make_volume_profile(twenty_day_high=100.0, sixty_day_high=130.0, sixty_day_sessions=60)
         chip = _make_chip_report()
         proxy = self._strong_proxy(foreign_consec=5)
 
