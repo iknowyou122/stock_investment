@@ -1628,7 +1628,7 @@ def run_batch(
         )
         _console.print(f"\n[bold cyan][Phase 1 完成][/bold cyan] {len(results)} 檔（有效 [green]{len(eligible)}[/green] 檔）")
         if eligible:
-            top5 = "  ".join(f"[bold]{r['ticker']}[/bold]([green]{r['confidence']}[/green])" for r in eligible[:5])
+            top5 = "  ".join(f"[bold]{r['ticker']}[/bold]([green]{r['confidence']:.1f}[/green])" for r in eligible[:5])
             _console.print(f"  前幾名: {top5}{'[dim]...[/dim]' if len(eligible) > 5 else ''}")
 
         # 決定 Phase 2 範圍：CLI 指定優先，否則互動詢問
@@ -3375,7 +3375,7 @@ def _do_notify_telegram(scan_date, top: int, min_confidence: int) -> None:
         flag_str = f"  [{' | '.join(key_flags)}]" if key_flags else ""
         lines.append(
             f"{i}. {action_icon} {ticker_name}\n"
-            f"   信心 {s['confidence']}\n"
+            f"   信心 {s['confidence']:.1f}\n"
             f"   進場 {entry} → 目標 {target}{upside}  停損 {stop}{flag_str}"
         )
 
