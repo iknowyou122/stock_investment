@@ -2066,7 +2066,8 @@ def _build_chart_from_df(df) -> dict:
     """Build chart dict from a FinMind OHLCV DataFrame (already in memory)."""
     import pandas as pd
     period = 20
-    empty: dict = {"candles": [], "bb_upper": [], "bb_mid": [], "bb_lower": []}
+    _empty_ma: dict = {"candles": [], "bb_upper": [], "bb_mid": [], "bb_lower": [],
+                       "ma5": [], "ma10": [], "ma20": [], "ma60": []}
     try:
         df = df.sort_values("trade_date").copy()
         df = df.dropna(subset=["open", "high", "low", "close"])
@@ -2077,7 +2078,7 @@ def _build_chart_from_df(df) -> dict:
             for _, row in df.iterrows()
         ]
         if len(rows) < period:
-            return empty
+            return _empty_ma
         closes = [r["close"] for r in rows]
         bb_upper, bb_mid, bb_lower = [], [], []
         for i in range(period - 1, len(rows)):
@@ -2088,15 +2089,29 @@ def _build_chart_from_df(df) -> dict:
             bb_upper.append({"time": t, "value": round(mean + 2 * std, 2)})
             bb_mid.append({"time": t, "value": round(mean, 2)})
             bb_lower.append({"time": t, "value": round(mean - 2 * std, 2)})
-        return {"candles": rows[period - 1:], "bb_upper": bb_upper, "bb_mid": bb_mid, "bb_lower": bb_lower}
+        display_rows = rows[period - 1:]
+
+        def _ma(p: int) -> list:
+            out = []
+            for i, row in enumerate(display_rows):
+                orig = i + period - 1
+                if orig < p - 1:
+                    continue
+                w = closes[orig - p + 1: orig + 1]
+                out.append({"time": row["time"], "value": round(sum(w) / p, 2)})
+            return out
+
+        return {"candles": display_rows, "bb_upper": bb_upper, "bb_mid": bb_mid, "bb_lower": bb_lower,
+                "ma5": _ma(5), "ma10": _ma(10), "ma20": _ma(20), "ma60": _ma(60)}
     except Exception:
-        return empty
+        return _empty_ma
 
 
 def _fetch_plan_chart(ticker: str, market: str) -> dict:
-    """Fetch 5-month daily OHLCV + Bollinger Bands (20,2) via yfinance."""
+    """Fetch 5-month daily OHLCV + Bollinger Bands (20,2) + MA lines via yfinance."""
     suffix = ".TW" if market == "TSE" else ".TWO"
-    empty: dict = {"candles": [], "bb_upper": [], "bb_mid": [], "bb_lower": []}
+    empty: dict = {"candles": [], "bb_upper": [], "bb_mid": [], "bb_lower": [],
+                   "ma5": [], "ma10": [], "ma20": [], "ma60": []}
     try:
         import logging as _log
         import warnings as _warn
@@ -2156,7 +2171,19 @@ def _fetch_plan_chart(ticker: str, market: str) -> dict:
             bb_mid.append({"time": t, "value": round(mean, 2)})
             bb_lower.append({"time": t, "value": round(mean - 2 * std, 2)})
         display_rows = rows[period - 1:]
-        return {"candles": display_rows, "bb_upper": bb_upper, "bb_mid": bb_mid, "bb_lower": bb_lower}
+
+        def _ma(p: int) -> list:
+            out = []
+            for i, row in enumerate(display_rows):
+                orig = i + period - 1
+                if orig < p - 1:
+                    continue
+                w = closes[orig - p + 1: orig + 1]
+                out.append({"time": row["time"], "value": round(sum(w) / p, 2)})
+            return out
+
+        return {"candles": display_rows, "bb_upper": bb_upper, "bb_mid": bb_mid, "bb_lower": bb_lower,
+                "ma5": _ma(5), "ma10": _ma(10), "ma20": _ma(20), "ma60": _ma(60)}
     except Exception:
         return empty
 
@@ -2648,7 +2675,16 @@ def _generate_plan_html(
         <div class="m"><div class="mv neg">{stop_s}</div><div class="ml">止損</div></div>
         <div class="m"><div class="mv">{target_s}</div><div class="ml">目標價</div></div>
       </div>
-      <div class="chart" data-ticker="{_esc(ticker)}"></div>
+      <div class="chart-wrap">
+        <div class="chart-ctrl">
+          <button class="ct-btn active" data-s="bb">布林</button>
+          <button class="ct-btn" data-s="ma5">5MA</button>
+          <button class="ct-btn" data-s="ma10">10MA</button>
+          <button class="ct-btn" data-s="ma20">20MA</button>
+          <button class="ct-btn" data-s="ma60">60MA</button>
+        </div>
+        <div class="chart" data-ticker="{_esc(ticker)}"></div>
+      </div>
       <div class="rec">
         <div class="rec-header">
           <span class="rec-badge rec-{rec_cls}">{rec_label}</span>
@@ -2762,6 +2798,17 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .m:last-child{{border-right:none}}
 .mv{{font-size:13px;font-weight:600}}.ml{{font-size:10px;color:#8b949e;margin-top:2px}}
 .pos{{color:#3fb950}}.neg{{color:#f85149}}.conf-watch{{color:#58a6ff}}
+.chart-wrap{{background:#0d1117;border-top:1px solid #21262d}}
+.chart-ctrl{{display:flex;gap:4px;padding:6px 8px 4px}}
+.ct-btn{{font-size:10px;font-weight:600;padding:3px 8px;border-radius:10px;border:1px solid #30363d;background:transparent;color:#8b949e;cursor:pointer;transition:all .15s;line-height:1.4}}
+.ct-btn.active{{background:#1c2333;color:#e6edf3;border-color:#58a6ff}}
+.ct-btn:hover:not(.active){{color:#c9d1d9;border-color:#484f58}}
+.ct-btn::before{{margin-right:3px;font-size:9px}}
+.ct-btn[data-s="bb"]::before{{content:"●";color:#58a6ff}}
+.ct-btn[data-s="ma5"]::before{{content:"●";color:#ffd700}}
+.ct-btn[data-s="ma10"]::before{{content:"●";color:#ff7f50}}
+.ct-btn[data-s="ma20"]::before{{content:"●";color:#00e5ff}}
+.ct-btn[data-s="ma60"]::before{{content:"●";color:#da70d6}}
 .chart{{height:240px;background:#0d1117;position:relative}}
 .links{{display:flex;gap:8px;padding:10px 16px;background:#0d1117;border-top:1px solid #21262d}}
 .link-btn{{flex:1;display:block;text-align:center;padding:8px;border-radius:6px;font-size:12px;font-weight:600;
@@ -2897,6 +2944,7 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <script>
 const CHART_DATA = {_json.dumps(chart_data, ensure_ascii=False)};
+const _CS = {{}};
 const _obs = new IntersectionObserver(function(entries) {{
   entries.forEach(function(e) {{
     if (!e.isIntersecting || e.target.dataset.init) return;
@@ -2923,10 +2971,36 @@ const _obs = new IntersectionObserver(function(entries) {{
     }});
     cs.setData(data.candles);
     const lo = {{ lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }};
-    chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#58a6ff" }})).setData(data.bb_mid);
-    chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#e3b341" }})).setData(data.bb_upper);
-    chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#a371f7" }})).setData(data.bb_lower);
+    const bbMid = chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#58a6ff" }}));
+    bbMid.setData(data.bb_mid);
+    const bbUpper = chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#e3b341" }}));
+    bbUpper.setData(data.bb_upper);
+    const bbLower = chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#a371f7" }}));
+    bbLower.setData(data.bb_lower);
+    const ma5  = chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#ffd700" }}));
+    const ma10 = chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#ff7f50" }}));
+    const ma20 = chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#00e5ff" }}));
+    const ma60 = chart.addLineSeries(Object.assign({{}}, lo, {{ color: "#da70d6" }}));
     chart.timeScale().fitContent();
+    _CS[ticker] = {{ bb: [bbMid, bbUpper, bbLower], ma5: ma5, ma10: ma10, ma20: ma20, ma60: ma60 }};
+    const wrap = e.target.closest('.chart-wrap');
+    if (wrap) {{
+      wrap.querySelectorAll('.ct-btn').forEach(function(btn) {{
+        btn.addEventListener('click', function() {{
+          const s = _CS[ticker];
+          const name = this.dataset.s;
+          const wasActive = this.classList.contains('active');
+          if (name === 'bb') {{
+            if (wasActive) {{ s.bb.forEach(function(ser) {{ ser.setData([]); }}); }}
+            else {{ s.bb[0].setData(data.bb_mid); s.bb[1].setData(data.bb_upper); s.bb[2].setData(data.bb_lower); }}
+          }} else {{
+            const ser = s[name];
+            if (ser) {{ ser.setData(wasActive ? [] : (data[name] || [])); }}
+          }}
+          this.classList.toggle('active');
+        }});
+      }});
+    }}
   }});
 }}, {{ rootMargin: "100px" }});
 document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.observe(el); }});

@@ -212,6 +212,7 @@ class FinMindClient:
                     return result.reset_index(drop=True).copy()
 
         # 1. DB cache (L2) — persistent across sessions, source-agnostic
+        _db_history: pd.DataFrame | None = None  # saved when partial path is taken
         if self._ohlcv_repo is not None and not adjusted:
             db_df = self._ohlcv_repo.get(ticker, start_date, end_date)
             if not db_df.empty:
@@ -220,7 +221,9 @@ class FinMindClient:
                     # DB has full range — serve directly
                     self._update_ohlcv_mem(ticker, db_df)
                     return db_df.reset_index(drop=True).copy()
-                # DB has partial data — only fetch the missing tail from API
+                # DB has partial data — save the historical rows, then fetch only
+                # the missing tail from API so we can merge them before returning.
+                _db_history = db_df
                 start_date = db_max  # re-fetch from last known date (inclusive overlap is OK)
 
         if use_cache:
@@ -312,6 +315,16 @@ class FinMindClient:
         # Write to DB (L2 cache) so future sessions skip the API call
         if self._ohlcv_repo is not None and not adjusted:
             self._ohlcv_repo.upsert(df, source="yfinance" if _used_yfinance else "finmind")
+
+        # Partial-path fix: merge saved DB history with the freshly fetched tail so
+        # the caller receives the full requested range, not just the last 1-2 days.
+        if _db_history is not None and not _db_history.empty:
+            df = (
+                pd.concat([_db_history, df])
+                .drop_duplicates("trade_date")
+                .sort_values("trade_date")
+                .reset_index(drop=True)
+            )
 
         self._update_ohlcv_mem(ticker, df)
         return df
