@@ -1881,11 +1881,124 @@ def _record_results(results: list[dict], analysis_date: date) -> int:
     return recorded
 
 
-def _print_yesterday_results(analysis_date: date) -> None:
-    """Query signal_outcomes for signals from T-15 to T-5 days ago and print a P&L briefing.
+def _settle_pending_returns(
+    conn,
+    date_from: date,
+    date_to: date,
+) -> int:
+    """Compute and write back return_t1/t3/t5 for unsettled signals in [date_from, date_to].
 
-    Shows win rate and avg T+5 return for signals that have had enough time to settle,
-    split by LONG vs WATCH action.  Prints nothing when DB is unavailable or no data.
+    Uses yfinance for OHLCV (no FinMind API key needed). Signals already having
+    return_t5 are skipped.  Returns number of signals newly settled.
+    """
+    try:
+        import yfinance as yf
+        _yfl = __import__("logging").getLogger("yfinance")
+        _yfl.setLevel(__import__("logging").WARNING)
+    except ImportError:
+        return 0
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT signal_id, ticker, signal_date, entry_price, action
+            FROM signal_outcomes
+            WHERE signal_date >= %s AND signal_date <= %s
+              AND source = 'live'
+              AND return_t5 IS NULL
+              AND halt_flag = FALSE
+            """,
+            (date_from, date_to),
+        )
+        pending = cur.fetchall()
+
+    if not pending:
+        return 0
+
+    # Fetch OHLCV once per ticker (covering up to 8 calendar days ahead of signal_date)
+    tickers_needed: dict[str, set[date]] = {}
+    for _, ticker, sig_date, _, _ in pending:
+        if isinstance(sig_date, str):
+            sig_date = date.fromisoformat(sig_date)
+        tickers_needed.setdefault(ticker, set()).add(sig_date)
+
+    # Map ticker → DataFrame (indexed by date)
+    ohlcv_cache: dict[str, dict] = {}
+    for ticker, dates in tickers_needed.items():
+        earliest = min(dates)
+        fetch_from = earliest + timedelta(days=1)
+        fetch_to = max(dates) + timedelta(days=15)
+        suffix = ".TW" if not ticker.endswith((".TW", ".TWO")) else ""
+        try:
+            df = yf.download(
+                f"{ticker}{suffix}",
+                start=fetch_from.isoformat(),
+                end=fetch_to.isoformat(),
+                progress=False,
+                auto_adjust=False,
+            )
+            if df.empty and suffix == ".TW":
+                df = yf.download(
+                    f"{ticker}.TWO",
+                    start=fetch_from.isoformat(),
+                    end=fetch_to.isoformat(),
+                    progress=False,
+                    auto_adjust=False,
+                )
+            if not df.empty:
+                # Flatten MultiIndex columns if present
+                if isinstance(df.columns, __import__("pandas").MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                closes: dict[date, float] = {
+                    d.date(): float(row["Close"])
+                    for d, row in df.iterrows()
+                    if not __import__("math").isnan(float(row["Close"]))
+                }
+                ohlcv_cache[ticker] = closes
+        except Exception:
+            pass
+
+    settled_rows: list[tuple] = []
+    for signal_id, ticker, sig_date, entry_price, action in pending:
+        if isinstance(sig_date, str):
+            sig_date = date.fromisoformat(sig_date)
+        closes = ohlcv_cache.get(ticker, {})
+        future_dates = sorted(d for d in closes if d > sig_date)
+        if len(future_dates) < 5:
+            continue
+        entry = float(entry_price or 0)
+        if entry <= 0:
+            continue
+
+        def _ret(idx: int) -> float:
+            if idx < len(future_dates):
+                return (closes[future_dates[idx]] / entry - 1) * 100
+            return 0.0
+
+        settled_rows.append((_ret(0), _ret(2), _ret(4), signal_id))
+
+    if not settled_rows:
+        return 0
+
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            UPDATE signal_outcomes
+               SET return_t1 = %s, return_t3 = %s, return_t5 = %s
+             WHERE signal_id = %s AND return_t5 IS NULL
+            """,
+            settled_rows,
+        )
+    conn.commit()
+    return len(settled_rows)
+
+
+def _print_yesterday_results(analysis_date: date) -> None:
+    """Query signal_outcomes for signals from T-30 to T-7 days ago and print a P&L briefing.
+
+    Automatically settles any unsettled signals first (via yfinance).
+    Shows win rate and avg T+5 return split by LONG vs WATCH action.
+    Prints nothing when DB is unavailable or no data.
     """
     import os
     if not os.environ.get("DATABASE_URL"):
@@ -1899,6 +2012,12 @@ def _print_yesterday_results(analysis_date: date) -> None:
     # Signals from 5..15 trading days ago have T+5 settled; use calendar days ×2 as rough buffer
     date_from = analysis_date - timedelta(days=30)
     date_to = analysis_date - timedelta(days=7)
+
+    try:
+        with get_connection() as conn:
+            _settle_pending_returns(conn, date_from, date_to)
+    except Exception:
+        pass
 
     try:
         with get_connection() as conn:
