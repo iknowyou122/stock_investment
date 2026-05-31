@@ -1895,6 +1895,7 @@ def run_batch(
     name_map: dict[str, str] | None = None,
     market_map: dict[str, str] | None = None,
     sort_by: str = "trend",
+    by_industry: bool = False,
 ) -> None:
     llm_label = getattr(llm_provider, "name", None) or "（無 LLM）"
     label_status = (
@@ -2068,7 +2069,7 @@ def run_batch(
         else:
             _console.print("  [dim yellow]⚠ DB 未設定或無法連線，略過寫入[/dim yellow]")
 
-    if industry_map:
+    if by_industry and industry_map:
         _print_by_industry(
             results,
             top,
@@ -2077,7 +2078,7 @@ def run_batch(
             name_map=name_map,
             industry_map=industry_map,
         )
-    else:
+    elif by_industry:
         _print_table(
             results,
             top,
@@ -2085,6 +2086,15 @@ def run_batch(
             scan_date=str(analysis_date),
             name_map=name_map,
             sort_by=sort_by,
+        )
+    else:
+        _print_focus_list(
+            results,
+            top_conviction=10,
+            top_watchlist=20,
+            min_confidence=min_confidence,
+            scan_date=str(analysis_date),
+            name_map=name_map,
         )
 
     _print_score_health(
@@ -3503,6 +3513,11 @@ def main() -> None:
         action="store_true",
         help="掃描完成後將結果推送到 Telegram（需要 .env TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID）",
     )
+    parser.add_argument(
+        "--by-industry",
+        action="store_true",
+        help="按產業分組顯示所有結果（舊行為）；預設為 CONVICTION+WATCHLIST 焦點清單",
+    )
     args = parser.parse_args()
 
     # ── show 模式：從 CSV 印出歷史結果 ──────────────────────────────────────
@@ -3651,6 +3666,7 @@ def main() -> None:
         name_map=name_map,
         market_map=market_map,
         sort_by=args.sort_by,
+        by_industry=args.by_industry,
     )
 
     if args.notify:
