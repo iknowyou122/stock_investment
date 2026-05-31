@@ -94,6 +94,9 @@ class SignalRecord:
     max_price: float
     upside_pct: float
     pending: bool = False
+    return_t1: float = 0.0   # (close_T+1 / entry - 1) * 100
+    return_t3: float = 0.0   # (close_T+3 / entry - 1) * 100
+    return_t5: float = 0.0   # (close_T+5 / entry - 1) * 100
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +211,9 @@ class CacheStore:
                     max_price=float(d.get("max_price", 0.0)),
                     upside_pct=float(d.get("upside_pct", 0.0)),
                     pending=bool(d.get("pending", False)),
+                    return_t1=float(d.get("return_t1", 0.0)),
+                    return_t3=float(d.get("return_t3", 0.0)),
+                    return_t5=float(d.get("return_t5", 0.0)),
                 )
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning("CacheStore: failed to load %s: %s", self._path, e)
@@ -241,6 +247,9 @@ class CacheStore:
                 "max_price": rec.max_price,
                 "upside_pct": rec.upside_pct,
                 "pending": rec.pending,
+                "return_t1": rec.return_t1,
+                "return_t3": rec.return_t3,
+                "return_t5": rec.return_t5,
             }
         payload = {
             "last_updated": datetime.now().isoformat(timespec="seconds"),
@@ -437,23 +446,37 @@ def _evaluate_outcome(
     entry_price: float,
     twenty_day_high: float,
     future_bars: list[dict],
-) -> tuple[bool, int, float, float]:
-    """Evaluate whether a breakout occurred.
+) -> tuple[bool, int, float, float, float, float, float]:
+    """Evaluate breakout and fixed-horizon returns.
 
-    Returns (actual_breakout, days_to_breakout, max_price, upside_pct).
+    Returns:
+        (actual_breakout, days_to_breakout, max_price, upside_pct,
+         return_t1, return_t3, return_t5)
+
+    return_tN = (close at bar N / entry_price - 1) * 100
+    If bar N does not exist yet (signal still maturing), returns 0.0.
     """
     if not future_bars:
-        return False, 0, entry_price, 0.0
+        return False, 0, entry_price, 0.0, 0.0, 0.0, 0.0
 
     threshold = twenty_day_high * _BREAKOUT_THRESHOLD
     max_close = max(b["close"] for b in future_bars)
     upside_pct = (max_close / entry_price - 1) * 100 if entry_price > 0 else 0.0
 
+    def _ret(bar_idx: int) -> float:
+        if bar_idx < len(future_bars) and entry_price > 0:
+            return (future_bars[bar_idx]["close"] / entry_price - 1) * 100
+        return 0.0
+
+    return_t1 = _ret(0)   # bar index 0 = T+1
+    return_t3 = _ret(2)   # bar index 2 = T+3
+    return_t5 = _ret(4)   # bar index 4 = T+5
+
     for i, bar in enumerate(future_bars, start=1):
         if bar["close"] >= threshold:
-            return True, i, max_close, upside_pct
+            return True, i, max_close, upside_pct, return_t1, return_t3, return_t5
 
-    return False, len(future_bars), max_close, upside_pct
+    return False, len(future_bars), max_close, upside_pct, return_t1, return_t3, return_t5
 
 
 # ---------------------------------------------------------------------------
@@ -563,9 +586,8 @@ def check_and_update_outcomes(
         # Fetch future bars
         future_bars = _fetch_future_bars(ticker, signal_date, finmind)
 
-        actual_breakout, days_to_breakout, max_price, upside_pct = _evaluate_outcome(
-            entry_price, twenty_day_high, future_bars
-        )
+        actual_breakout, days_to_breakout, max_price, upside_pct, rt1, rt3, rt5 = \
+            _evaluate_outcome(entry_price, twenty_day_high, future_bars)
 
         return SignalRecord(
             signal_id=sig["signal_id"],
@@ -582,6 +604,9 @@ def check_and_update_outcomes(
             max_price=max_price,
             upside_pct=upside_pct,
             pending=pending,
+            return_t1=rt1,
+            return_t3=rt3,
+            return_t5=rt5,
         )
 
     with Progress(
@@ -785,6 +810,64 @@ def render_dashboard(
     _console.print(tier_tbl)
 
     # ---------------------------------------------------------------------------
+    # Fixed-horizon return table (T+1 / T+3 / T+5) by confidence tier
+    # ---------------------------------------------------------------------------
+    settled_with_returns = [r for r in settled if r.return_t1 != 0.0 or r.return_t3 != 0.0 or r.return_t5 != 0.0]
+    if settled_with_returns:
+        ret_tbl = Table(
+            box=box.ROUNDED,
+            show_header=True,
+            header_style="bold cyan",
+            border_style="dim",
+            title="[bold]固定期限報酬率（信心分層）[/bold]",
+            title_style="bold white",
+        )
+        ret_tbl.add_column("信心層", width=10)
+        ret_tbl.add_column("N", justify="right", width=6)
+        ret_tbl.add_column("T+1 均值", justify="right", width=10)
+        ret_tbl.add_column("T+3 均值", justify="right", width=10)
+        ret_tbl.add_column("T+5 均值", justify="right", width=10)
+        ret_tbl.add_column("T+5 正報酬%", justify="right", width=12)
+
+        for tier in CONFIDENCE_TIERS:
+            group = [r for r in settled_with_returns if _confidence_to_tier(r.confidence) == tier]
+            if not group:
+                continue
+            avg_t1 = sum(r.return_t1 for r in group) / len(group)
+            avg_t3 = sum(r.return_t3 for r in group) / len(group)
+            avg_t5 = sum(r.return_t5 for r in group) / len(group)
+            pos_rate = sum(1 for r in group if r.return_t5 > 0) / len(group) * 100
+            c1 = "green" if avg_t1 >= 0 else "red"
+            c3 = "green" if avg_t3 >= 0 else "red"
+            c5 = "green" if avg_t5 >= 0 else "red"
+            ret_tbl.add_row(
+                tier,
+                str(len(group)),
+                f"[{c1}]{avg_t1:+.2f}%[/{c1}]",
+                f"[{c3}]{avg_t3:+.2f}%[/{c3}]",
+                f"[{c5}]{avg_t5:+.2f}%[/{c5}]",
+                f"{pos_rate:.0f}%",
+            )
+
+        # Also add an "all tiers" summary row
+        avg_t1_all = sum(r.return_t1 for r in settled_with_returns) / len(settled_with_returns)
+        avg_t3_all = sum(r.return_t3 for r in settled_with_returns) / len(settled_with_returns)
+        avg_t5_all = sum(r.return_t5 for r in settled_with_returns) / len(settled_with_returns)
+        pos_all = sum(1 for r in settled_with_returns if r.return_t5 > 0) / len(settled_with_returns) * 100
+        c1a = "green" if avg_t1_all >= 0 else "red"
+        c3a = "green" if avg_t3_all >= 0 else "red"
+        c5a = "green" if avg_t5_all >= 0 else "red"
+        ret_tbl.add_row(
+            "[bold]合計[/bold]",
+            f"[bold]{len(settled_with_returns)}[/bold]",
+            f"[bold][{c1a}]{avg_t1_all:+.2f}%[/{c1a}][/bold]",
+            f"[bold][{c3a}]{avg_t3_all:+.2f}%[/{c3a}][/bold]",
+            f"[bold][{c5a}]{avg_t5_all:+.2f}%[/{c5a}][/bold]",
+            f"[bold]{pos_all:.0f}%[/bold]",
+        )
+        _console.print(ret_tbl)
+
+    # ---------------------------------------------------------------------------
     # Top performers and worst performers
     # ---------------------------------------------------------------------------
     sorted_settled = sorted(settled, key=lambda r: r.upside_pct, reverse=True)
@@ -869,6 +952,9 @@ CSV_EXPORT_FIELDS = [
     "days_to_breakout",
     "max_price",
     "upside_pct",
+    "return_t1",
+    "return_t3",
+    "return_t5",
     "pending",
 ]
 
@@ -894,6 +980,9 @@ def export_csv(records: list[SignalRecord], output_path: Path) -> None:
                 "days_to_breakout": rec.days_to_breakout,
                 "max_price": rec.max_price,
                 "upside_pct": round(rec.upside_pct, 4),
+                "return_t1": round(rec.return_t1, 4),
+                "return_t3": round(rec.return_t3, 4),
+                "return_t5": round(rec.return_t5, 4),
                 "pending": rec.pending,
             })
     _console.print(f"\n  [green]CSV 已匯出：[/green]{output_path}  ({len(records)} 筆)")
