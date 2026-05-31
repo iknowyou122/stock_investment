@@ -180,7 +180,7 @@ def _build_industry_map() -> dict[str, str]:
 
 
 def _build_name_map() -> dict[str, str]:
-    """Load ticker→company name map from daily cache."""
+    """Load ticker→company name map from daily cache, falling back to most recent available."""
     name_cache = _CACHE_DIR / f"name_map_{date.today()}.json"
     if name_cache.exists():
         try:
@@ -189,6 +189,15 @@ def _build_name_map() -> dict[str, str]:
                 return data
         except Exception:
             pass
+    # Fall back to most recent available cache
+    candidates = sorted(_CACHE_DIR.glob("name_map_*.json"), reverse=True)
+    for f in candidates:
+        try:
+            data = json.loads(f.read_text())
+            if data:
+                return data
+        except Exception:
+            continue
     return {}
 
 
@@ -2537,7 +2546,8 @@ def _generate_plan_html(
     cards: list[str] = []
     for i, r in enumerate(filtered):
         ticker = r["ticker"]
-        name = _esc(name_map.get(ticker, ticker))
+        _raw_name = name_map.get(ticker, "")
+        name = _esc(_raw_name) if _raw_name and _raw_name != ticker else ""
         industry = _esc(industry_map.get(ticker, ""))
         action = r["action"]
         conf_raw = r.get("confidence", 0) or 0
@@ -2661,7 +2671,7 @@ def _generate_plan_html(
       <div class="card-header">
         <div class="rank">{i+1}</div>
         <div class="info">
-          <div class="ticker">{_esc(ticker)} <span class="tname">{name}</span></div>
+          <div class="ticker"><span class="tcode">{_esc(ticker)}</span>{f'<span class="tname">{name}</span>' if name else ''}</div>
           <div class="cname">{industry}</div>
         </div>
         <div class="badge g-{gcls}">{badge_zh}</div>
@@ -2782,8 +2792,9 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .rank{{background:#21262d;border-radius:8px;width:34px;height:34px;display:flex;align-items:center;
   justify-content:center;font-weight:700;font-size:13px;color:#8b949e;flex-shrink:0}}
 .info{{flex:1;min-width:0}}
-.ticker{{font-size:16px;font-weight:700;letter-spacing:1px;display:flex;align-items:baseline;gap:6px}}
-.tname{{font-size:15px;font-weight:600;color:#e6edf3}}
+.ticker{{font-size:16px;font-weight:700;display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}}
+.tcode{{letter-spacing:1px;color:#e6edf3}}
+.tname{{font-size:12px;font-weight:500;color:#8b949e;letter-spacing:0}}
 .cname{{font-size:11px;color:#8b949e;margin-top:2px}}
 .badge{{padding:5px 12px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;flex-shrink:0}}
 .g-alpha{{background:rgba(248,81,73,.15);color:#ff6b6b;border:1px solid rgba(248,81,73,.3)}}
