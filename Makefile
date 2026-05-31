@@ -53,8 +53,8 @@ else
 	$(PYTHON) scripts/batch_plan.py --date $(DATE) --sort-by $(SORT) $(if $(LLM),--llm $(LLM)) $(if $(LLM_TOP),--llm-top $(LLM_TOP)) $(if $(SECTORS),--sectors $(SECTORS)) $(if $(TICKERS),--tickers $(TICKERS)) $(if $(filter 1,$(NOTIFY)),--notify)
 endif
 
-TOP     ?= 20
-MIN_CONF ?= 40
+TOP     ?= 30
+MIN_CONF ?= 58
 CSV     ?=
 
 # ── 歷史掃描結果查詢 ──────────────────────────────────────────────────────────
@@ -93,7 +93,7 @@ backtest:
 # 用法: make backtest-compare
 #       make backtest-compare DATE_FROM=2026-01-01 DATE_TO=2026-03-31
 #       make backtest-compare MIN_CONF=50 SECTORS="1 4" SAVE_CSV=1
-MIN_CONF    ?= 40
+MIN_CONF    ?= 58
 SAVE_CSV    ?=
 
 backtest-compare:

@@ -3476,8 +3476,8 @@ def main() -> None:
         default=_default_date(),
         help="分析日期 YYYY-MM-DD（預設: 最近交易日）",
     )
-    parser.add_argument("--top", type=int, default=10, help="顯示前 N 名（預設: 10）")
-    parser.add_argument("--min-confidence", type=int, default=50, help="最低信心分數門檻（預設: 50）")
+    parser.add_argument("--top", type=int, default=30, help="顯示前 N 名（預設: 30；--by-industry 模式使用）")
+    parser.add_argument("--min-confidence", type=int, default=58, help="最低信心分數門檻（預設: 58）")
     parser.add_argument("--workers", type=int, default=5, help="並行 worker 數（預設: 5；建議 3-8，受 FinMind rate limit 限制）")
     parser.add_argument(
         "--llm",
