@@ -456,6 +456,44 @@ def _print_score_health(scores: list[int], label: str = "信心分數分布") ->
         )
 
 
+# ── Institutional Momentum Score ────────────────────────────────────────────
+
+_IMS_EARLY_TYPES = frozenset(["法人建倉", "籌碼轉移", "VCP", "旗形"])
+
+
+def _compute_ims(r: dict) -> float:
+    """Institutional Momentum Score — weighted composite of smart-money accumulation signals.
+
+    Higher score = institutional players are quietly building a position before breakout.
+    Early-accumulation signal types get +5 bonus since they are the primary target.
+    """
+    early_bonus = 5.0 if r.get("signal_type") in _IMS_EARLY_TYPES else 0.0
+    return (
+        r.get("stealth_accum_composite_pts", 0.0) * 2.5
+        + r.get("inst_synergy_pts", 0.0) * 2.0
+        + r.get("foreign_trend_pts", 0.0) * 1.5
+        + r.get("large_2w_trend_pts", 0.0) * 1.5
+        + r.get("chip_cleanliness_pts", 0.0) * 1.0
+        + r.get("inst_accel_3d_pts", 0.0) * 1.0
+        + r.get("vol_asymmetry_pts", 0.0) * 1.0
+        + r.get("obv_stealth_pts", 0.0) * 1.0
+        + early_bonus
+    )
+
+
+def _ims_bar(ims: float) -> str:
+    """Visual IMS bar scaled 0–60 → 0–10 blocks."""
+    filled = max(0, min(10, round(ims / 6.0)))
+    bar = "▮" * filled + "▯" * (10 - filled)
+    if ims >= 30:
+        color = "bright_magenta"
+    elif ims >= 15:
+        color = "magenta"
+    else:
+        color = "dim"
+    return f"[{color}]{bar}[/{color}] [dim]{ims:.0f}[/dim]"
+
+
 def _apply_catalyst_filter(
     results: list[dict],
     industry_map: dict[str, str],
@@ -820,6 +858,15 @@ def _scan_one(ticker: str, analysis_date: date, agent: StrategistAgent, market: 
             "trend_score": trend_score,
             "institution_continuity_pts": breakdown_pts.get("institution_continuity_pts", 0),
             "proximity_pts": breakdown_pts.get("proximity_pts", 0),
+            # IMS (Institutional Momentum Score) component fields
+            "stealth_accum_composite_pts": breakdown_pts.get("stealth_accum_composite_pts", 0.0),
+            "inst_synergy_pts": breakdown_pts.get("inst_synergy_pts", 0.0),
+            "foreign_trend_pts": breakdown_pts.get("foreign_trend_pts", 0.0),
+            "vol_asymmetry_pts": breakdown_pts.get("vol_asymmetry_pts", 0.0),
+            "chip_cleanliness_pts": breakdown_pts.get("chip_cleanliness_pts", 0.0),
+            "large_2w_trend_pts": breakdown_pts.get("large_2w_trend_pts", 0.0),
+            "inst_accel_3d_pts": breakdown_pts.get("inst_accel_3d_pts", 0.0),
+            "obv_stealth_pts": breakdown_pts.get("obv_stealth_pts", 0.0),
             "signal_type": _sig_type,
             "horizon": _horizon,
             "secondary_types": [],
