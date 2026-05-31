@@ -1162,7 +1162,7 @@ def _scan_early_accum_batch(
     analysis_date: date,
     agent: "StrategistAgent",
     market_map: dict[str, str] | None = None,
-    min_score: int = 35,
+    min_score: int = 45,
 ) -> list[dict]:
     """Run InstAccumDetector, ChipTransferDetector, VCPDetector, HTFDetector on all tickers.
 
@@ -1254,6 +1254,15 @@ def _scan_early_accum_batch(
                 "trend_score": 0,
                 "institution_continuity_pts": 0,
                 "proximity_pts": 0,
+                # IMS fields — zeroed for early accum results (signal_type bonus handles ranking)
+                "stealth_accum_composite_pts": 0.0,
+                "inst_synergy_pts": 0.0,
+                "foreign_trend_pts": 0.0,
+                "vol_asymmetry_pts": 0.0,
+                "chip_cleanliness_pts": 0.0,
+                "large_2w_trend_pts": 0.0,
+                "inst_accel_3d_pts": 0.0,
+                "obv_stealth_pts": 0.0,
                 "signal_type": best["signal_type"],
                 "horizon": best.get("horizon", "波段"),
                 "secondary_types": secondary,
