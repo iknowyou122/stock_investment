@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune surge-backtest heat-scan heat-update tight-base-bt tight-base-v2 rotation analyze growth
+.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune surge-backtest heat-scan heat-update theme-flow tight-base-bt tight-base-v2 rotation analyze growth
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -260,6 +260,10 @@ heat-scan:
 
 heat-update:
 	$(PYTHON) scripts/update_market_heat.py
+	$(PYTHON) scripts/theme_flow.py
+
+theme-flow:
+	$(PYTHON) scripts/theme_flow.py $(if $(DAYS),--days $(DAYS)) $(if $(TOP),--top $(TOP))
 
 rotation:
 	$(PYTHON) scripts/rotation_tracker.py
