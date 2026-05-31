@@ -1645,6 +1645,132 @@ def _print_by_industry(
         _console.print(f"\n[dim]  (顯示前 {top} 檔，共 {len(valid)} 檔符合條件)[/dim]")
 
 
+def _print_focus_list(
+    results: list[dict],
+    top_conviction: int,
+    top_watchlist: int,
+    min_confidence: float,
+    scan_date: str = "",
+    name_map: dict[str, str] | None = None,
+) -> None:
+    """Two-tier focused output: CONVICTION (IMS-ranked top 10) + WATCHLIST (conf-ranked top 20).
+
+    CONVICTION = highest Institutional Momentum Score — surfaces quiet accumulation before breakout.
+    WATCHLIST  = remaining valid results sorted by overall confidence score.
+    Use --by-industry to get the legacy industry-grouped view instead.
+    """
+    from collections import defaultdict as _defaultdict
+
+    valid = [
+        r for r in results
+        if not r.get("halt") and r.get("error") is None
+        and r.get("confidence", 0) >= min_confidence
+        and "NO_CATALYST" not in (r.get("flags") or [])
+    ]
+    if not valid:
+        _console.print(Panel(
+            f"[dim]無符合條件的標的 (min_confidence={min_confidence})[/dim]",
+            border_style="yellow",
+        ))
+        return
+
+    # Compute IMS for all valid candidates
+    for r in valid:
+        r["_ims"] = _compute_ims(r)
+
+    # CONVICTION: top N by IMS (ties broken by confidence)
+    conviction_pool = sorted(valid, key=lambda r: (r["_ims"], r["confidence"]), reverse=True)
+    conviction = conviction_pool[:top_conviction]
+    conviction_tickers = {r["ticker"] for r in conviction}
+
+    # WATCHLIST: remaining valid sorted by confidence
+    watchlist_pool = [r for r in valid if r["ticker"] not in conviction_tickers]
+    watchlist_pool.sort(key=lambda r: r["confidence"], reverse=True)
+    watchlist = watchlist_pool[:top_watchlist]
+
+    name_m = name_map or {}
+
+    def _row(r: dict) -> tuple:
+        ticker = r["ticker"]
+        short = name_m.get(ticker, "")
+        ticker_cell = f"{ticker}\n[dim]{short}[/dim]" if short else ticker
+        sig_cell, horizon_cell, fund_cell = _make_signal_cells(r)
+        action_str = r["action"] + ("*" if r.get("free_tier") else "")
+        action_cell = Text.from_markup(
+            f"[{_action_style(r['action'])}]{action_str}[/{_action_style(r['action'])}]"
+        )
+        entry = r.get("entry_bid", 0.0)
+        stop  = r.get("stop_loss", 0.0)
+        tgt   = r.get("target", 0.0)
+        up    = (tgt / entry - 1) * 100 if entry > 0 else 0.0
+        return (
+            ticker_cell, sig_cell, horizon_cell, action_cell,
+            _conf_bar(r["confidence"]),
+            _ims_bar(r["_ims"]),
+            f"{entry:.1f}", f"{stop:.1f}", f"{tgt:.1f}", f"{up:+.1f}%",
+            fund_cell,
+        )
+
+    _COLS = [
+        ("Rank",       "center", 5),
+        ("Ticker",     "left",  11),
+        ("型態",       "left",  10),
+        ("持倉",       "left",   7),
+        ("Action",     "left",  10),
+        ("Confidence", "left",  18),
+        ("IMS 動能",   "left",  18),
+        ("Entry",      "right",  9),
+        ("Stop",       "right",  9),
+        ("Target",     "right",  9),
+        ("Upside",     "right",  7),
+        ("基本面",     "left",  14),
+    ]
+
+    date_str = f"  {scan_date}" if scan_date else ""
+
+    # ── CONVICTION section ─────────────────────────────────────────────────
+    if conviction:
+        _console.print(
+            f"\n[bold bright_magenta]▶ CONVICTION{date_str}  "
+            f"法人動能最強 {len(conviction)} 檔[/bold bright_magenta]"
+            f"  [dim]IMS 由高→低排序[/dim]"
+        )
+        ct = Table(
+            box=box.ROUNDED, show_header=True,
+            header_style="bold white on dark_blue",
+            border_style="magenta", show_lines=True,
+        )
+        for name, justify, width in _COLS:
+            ct.add_column(name, justify=justify, width=width)
+        for i, r in enumerate(conviction, 1):
+            ct.add_row(str(i), *_row(r))
+        _console.print(ct)
+
+    # ── WATCHLIST section ──────────────────────────────────────────────────
+    if watchlist:
+        _console.print(
+            f"\n[bold cyan]▶ WATCHLIST{date_str}  "
+            f"信心 {min_confidence:.0f}+ 觀察 {len(watchlist)} 檔[/bold cyan]"
+            f"  [dim]信心分排序[/dim]"
+        )
+        wt = Table(
+            box=box.SIMPLE, show_header=True,
+            header_style="bold dim", show_lines=False, padding=(0, 1),
+        )
+        for name, justify, width in _COLS:
+            wt.add_column(name, justify=justify, width=width)
+        for i, r in enumerate(watchlist, 1):
+            wt.add_row(str(i), *_row(r))
+        _console.print(wt)
+
+    total_shown = len(conviction) + len(watchlist)
+    _console.print(
+        f"\n[dim]  顯示 {total_shown} 檔  "
+        f"（CONVICTION {len(conviction)} + WATCHLIST {len(watchlist)}）"
+        f"  全部通過門檻: {len(valid)} 檔[/dim]"
+    )
+
+
 def _run_phase(
     tickers: list[str],
     analysis_date: date,
