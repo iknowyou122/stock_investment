@@ -1881,6 +1881,98 @@ def _record_results(results: list[dict], analysis_date: date) -> int:
     return recorded
 
 
+def _print_yesterday_results(analysis_date: date) -> None:
+    """Query signal_outcomes for signals from T-15 to T-5 days ago and print a P&L briefing.
+
+    Shows win rate and avg T+5 return for signals that have had enough time to settle,
+    split by LONG vs WATCH action.  Prints nothing when DB is unavailable or no data.
+    """
+    import os
+    if not os.environ.get("DATABASE_URL"):
+        return
+    try:
+        from taiwan_stock_agent.infrastructure.db import get_connection, init_pool
+        init_pool()
+    except Exception:
+        return
+
+    # Signals from 5..15 trading days ago have T+5 settled; use calendar days ×2 as rough buffer
+    date_from = analysis_date - timedelta(days=30)
+    date_to = analysis_date - timedelta(days=7)
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        so.ticker,
+                        so.action,
+                        so.return_t1,
+                        so.return_t3,
+                        so.return_t5
+                    FROM signal_outcomes so
+                    WHERE so.signal_date >= %s
+                      AND so.signal_date <= %s
+                      AND so.source = 'live'
+                      AND so.return_t5 IS NOT NULL
+                    ORDER BY so.signal_date DESC, so.ticker
+                    """,
+                    (date_from, date_to),
+                )
+                rows = cur.fetchall()
+    except Exception:
+        return
+
+    if not rows:
+        return
+
+    # Group by action
+    groups: dict[str, list] = {"LONG": [], "WATCH": []}
+    for row in rows:
+        ticker, action, rt1, rt3, rt5 = row
+        rt1 = float(rt1 or 0)
+        rt3 = float(rt3 or 0)
+        rt5 = float(rt5 or 0)
+        a = action if action in groups else "WATCH"
+        groups[a].append((ticker, rt1, rt3, rt5))
+
+    total = sum(len(v) for v in groups.values())
+    if total == 0:
+        return
+
+    lines: list[str] = []
+    for action, items in groups.items():
+        if not items:
+            continue
+        avg_t5 = sum(r[3] for r in items) / len(items)
+        pos_rate = sum(1 for r in items if r[3] > 0) / len(items) * 100
+        c = "green" if avg_t5 >= 0 else "red"
+        lines.append(
+            f"[bold]{action}[/bold] {len(items)}筆  "
+            f"T+5均值[{c}]{avg_t5:+.1f}%[/{c}]  "
+            f"正報酬{pos_rate:.0f}%"
+        )
+
+    # Best and worst T+5 among all
+    all_items = groups["LONG"] + groups["WATCH"]
+    best = max(all_items, key=lambda r: r[3])
+    worst = min(all_items, key=lambda r: r[3])
+
+    summary = "  │  ".join(lines)
+    detail = (
+        f"最佳 [green]{best[0]}[/green] T+5[green]{best[3]:+.1f}%[/green]"
+        f"  最差 [red]{worst[0]}[/red] T+5[red]{worst[3]:+.1f}%[/red]"
+    )
+
+    _console.print(Panel(
+        f"{summary}\n{detail}",
+        title=f"[bold yellow]昨日戰績[/bold yellow]  {date_from.strftime('%m/%d')}–{date_to.strftime('%m/%d')}  共 {total} 筆",
+        border_style="yellow",
+        padding=(0, 2),
+    ))
+
+
 def run_batch(
     tickers: list[str],
     analysis_date: date,
@@ -1897,6 +1989,8 @@ def run_batch(
     sort_by: str = "trend",
     by_industry: bool = False,
 ) -> None:
+    _print_yesterday_results(analysis_date)
+
     llm_label = getattr(llm_provider, "name", None) or "（無 LLM）"
     label_status = (
         f"[green]{len(label_repo.list_all())} 筆標籤[/green]"

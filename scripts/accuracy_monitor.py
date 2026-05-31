@@ -634,7 +634,49 @@ def check_and_update_outcomes(
                     sig = futures[future]
                     logger.debug("Failed to process signal %s: %s", sig.get("signal_id"), e)
 
+    _writeback_returns_to_db(cache)
     return cache
+
+
+def _writeback_returns_to_db(cache: "CacheStore") -> None:
+    """Write computed return_t1/t3/t5 back to signal_outcomes table."""
+    import os
+    if not os.environ.get("DATABASE_URL"):
+        return
+    try:
+        from taiwan_stock_agent.infrastructure.db import get_connection, init_pool
+        init_pool()
+    except Exception:
+        return
+
+    with _lock:
+        records = list(cache._records.values())
+
+    settled = [r for r in records if not r.pending and r.signal_id]
+    if not settled:
+        return
+
+    rows = [
+        (r.return_t1, r.return_t3, r.return_t5, r.signal_id)
+        for r in settled
+    ]
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    UPDATE signal_outcomes
+                       SET return_t1 = %s,
+                           return_t3 = %s,
+                           return_t5 = %s
+                     WHERE signal_id = %s
+                       AND return_t5 IS NULL
+                    """,
+                    rows,
+                )
+            conn.commit()
+    except Exception as e:
+        logger.debug("_writeback_returns_to_db failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
