@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import threading
+import time
 from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -99,6 +102,36 @@ class OpenAIProvider:
             raise RuntimeError(f"OpenAI connection error: {e}") from e
 
 
+# Global rate limiter for Gemini free tier (max 4 req/min to stay below 5/min limit).
+# Uses a simple token bucket: at most 4 calls per 60-second window, serialized.
+_gemini_lock = threading.Lock()
+_gemini_call_times: list[float] = []
+_GEMINI_MAX_RPM = 4
+_GEMINI_WINDOW = 60.0
+
+
+def _gemini_rate_wait() -> None:
+    """Block until a Gemini call slot is available (≤4 req/min)."""
+    with _gemini_lock:
+        now = time.monotonic()
+        # Evict calls older than the window
+        cutoff = now - _GEMINI_WINDOW
+        while _gemini_call_times and _gemini_call_times[0] < cutoff:
+            _gemini_call_times.pop(0)
+        if len(_gemini_call_times) >= _GEMINI_MAX_RPM:
+            # Wait until the oldest slot expires
+            sleep_secs = _GEMINI_WINDOW - (now - _gemini_call_times[0]) + 0.5
+            if sleep_secs > 0:
+                logger.info("Gemini rate limit: sleeping %.1fs", sleep_secs)
+                time.sleep(sleep_secs)
+            # Re-evict after sleeping
+            now = time.monotonic()
+            cutoff = now - _GEMINI_WINDOW
+            while _gemini_call_times and _gemini_call_times[0] < cutoff:
+                _gemini_call_times.pop(0)
+        _gemini_call_times.append(time.monotonic())
+
+
 class GeminiProvider:
     name = "gemini"
 
@@ -116,18 +149,33 @@ class GeminiProvider:
             )
 
         client = genai.Client(api_key=self._api_key)
-        try:
-            resp = client.models.generate_content(
-                model=self._model,
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    max_output_tokens=max_tokens,
-                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
-                ),
-            )
-            return resp.text.strip()
-        except Exception as e:
-            raise RuntimeError(f"Gemini API error: {e}") from e
+        last_err: Exception | None = None
+        for attempt in range(4):
+            _gemini_rate_wait()
+            try:
+                resp = client.models.generate_content(
+                    model=self._model,
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(
+                        max_output_tokens=max_tokens,
+                        thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                    ),
+                )
+                return resp.text.strip()
+            except Exception as e:
+                err_str = str(e)
+                last_err = e
+                # Extract retryDelay from Gemini 429 response
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    m = re.search(r"retryDelay.*?(\d+)s", err_str)
+                    delay = int(m.group(1)) + 2 if m else 20 * (attempt + 1)
+                    logger.warning(
+                        "Gemini 429 (attempt %d/4), sleeping %ds", attempt + 1, delay
+                    )
+                    time.sleep(delay)
+                else:
+                    raise RuntimeError(f"Gemini API error: {e}") from e
+        raise RuntimeError(f"Gemini API error (4 retries exhausted): {last_err}") from last_err
 
 
 def create_llm_provider(

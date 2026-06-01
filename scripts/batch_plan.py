@@ -466,8 +466,32 @@ def _compute_ims(r: dict) -> float:
 
     Higher score = institutional players are quietly building a position before breakout.
     Early-accumulation signal types get +5 bonus since they are the primary target.
+
+    Weights calibrated from 5/29 T+1 flag analysis (n=128 signals, 75.8% win rate):
+      OBV_STEALTH 100% / DMI_FRESH_CROSS 100% / INST_MOMENTUM 96.3% / COILING_GATE_PASS 90%
+      RS_LEADER 57.4% / TREND_WALK 67.3% / MOMENTUM_TRACK 66.7%
     """
+    flags = set(r.get("flags", []))
     early_bonus = 5.0 if r.get("signal_type") in _IMS_EARLY_TYPES else 0.0
+
+    # Flag-based bonuses for high T+1 win-rate flags
+    flag_bonus = 0.0
+    if "INST_MOMENTUM" in flags:
+        flag_bonus += 3.0
+    if "COILING_GATE_PASS" in flags:
+        flag_bonus += 3.0
+    if "DMI_FRESH_CROSS" in flags:
+        flag_bonus += 2.0
+
+    # Flag-based penalties for low T+1 win-rate flags
+    flag_penalty = 0.0
+    if "TREND_WALK" in flags:
+        flag_penalty += 2.0
+    if "MOMENTUM_TRACK" in flags:
+        flag_penalty += 2.0
+    if "RS_LEADER" in flags:
+        flag_penalty += 1.5
+
     return (
         r.get("stealth_accum_composite_pts", 0.0) * 2.5
         + r.get("inst_synergy_pts", 0.0) * 2.0
@@ -476,8 +500,10 @@ def _compute_ims(r: dict) -> float:
         + r.get("chip_cleanliness_pts", 0.0) * 1.0
         + r.get("inst_accel_3d_pts", 0.0) * 1.0
         + r.get("vol_asymmetry_pts", 0.0) * 1.0
-        + r.get("obv_stealth_pts", 0.0) * 1.0
+        + r.get("obv_stealth_pts", 0.0) * 2.5  # boosted: 100% T+1 win rate
         + early_bonus
+        + flag_bonus
+        - flag_penalty
     )
 
 
