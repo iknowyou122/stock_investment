@@ -167,6 +167,9 @@ class GeminiProvider:
                 last_err = e
                 # Extract retryDelay from Gemini 429 response
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    # Daily quota exhausted — no point retrying until tomorrow
+                    if "PerDay" in err_str or "per_day" in err_str.lower() or "GenerateRequestsPerDay" in err_str:
+                        raise RuntimeError(f"Gemini daily quota exhausted (no retry): {e}") from e
                     m = re.search(r"retryDelay.*?(\d+)s", err_str)
                     delay = int(m.group(1)) + 2 if m else 20 * (attempt + 1)
                     logger.warning(
