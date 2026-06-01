@@ -2184,7 +2184,7 @@ def run_batch(
             _console.print("  [dim]→ 跳過 LLM[/dim]\n")
         else:
             _console.print(f"\n[bold cyan][Phase 2][/bold cyan] 送前 {llm_top} 名給 [cyan]{llm_label}[/cyan]：{', '.join(llm_tickers)}")
-            p2_workers = min(3, len(llm_tickers))
+            p2_workers = 1  # serialize LLM calls to avoid concurrent 429s on shared API key
             phase2 = _run_phase(llm_tickers, analysis_date, p2_workers, llm_provider=llm_provider, label_repo=label_repo, market_map=market_map, finmind=_shared_finmind)
             p2_valid = {r["ticker"]: r for r in phase2 if r.get("error") is None}
             results = [p2_valid.get(r["ticker"], r) for r in results]
