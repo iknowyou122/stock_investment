@@ -269,6 +269,10 @@ class _ScoreBreakdown:
     chip_concentration_accel_pts: float = 0.0 # 0/3/6 — 大戶持股本週加速集中（CHIP_ACCEL/PRIME）
     short_squeeze_setup_pts: float = 0.0      # 0/3/5 — 券資比高+空頭回補啟動（SHORT_SQUEEZE_SETUP）
     stealth_accum_composite_pts: float = 0.0  # 0/6/10 — K-of-6 隱蔽吸籌複合（STEALTH_ACCUM/PRIME）
+    # --- New factors: market regime + valuation + revenue ---
+    market_regime_bonus_pts: float = 0.0      # 0/+3 — options PCR bullish + trust net long
+    valuation_pts: float = 0.0                # -2 to +5 — PER/PBR/dividend yield
+    revenue_momentum_pts: float = 0.0         # 0 to +7 — monthly revenue YoY momentum
 
     # --- Pillar 3: Structure/Space (max _PILLAR3_MAX = 35) ---
     proximity_pts: float = 0.0            # 0/6/12 — close distance to 20d_high
@@ -315,6 +319,9 @@ class _ScoreBreakdown:
             self.emerging_setup_pts
             + self.pullback_setup_pts
             + self.bb_squeeze_coiling_pts
+            + self.market_regime_bonus_pts
+            + self.valuation_pts
+            + self.revenue_momentum_pts
         )
         risk = (
             self.daytrade_risk
@@ -894,6 +901,24 @@ class TripleConfirmationEngine:
         bd.stealth_accum_composite_pts = sac_pts
         if sac_flag:
             bd.flags.append(sac_flag)
+
+        # --- New: Market Regime / Valuation / Revenue (from _taifex_context) ---
+        taifex_ctx = getattr(self, "_taifex_context", {})
+        regime_pts, regime_flags = self._score_market_regime(taifex_ctx)
+        bd.market_regime_bonus_pts = regime_pts
+        bd.flags.extend(regime_flags)
+
+        per_ctx = taifex_ctx.get("per_ctx", {})
+        if per_ctx.get("data_available"):
+            val_pts, val_flags = self._score_valuation(per_ctx)
+            bd.valuation_pts = val_pts
+            bd.flags.extend(val_flags)
+
+        rev_ctx = taifex_ctx.get("rev_ctx", {})
+        if rev_ctx.get("data_available"):
+            rev_pts, rev_flags = self._score_revenue_momentum(rev_ctx)
+            bd.revenue_momentum_pts = rev_pts
+            bd.flags.extend(rev_flags)
 
         # --- Risk deductions ---
         self._apply_risk_deductions(
@@ -2469,6 +2494,104 @@ class TripleConfirmationEngine:
             return "WATCH"
         return "CAUTION"
 
+    # ── New: Market Regime / Valuation / Revenue Scoring ──────────────────
+
+    @staticmethod
+    def _score_market_regime(taifex_ctx: dict) -> tuple[float, list[str]]:
+        """期貨+期權市場情緒綜合評分.
+
+        Bullish condition: PCR < 1.0 AND trust net long → +3 bonus
+        Returns (pts, flags).
+        """
+        flags: list[str] = []
+        pts = 0.0
+        futures_ctx = taifex_ctx.get("futures_ctx", {})
+        options_ctx = taifex_ctx.get("options_ctx", {})
+
+        if not futures_ctx.get("data_available") and not options_ctx.get("data_available"):
+            return pts, flags
+
+        pcr = options_ctx.get("pcr")
+        opt_signal = options_ctx.get("signal", "NEUTRAL")
+        tx_trust = futures_ctx.get("tx_trust_net_oi", 0)
+        tx_foreign = futures_ctx.get("tx_foreign_net_oi", 0)
+
+        # Bullish bonus: PCR low + trust net long
+        if pcr is not None and pcr < 1.0 and tx_trust > 0 and tx_foreign > -30000:
+            pts = 3.0
+            flags.append("MKTOPT_BULLISH")
+
+        # Divergence signal: trust bullish vs foreign short (smart money split)
+        if tx_trust > 10000 and tx_foreign < -10000:
+            flags.append("FUTURES_SMART_DIVERGE")
+
+        # Bearish flags (no pts deduction — _build_signal handles downgrades)
+        if opt_signal in ("STRONG_BEARISH_HEDGE", "BEARISH"):
+            flags.append(f"MKTOPT_{opt_signal}")
+
+        return pts, flags
+
+    @staticmethod
+    def _score_valuation(per_ctx: dict) -> tuple[float, list[str]]:
+        """個股估值因子 (PER / dividend_yield).
+
+        PER < 15 → +3 (VALUE_ZONE)
+        PER > 50 → -2 (EXPENSIVE)
+        div_yield > 5% → +3 (HIGH_YIELD_SUPPORT)
+        div_yield > 3% → +2 (DIVIDEND_SUPPORT)
+        Clamped to [-2, 5].
+        """
+        flags: list[str] = []
+        pts = 0.0
+
+        per = per_ctx.get("per")
+        div_yield = per_ctx.get("dividend_yield") or 0.0
+
+        if per is not None:
+            if per < 15:
+                pts += 3.0
+                flags.append("VALUE_ZONE")
+            elif per > 50:
+                pts -= 2.0
+                flags.append("EXPENSIVE_PER")
+
+        if div_yield > 5.0:
+            pts += 3.0
+            flags.append("HIGH_YIELD_SUPPORT")
+        elif div_yield > 3.0:
+            pts += 2.0
+            flags.append("DIVIDEND_SUPPORT")
+
+        return max(-2.0, min(5.0, pts)), flags
+
+    @staticmethod
+    def _score_revenue_momentum(rev_ctx: dict) -> tuple[float, list[str]]:
+        """月營收 YoY 成長動能因子.
+
+        YoY > 50% → +5, > 20% → +3
+        consecutive positive months ≥ 3 → +2 (REVENUE_CONSISTENT)
+        Capped at 7.
+        """
+        flags: list[str] = []
+        pts = 0.0
+
+        yoy = rev_ctx.get("yoy_growth")
+        consec = rev_ctx.get("consecutive_positive_yoy", 0)
+
+        if yoy is not None:
+            if yoy > 50:
+                pts += 5.0
+                flags.append(f"REVENUE_SURGE:{yoy:.0f}%")
+            elif yoy > 20:
+                pts += 3.0
+                flags.append(f"REVENUE_GROWTH:{yoy:.0f}%")
+
+        if consec >= 3:
+            pts += 2.0
+            flags.append("REVENUE_CONSISTENT")
+
+        return min(7.0, pts), flags
+
     def _build_signal(
         self,
         ohlcv: DailyOHLCV,
@@ -2565,17 +2688,32 @@ class TripleConfirmationEngine:
         action = self._map_action(confidence, breakdown, breakdown.chip_pts)
         plan = self._make_execution_plan(ohlcv, volume_profile)
 
-        # Factor E: 台指期外資淨多單 — 期貨空頭壓力下 LONG→WATCH 降級
+        # Factor E (enhanced): 期貨+期權市場情緒 — 空頭壓力下 LONG→WATCH 降級
         taifex_ctx = getattr(self, "_taifex_context", {})
-        if taifex_ctx.get("futures_bearish") and action == "LONG":
+        futures_ctx = taifex_ctx.get("futures_ctx", {})
+        options_ctx = taifex_ctx.get("options_ctx", {})
+
+        # Determine bearish from FinMind futures (preferred) or legacy TAIFEX opendata
+        futures_bearish = (
+            futures_ctx.get("composite_bearish", False)
+            or taifex_ctx.get("futures_bearish", False)
+        )
+        options_strong_bearish = options_ctx.get("signal") == "STRONG_BEARISH_HEDGE"
+
+        # Strong double confirmation (futures + options both bearish): LONG→WATCH
+        if (options_strong_bearish or futures_bearish) and action == "LONG":
             action = "WATCH"
 
         data_quality_flags = list(ohlcv.data_quality_flags)
         data_quality_flags.extend(chip_report.data_quality_flags)
         data_quality_flags.extend(volume_profile.data_quality_flags)
         data_quality_flags.append("scoring_version:v2")
-        if taifex_ctx.get("futures_bearish"):
+        if futures_bearish:
             data_quality_flags.append("TAIFEX_FUTURES_BEARISH")
+        if options_strong_bearish:
+            data_quality_flags.append("MKTOPT_STRONG_BEARISH_HEDGE")
+        if options_ctx.get("signal") == "BULLISH_UNWIND":
+            data_quality_flags.append("MKTOPT_BULLISH_UNWIND")
 
         # 大盤融資維持率 Macro Gate
         margin_rate = taifex_ctx.get("margin_maintenance_rate")

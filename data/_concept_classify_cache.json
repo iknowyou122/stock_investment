@@ -1188,6 +1188,279 @@
     "3324": [],
     "1785": [],
     "3625": [],
-    "6840": []
+    "6840": [],
+    "6805": [
+      "robotics_automation"
+    ],
+    "6112": [],
+    "2409": [
+      "CPO_silicon_photonics"
+    ],
+    "2471": [],
+    "5225": [
+      "AI_GPU_supply"
+    ],
+    "6164": [],
+    "5227": [],
+    "6829": [
+      "CoWoS_advanced_packaging",
+      "HBM_memory"
+    ],
+    "2461": [],
+    "2314": [
+      "low_orbit_satellite"
+    ],
+    "7768": [
+      "CoWoS_advanced_packaging"
+    ],
+    "3447": [
+      "low_orbit_satellite"
+    ],
+    "3114": [],
+    "3628": [],
+    "6275": [],
+    "3669": [
+      "CPO_silicon_photonics"
+    ],
+    "8011": [
+      "low_orbit_satellite"
+    ],
+    "6907": [
+      "AI_GPU_supply"
+    ],
+    "3092": [
+      "PCB_substrate"
+    ],
+    "6122": [
+      "robotics_automation",
+      "heavy_electric"
+    ],
+    "3511": [
+      "auto_electronics"
+    ],
+    "5244": [
+      "CPO_silicon_photonics"
+    ],
+    "5403": [],
+    "8045": [
+      "CPO_silicon_photonics"
+    ],
+    "1586": [
+      "AI_server_cooling"
+    ],
+    "6217": [
+      "AI_server_cooling"
+    ],
+    "3679": [
+      "AI_server_cooling"
+    ],
+    "6658": [
+      "CoWoS_advanced_packaging",
+      "PCB_substrate"
+    ],
+    "3207": [
+      "auto_electronics"
+    ],
+    "8072": [],
+    "2444": [
+      "HBM_memory"
+    ],
+    "5220": [],
+    "1540": [
+      "robotics_automation"
+    ],
+    "3710": [],
+    "1471": [],
+    "7730": [
+      "AI_GPU_supply",
+      "CoWoS_advanced_packaging",
+      "PCB_substrate"
+    ],
+    "5302": [],
+    "2331": [
+      "AI_GPU_supply"
+    ],
+    "3646": [],
+    "8416": [
+      "robotics_automation"
+    ],
+    "8183": [
+      "auto_electronics"
+    ],
+    "6156": [
+      "auto_electronics"
+    ],
+    "3652": [
+      "robotics_automation"
+    ],
+    "1537": [
+      "auto_electronics"
+    ],
+    "3002": [
+      "auto_electronics"
+    ],
+    "2489": [],
+    "6654": [
+      "AI_GPU_supply",
+      "CoWoS_advanced_packaging",
+      "PCB_substrate"
+    ],
+    "3285": [],
+    "2450": [],
+    "3501": [
+      "auto_electronics"
+    ],
+    "6108": [
+      "PCB_substrate"
+    ],
+    "3058": [
+      "auto_electronics"
+    ],
+    "2371": [
+      "heavy_electric",
+      "auto_electronics"
+    ],
+    "6776": [],
+    "6272": [
+      "auto_electronics",
+      "low_orbit_satellite"
+    ],
+    "3303": [],
+    "6205": [
+      "AI_server_cooling",
+      "auto_electronics"
+    ],
+    "3419": [
+      "low_orbit_satellite"
+    ],
+    "4935": [
+      "AI_server_cooling"
+    ],
+    "6129": [
+      "auto_electronics"
+    ],
+    "3272": [
+      "AI_server_cooling"
+    ],
+    "6409": [],
+    "6114": [],
+    "3540": [
+      "AI_server_cooling"
+    ],
+    "5251": [],
+    "3548": [],
+    "3260": [
+      "HBM_memory"
+    ],
+    "5222": [
+      "CPO_silicon_photonics",
+      "low_orbit_satellite"
+    ],
+    "3607": [],
+    "3289": [
+      "CoWoS_advanced_packaging",
+      "HBM_memory",
+      "auto_electronics"
+    ],
+    "3128": [],
+    "1569": [],
+    "3609": [
+      "auto_electronics"
+    ],
+    "3434": [],
+    "5344": [
+      "AI_GPU_supply"
+    ],
+    "8455": [],
+    "3021": [],
+    "8040": [
+      "AI_GPU_supply",
+      "CoWoS_advanced_packaging"
+    ],
+    "8272": [],
+    "3684": [
+      "low_orbit_satellite"
+    ],
+    "6418": [
+      "AI_server_cooling"
+    ],
+    "8097": [
+      "CPO_silicon_photonics"
+    ],
+    "6982": [
+      "heavy_electric"
+    ],
+    "2321": [
+      "low_orbit_satellite"
+    ],
+    "2482": [],
+    "6895": [
+      "HBM_memory"
+    ],
+    "6230": [
+      "AI_server_cooling"
+    ],
+    "5475": [],
+    "6185": [
+      "PCB_substrate"
+    ],
+    "6163": [],
+    "3632": [
+      "low_orbit_satellite"
+    ],
+    "2434": [
+      "AI_GPU_supply",
+      "CoWoS_advanced_packaging"
+    ],
+    "3048": [],
+    "3191": [
+      "PCB_substrate"
+    ],
+    "6148": [],
+    "1583": [
+      "robotics_automation"
+    ],
+    "6140": [],
+    "3623": [
+      "CPO_silicon_photonics"
+    ],
+    "3276": [],
+    "5465": [],
+    "3043": [
+      "low_orbit_satellite"
+    ],
+    "6573": [
+      "AI_GPU_supply",
+      "HBM_memory"
+    ],
+    "3484": [],
+    "2427": [],
+    "8201": [],
+    "6246": [
+      "CPO_silicon_photonics"
+    ],
+    "3672": [
+      "low_orbit_satellite"
+    ],
+    "4550": [
+      "heavy_electric"
+    ],
+    "3701": [
+      "AI_server_cooling"
+    ],
+    "6220": [
+      "robotics_automation"
+    ],
+    "8074": [
+      "PCB_substrate"
+    ],
+    "2393": [],
+    "6229": [
+      "CoWoS_advanced_packaging"
+    ],
+    "6470": [
+      "low_orbit_satellite"
+    ],
+    "6154": []
   }
 }

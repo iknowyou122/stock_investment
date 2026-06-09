@@ -55,7 +55,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from dotenv import load_dotenv
 load_dotenv()
 
+from taiwan_stock_agent.agents.allocation_advisor import AllocationAdvisor
 from taiwan_stock_agent.agents.strategist_agent import StrategistAgent
+from taiwan_stock_agent.domain.capital_allocator import (
+    CapitalAllocator,
+    TIER_COLORS,
+    TIER_ORDER,
+)
+from taiwan_stock_agent.domain.sector_flow import (
+    ConceptFlowAnalyzer,
+    SectorFlowAnalyzer,
+    TREND_META,
+    sparkline_svg,
+)
 from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
 from taiwan_stock_agent.infrastructure.ohlcv_repository import OHLCVRepository
 from taiwan_stock_agent.infrastructure.paid_data_fetcher import PaidDataFetcher
@@ -958,6 +970,23 @@ def _run_surge_inline(
         _console.print(f"  [dim yellow]⚠ Surge inline scan 失敗，略過: {_e}[/dim yellow]")
 
 
+_LIQUIDITY_FLOOR_TWD = 8_000_000.0  # NT$/day — mirrors TCE G3 gate (Phase 4.41)
+
+
+def _passes_liquidity_floor(history: list) -> bool:
+    """Match the TCE Gate-3 liquidity check used in StrategistAgent.
+
+    Looks at the last 20 trading days' avg dollar volume and rejects under
+    NT$ 8M to prevent low-liquidity tickers from bypassing TCE via the
+    pullback / early-accumulation paths.
+    """
+    if len(history) < 20:
+        return False
+    last20 = sorted(history, key=lambda x: x.trade_date)[-20:]
+    total = sum(float(b.close) * float(b.volume) for b in last20)
+    return (total / 20.0) >= _LIQUIDITY_FLOOR_TWD
+
+
 def _scan_pullback_batch(
     tickers: list[str],
     analysis_date: date,
@@ -984,6 +1013,8 @@ def _scan_pullback_batch(
             )
             history = StrategistAgent._df_to_ohlcv_list(ohlcv_df, ticker)
             if not history:
+                continue
+            if not _passes_liquidity_floor(history):
                 continue
             det = detector.score(history)
             if det is None or det["score"] < min_score:
@@ -1215,6 +1246,8 @@ def _scan_early_accum_batch(
             )
             history = StrategistAgent._df_to_ohlcv_list(ohlcv_df, ticker)
             if not history:
+                continue
+            if not _passes_liquidity_floor(history):
                 continue
             sorted_h = sorted(history, key=lambda x: x.trade_date)
             close = float(sorted_h[-1].close) if sorted_h else 0.0
@@ -1834,11 +1867,28 @@ def _run_phase(
         chip_fetcher=shared_chip,
     )
 
-    # 注入大盤融資維持率至 taifex_context（Gate 0 macro filter）
+    # 注入大盤層級市場情境至 taifex_context
     taifex_ctx: dict = {}
+
+    # 1. 大盤融資維持率（Gate 0 macro filter）
     margin_rate = shared_paid.fetch_market_margin_maintenance(analysis_date)
     if margin_rate is not None:
         taifex_ctx["margin_maintenance_rate"] = margin_rate
+
+    # 2. 台指期三大法人未平倉（FinMind paid，取代 TAIFEX opendata）
+    futures_ctx = shared_paid.fetch_futures_context(analysis_date)
+    if futures_ctx.get("data_available"):
+        taifex_ctx["futures_ctx"] = futures_ctx
+        taifex_ctx["futures_bearish"] = futures_ctx.get("composite_bearish", False)
+    else:
+        # fallback: 嘗試舊 TAIFEX opendata（由 strategist_agent 初始化時設定）
+        pass
+
+    # 3. 台指選擇權 PCR 市場情緒（FinMind paid TXO）
+    options_ctx = shared_paid.fetch_options_context(analysis_date)
+    if options_ctx.get("data_available"):
+        taifex_ctx["options_ctx"] = options_ctx
+
     shared_agent._taifex_context = taifex_ctx
 
     results: list[dict] = []
@@ -2262,18 +2312,20 @@ def run_batch(
     if n_concept:
         _console.print(f"  [dim]↑ 熱門題材加成: {n_concept} 檔 (+3/+5 pts)[/dim]")
 
-    # ── Rotation EMERGING bonus ────────────────────────────────────────────────
+    # ── Rotation tailwind bonus (fixed: reads rotation_signal.json bucketed schema)
+    n_rot_em = n_rot_hot = n_rot_cool = 0
     rotation_file = Path(__file__).resolve().parents[1] / "data" / "market_heat" / "rotation_signal.json"
-    if rotation_file.exists():
+    if rotation_file.exists() and industry_map:
         try:
             import json as _json_rot
-            rotation = _json_rot.loads(rotation_file.read_text(encoding="utf-8"))
-            emerging = {n for n, s in rotation.items() if s.get("status") == "EMERGING"}
-            hot = {n for n, s in rotation.items() if s.get("status") == "HOT"}
-            cooling = {n for n, s in rotation.items() if s.get("status") == "COOLING"}
-            n_rot_em = n_rot_hot = n_rot_cool = 0
+            rot_doc = _json_rot.loads(rotation_file.read_text(encoding="utf-8"))
+            emerging = {n.get("label") for n in (rot_doc.get("emerging_nodes") or []) if n.get("label")}
+            hot = {n.get("label") for n in (rot_doc.get("hot_nodes") or []) if n.get("label")}
+            cooling = {n.get("label") for n in (rot_doc.get("cooling_nodes") or []) if n.get("label")}
             for r in results:
                 ind = (industry_map or {}).get(r["ticker"], "")
+                if not ind:
+                    continue
                 if ind in emerging:
                     r["confidence"] = r.get("confidence", 0) + 5
                     r.setdefault("flags", []).append("ROTATION_EMERGING")
@@ -2286,12 +2338,12 @@ def run_batch(
                     r["confidence"] = max(0, r.get("confidence", 0) - 3)
                     r.setdefault("flags", []).append("ROTATION_COOLING")
                     n_rot_cool += 1
-            if n_rot_em or n_rot_hot or n_rot_cool:
-                _console.print(
-                    f"  [dim]↑↓ 輪動加減分: EMERGING×{n_rot_em}(+5) HOT×{n_rot_hot}(+3) COOLING×{n_rot_cool}(-3)[/dim]"
-                )
         except Exception:
             pass
+    if n_rot_em or n_rot_hot or n_rot_cool:
+        _console.print(
+            f"  [dim]↑↓ 輪動加減分: EMERGING×{n_rot_em}(+5) HOT×{n_rot_hot}(+3) COOLING×{n_rot_cool}(-3)[/dim]"
+        )
 
     # Re-evaluate action after post-processing bonuses may have crossed a threshold.
     # A CAUTION that reaches ≥ 45 after bonuses becomes WATCH.
@@ -2342,18 +2394,149 @@ def run_batch(
          and r.get("action") in ("LONG", "WATCH")],
     )
 
+    # ── 資金配置 Tier 建議 (LLM advisor) ──────────────────────────────────────
+    allocation_plan = _build_allocation_plan(
+        results=results,
+        industry_map=industry_map or {},
+        analysis_date=str(analysis_date),
+        llm_provider=llm_provider,
+    )
+    if allocation_plan is not None:
+        _print_allocation_panel(allocation_plan, name_map=name_map or {})
+
     html_path = (Path(__file__).resolve().parents[1] / "data" / "scans" / f"scan_{analysis_date}.html")
+    alloc_path = (Path(__file__).resolve().parents[1] / "data" / "scans" / f"allocation_{analysis_date}.html")
     _generate_plan_html(results, str(analysis_date), html_path,
                         name_map=name_map or {}, industry_map=industry_map or {},
                         market_map=market_map or {},
                         heat_summary=_load_heat_summary(),
                         llm_provider=llm_provider,
                         min_confidence=min_confidence,
-                        finmind_client=_shared_finmind)
+                        finmind_client=_shared_finmind,
+                        allocation_plan=allocation_plan,
+                        allocation_html_path=alloc_path)
+    # Write standalone allocation HTML (separate tab)
+    if allocation_plan is not None:
+        _write_allocation_standalone_html(
+            allocation_plan,
+            name_map=name_map or {},
+            industry_map=industry_map or {},
+            scan_date=str(analysis_date),
+            scan_html_path=html_path,
+            out_path=alloc_path,
+        )
     _console.print(f"  [dim cyan]📄 HTML: file://{html_path.resolve()}[/dim cyan]")
+    if allocation_plan is not None and alloc_path.exists():
+        _console.print(f"  [dim cyan]💰 配置: file://{alloc_path.resolve()}[/dim cyan]")
     import subprocess, sys as _sys
     if _sys.platform == "darwin":
         subprocess.Popen(["open", str(html_path)])
+        if allocation_plan is not None and alloc_path.exists():
+            subprocess.Popen(["open", str(alloc_path)])
+
+
+# ── Capital allocation (Tier S/A/B/C) ───────────────────────────────────────
+
+
+def _build_allocation_plan(
+    *,
+    results: list[dict],
+    industry_map: dict[str, str],
+    analysis_date: str,
+    llm_provider: str | None,
+):
+    """Run CapitalAllocator + AllocationAdvisor and return an AllocationPlan.
+
+    Returns None when there are no actionable LONG/WATCH signals.
+    """
+    actionable = [
+        r for r in results
+        if not r.get("halt") and r.get("error") is None
+        and r.get("action") in ("LONG", "WATCH")
+    ]
+    if not actionable:
+        return None
+
+    try:
+        allocator = CapitalAllocator()
+        ctx = allocator.assess(
+            signals=actionable,
+            industry_map=industry_map,
+            snapshot_date=analysis_date,
+        )
+        # llm_provider is already an LLMProvider instance (or None) here.
+        if llm_provider is not None and hasattr(llm_provider, "complete"):
+            advisor = AllocationAdvisor(llm=llm_provider)
+        else:
+            advisor = AllocationAdvisor.from_env(
+                llm_provider if isinstance(llm_provider, str) else None
+            )
+        return advisor.recommend(ctx)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Allocation advisor failed: %s", exc)
+        return None
+
+
+def _print_allocation_panel(plan, *, name_map: dict[str, str]) -> None:
+    """Render the AllocationPlan as a Rich tier panel."""
+    _console.print()
+    header = Text("💰 資金配置建議 (Tier System)", style="bold magenta")
+    _console.print(Panel(header, border_style="magenta", expand=False))
+
+    if plan.summary:
+        _console.print(f"  [italic]{plan.summary}[/italic]")
+        _console.print()
+
+    tier_titles = {
+        "S": "🥇 S 首選 (建議重押 20-30%)",
+        "A": "🥈 A 強勢 (建議 12-18%)",
+        "B": "🥉 B 試單 (建議 5-10%)",
+        "C": "⚪ C 觀察 (極小倉或跳過)",
+    }
+    for tier in TIER_ORDER:
+        recs = plan.tiers.get(tier) or []
+        if not recs:
+            continue
+        colour = TIER_COLORS.get(tier, "white")
+        tbl = Table(
+            title=tier_titles[tier],
+            title_style=f"bold {colour}",
+            box=box.ROUNDED,
+            show_edge=True,
+            padding=(0, 1),
+        )
+        tbl.add_column("代號", style="bold")
+        tbl.add_column("名稱", style="white")
+        tbl.add_column("配置 %", justify="right", style=f"bold {colour}")
+        tbl.add_column("輪動分", justify="right", style="dim")
+        tbl.add_column("建議理由", style="white")
+        for r in recs:
+            name = name_map.get(r.ticker, r.ticker)
+            tbl.add_row(
+                r.ticker,
+                name,
+                f"{r.suggested_pct:.1f}%",
+                f"{r.rotation_score:.0f}",
+                r.reasoning[:80],
+            )
+        _console.print(tbl)
+
+    if plan.warnings:
+        warn_lines = []
+        for w in plan.warnings:
+            colour = {"high": "red", "medium": "yellow", "low": "dim"}.get(w.severity, "yellow")
+            warn_lines.append(f"  [{colour}]⚠ {w.message}[/{colour}]")
+        _console.print()
+        _console.print(Panel("\n".join(warn_lines), title="集中度警告", border_style="yellow", expand=False))
+
+    # Footer: cash retention suggestion
+    invested = sum(r.suggested_pct for r in plan.all_recommendations())
+    cash = max(0.0, 100.0 - invested)
+    _console.print()
+    _console.print(
+        f"  [dim]📊 總建議配置: 投入 {invested:.1f}% / 保留現金 {cash:.1f}%  "
+        f"(LLM={plan.provider})[/dim]"
+    )
 
 
 # ── Plan HTML generator ──────────────────────────────────────────────────────
@@ -2689,6 +2872,366 @@ def _classify_concepts_llm(
     return cached
 
 
+def _render_flow_panel(
+    summary,
+    *,
+    title: str,
+    sub: str,
+    rising_n: int = 12,
+    declining_n: int = 6,
+) -> str:
+    """Generic capital-flow panel renderer (used for both industry + concept)."""
+    from html import escape as _esc
+    if not summary.series:
+        return ""
+    series_sorted = sorted(
+        summary.series,
+        key=lambda s: (-s.acceleration_3v3, -s.rank_delta_total),
+    )
+    rising = [s for s in series_sorted if s.acceleration_3v3 > 0][:rising_n]
+    declining = [s for s in series_sorted if s.acceleration_3v3 <= 0][-declining_n:]
+    return _build_flow_html(title, sub, summary.snapshot_dates, rising, declining)
+
+
+def _build_flow_html(title, sub, dates, rising, declining):
+    from html import escape as _esc
+
+    def _row(s) -> str:
+        latest = s.latest
+        if latest is None: return ""
+        icon, colour, label = TREND_META.get(s.trend_direction, ("→", "#8b949e", "持平"))
+        delta = s.rank_delta_total
+        delta_color = "#3fb950" if delta > 0 else ("#f85149" if delta < 0 else "#8b949e")
+        delta_sign = "+" if delta > 0 else ""
+        spark = sparkline_svg(s.rank_pct_series, width=140, height=24, stroke=colour)
+        return (
+            f'<div class="sf-row">'
+            f'  <div class="sf-name">{_esc(s.industry)}</div>'
+            f'  <div class="sf-spark">{spark}</div>'
+            f'  <div class="sf-now">{latest.rank_pct:.0f}</div>'
+            f'  <div class="sf-delta" style="color:{delta_color}">{delta_sign}{delta:.1f}</div>'
+            f'  <div class="sf-trend" style="color:{colour}">{icon} {_esc(label)}</div>'
+            f'  <div class="sf-meta">廣度 {latest.breadth_above_ma20_pct:.0f}% · 集中 {latest.top5_vol_concentration:.0f}%</div>'
+            f'</div>'
+        )
+
+    head_dates = " → ".join(dates)
+    rising_rows = "".join(_row(s) for s in rising)
+    declining_rows = "".join(_row(s) for s in declining)
+    head_row = (
+        '<div class="sf-row sf-head">'
+        '  <div class="sf-name">標的</div>'
+        '  <div class="sf-spark">10 日 rank_pct</div>'
+        '  <div class="sf-now">今</div>'
+        '  <div class="sf-delta">Δ10d</div>'
+        '  <div class="sf-trend">趨勢</div>'
+        '  <div class="sf-meta">廣度·集中度</div>'
+        '</div>'
+    )
+    return (
+        '<div class="sf-panel">'
+        f'  <div class="sf-title">{_esc(title)} <span class="sf-sub">{_esc(sub)}</span></div>'
+        f'  <div class="sf-period">{_esc(head_dates)}</div>'
+        '  <div class="sf-grid">'
+        '    <div class="sf-col">'
+        f'      <div class="sf-coltitle" style="color:#3fb950">🔥 升溫中 ({len(rising)})</div>'
+        f'      <div class="sf-rows">{head_row}{rising_rows}</div>'
+        '    </div>'
+        '    <div class="sf-col">'
+        f'      <div class="sf-coltitle" style="color:#f85149">❄️ 退燒中 ({len(declining)})</div>'
+        f'      <div class="sf-rows">{head_row}{declining_rows}</div>'
+        '    </div>'
+        '  </div>'
+        '</div>'
+    )
+
+
+def _render_sector_flow_html(days: int = 10) -> str:
+    """Industry-level capital flow panel (10-day)."""
+    summary = SectorFlowAnalyzer().analyze(days=days)
+    return _render_flow_panel(
+        summary,
+        title="📈 產業資金流動趨勢",
+        sub="10 日熱度時序",
+        rising_n=12, declining_n=6,
+    )
+
+
+def _render_concept_flow_html(days: int = 10) -> str:
+    """Concept-basket capital flow panel (10-day)."""
+    from pathlib import Path as _P
+    import json as _j
+    concepts_path = _P(__file__).resolve().parents[1] / "config" / "concepts.json"
+    meta = {}
+    try:
+        meta = (_j.loads(concepts_path.read_text(encoding="utf-8")) or {}).get("concepts", {})
+    except Exception:
+        pass
+    summary = ConceptFlowAnalyzer().analyze(days=days, concepts_meta=meta)
+    return _render_flow_panel(
+        summary,
+        title="💎 概念題材資金流動",
+        sub="10 日熱度時序 · 37 題材籃子",
+        rising_n=18, declining_n=8,
+    )
+
+
+def _legacy_render_sector_flow_unused(days: int = 10) -> str:
+    """[deprecated - kept only to preserve original function signature for any external caller]."""
+    from html import escape as _esc
+
+    analyzer = SectorFlowAnalyzer()
+    summary = analyzer.analyze(days=days)
+    if not summary.series:
+        return ""
+
+    # Sort: warming-up first (high 3v3 acceleration), then by absolute delta
+    series_sorted = sorted(
+        summary.series,
+        key=lambda s: (-s.acceleration_3v3, -s.rank_delta_total),
+    )
+    # Show top 12 rising + top 6 declining for focus
+    rising = [s for s in series_sorted if s.acceleration_3v3 > 0][:12]
+    declining = [s for s in series_sorted if s.acceleration_3v3 <= 0][-6:]
+
+    def _row(s) -> str:
+        latest = s.latest
+        if latest is None:
+            return ""
+        icon, colour, label = TREND_META.get(s.trend_direction, ("→", "#8b949e", "持平"))
+        delta = s.rank_delta_total
+        delta_color = "#3fb950" if delta > 0 else ("#f85149" if delta < 0 else "#8b949e")
+        delta_sign = "+" if delta > 0 else ""
+        # Spark colour follows trend
+        spark = sparkline_svg(s.rank_pct_series, width=140, height=24, stroke=colour)
+        return (
+            f'<div class="sf-row">'
+            f'  <div class="sf-name">{_esc(s.industry)}</div>'
+            f'  <div class="sf-spark">{spark}</div>'
+            f'  <div class="sf-now">{latest.rank_pct:.0f}</div>'
+            f'  <div class="sf-delta" style="color:{delta_color}">{delta_sign}{delta:.1f}</div>'
+            f'  <div class="sf-trend" style="color:{colour}">{icon} {_esc(label)}</div>'
+            f'  <div class="sf-meta">廣度 {latest.breadth_above_ma20_pct:.0f}% · 集中 {latest.top5_vol_concentration:.0f}%</div>'
+            f'</div>'
+        )
+
+    rising_rows = "".join(_row(s) for s in rising)
+    declining_rows = "".join(_row(s) for s in declining)
+
+    head_dates = " → ".join(summary.snapshot_dates)
+
+    return (
+        '<div class="sf-panel">'
+        '  <div class="sf-title">📈 產業資金流動趨勢 <span class="sf-sub">10 日熱度時序</span></div>'
+        f'  <div class="sf-period">{_esc(head_dates)}</div>'
+        '  <div class="sf-grid">'
+        '    <div class="sf-col">'
+        f'      <div class="sf-coltitle" style="color:#3fb950">🔥 升溫中 ({len(rising)})</div>'
+        '      <div class="sf-rows">'
+        '        <div class="sf-row sf-head">'
+        '          <div class="sf-name">產業</div>'
+        '          <div class="sf-spark">10 日 rank_pct</div>'
+        '          <div class="sf-now">今</div>'
+        '          <div class="sf-delta">Δ10d</div>'
+        '          <div class="sf-trend">趨勢</div>'
+        '          <div class="sf-meta">廣度·集中度</div>'
+        '        </div>'
+        f'        {rising_rows}'
+        '      </div>'
+        '    </div>'
+        '    <div class="sf-col">'
+        f'      <div class="sf-coltitle" style="color:#f85149">❄️ 退燒中 ({len(declining)})</div>'
+        '      <div class="sf-rows">'
+        '        <div class="sf-row sf-head">'
+        '          <div class="sf-name">產業</div>'
+        '          <div class="sf-spark">10 日 rank_pct</div>'
+        '          <div class="sf-now">今</div>'
+        '          <div class="sf-delta">Δ10d</div>'
+        '          <div class="sf-trend">趨勢</div>'
+        '          <div class="sf-meta">廣度·集中度</div>'
+        '        </div>'
+        f'        {declining_rows}'
+        '      </div>'
+        '    </div>'
+        '  </div>'
+        '</div>'
+    )
+
+
+def _render_allocation_link_card(plan, alloc_path) -> str:
+    """Compact summary card in main scan HTML that links to the standalone tab."""
+    from html import escape as _esc
+    if plan is None or alloc_path is None:
+        return ""
+    counts = {t: len(plan.tiers.get(t, [])) for t in TIER_ORDER}
+    invested = sum(r.suggested_pct for r in plan.all_recommendations())
+    cash = max(0.0, 100.0 - invested)
+    href = _esc(alloc_path.name)
+    return (
+        '<div class="alloc-link-card">'
+        '  <div class="alc-icon">💰</div>'
+        '  <div class="alc-body">'
+        '    <div class="alc-head">資金配置建議 <span class="alc-sub">Tier S/A/B/C 分級</span></div>'
+        f'    <div class="alc-counts">'
+        f'      <span class="alc-tier-pill" style="background:#ffd700;color:#000">S {counts["S"]}</span>'
+        f'      <span class="alc-tier-pill" style="background:#58a6ff;color:#0d1117">A {counts["A"]}</span>'
+        f'      <span class="alc-tier-pill" style="background:#f0b429;color:#0d1117">B {counts["B"]}</span>'
+        f'      <span class="alc-tier-pill" style="background:#6e7681;color:#fff">C {counts["C"]}</span>'
+        f'      <span class="alc-stat">投入 <b style="color:#ff6b6b">{invested:.1f}%</b> · '
+        f'現金 <b style="color:#3fb950">{cash:.1f}%</b></span>'
+        '    </div>'
+        '  </div>'
+        f'  <a class="alc-open" href="{href}" target="_blank">查看完整配置 →</a>'
+        '</div>'
+    )
+
+
+def _write_allocation_standalone_html(
+    plan,
+    *,
+    name_map: dict[str, str],
+    industry_map: dict[str, str],
+    scan_date: str,
+    scan_html_path: Path,
+    out_path: Path,
+) -> None:
+    """Write the allocation panel as its own HTML file (opens in a new tab)."""
+    from html import escape as _esc
+
+    body = _render_allocation_html(plan, name_map, industry_map)
+    css = """
+body{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;padding:0}
+.ah-head{padding:24px 28px;background:linear-gradient(135deg,#1a1a2e,#0d2137);border-bottom:1px solid #21262d}
+.ah-head h1{margin:0;font-size:22px;color:#e6edf3}
+.ah-head .ah-sub{margin-top:6px;color:#8b949e;font-size:12px}
+.ah-head a{color:#58a6ff;text-decoration:none;font-size:12px}
+.ah-head a:hover{text-decoration:underline}
+.alloc-panel{background:linear-gradient(180deg,#1a1a2e,#0d1117);padding:20px 28px}
+.alloc-title{font-size:22px;font-weight:700;color:#e6edf3;margin-bottom:6px}
+.alloc-sub{font-size:13px;color:#8b949e;font-weight:400;margin-left:8px}
+.alloc-summary{font-size:14px;color:#c9d1d9;font-style:italic;margin-bottom:20px;line-height:1.6;padding:12px 16px;background:rgba(255,255,255,.03);border-radius:8px;border-left:3px solid #58a6ff}
+.alloc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px}
+.alloc-tier{border:1px solid;border-radius:10px;padding:14px;background:#161b22}
+.alloc-tier-head{display:flex;align-items:center;gap:10px;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,.06)}
+.alloc-tier-badge{font-weight:800;padding:3px 12px;border-radius:6px;font-size:15px}
+.alloc-tier-label{font-size:13px;color:#8b949e}
+.alloc-tier-count{margin-left:auto;font-size:11px;color:#8b949e;background:rgba(255,255,255,.05);padding:3px 10px;border-radius:10px}
+.alloc-rows{display:flex;flex-direction:column;gap:6px}
+.alloc-row{display:grid;grid-template-columns:1.6fr .6fr .4fr 2.2fr;gap:8px;align-items:center;padding:8px 10px;background:rgba(255,255,255,.02);border-radius:6px;font-size:13px}
+.alloc-row:hover{background:rgba(255,255,255,.05)}
+.alloc-tk{display:flex;flex-direction:column;gap:2px}
+.alloc-code{font-weight:700;color:#e6edf3;font-size:14px}
+.alloc-name{color:#c9d1d9;font-size:12px}
+.alloc-ind{color:#8b949e;font-size:11px}
+.alloc-pct{font-weight:700;text-align:right;font-size:16px}
+.alloc-rot{color:#8b949e;text-align:right;font-size:12px;font-variant-numeric:tabular-nums}
+.alloc-why{color:#c9d1d9;font-size:12px;line-height:1.5}
+.alloc-warns{margin-top:16px;display:flex;flex-direction:column;gap:8px}
+.alloc-warn{padding:10px 14px;border-left:3px solid;background:rgba(240,180,41,.08);border-radius:0 6px 6px 0;font-size:13px;color:#c9d1d9}
+.alloc-warn-icon{font-weight:700;margin-right:6px}
+.alloc-footer{margin-top:18px;padding:14px;background:rgba(255,255,255,.03);border-radius:8px;font-size:14px;color:#c9d1d9;text-align:center}
+"""
+    rel_scan = scan_html_path.name  # both in same dir
+    html = (
+        '<!doctype html>\n'
+        '<html lang="zh-Hant"><head><meta charset="utf-8">'
+        f'<title>💰 資金配置 - {_esc(scan_date)}</title>'
+        f'<style>{css}</style></head>\n'
+        '<body>\n'
+        '<div class="ah-head">'
+        '  <h1>💰 資金配置建議</h1>'
+        f'  <div class="ah-sub">{_esc(scan_date)} · Tier S/A/B/C 分級 · '
+        f'<a href="{_esc(rel_scan)}">← 回掃描結果</a></div>'
+        '</div>\n'
+        f'{body}\n'
+        '</body></html>'
+    )
+    out_path.write_text(html, encoding="utf-8")
+
+
+def _render_allocation_html(
+    plan,
+    name_map: dict[str, str],
+    industry_map: dict[str, str],
+) -> str:
+    """Render the Tier S/A/B/C panel as HTML. Empty string when plan is None."""
+    if plan is None:
+        return ""
+    from html import escape as _esc
+
+    tier_meta = {
+        "S": ("🥇", "首選 20-30%", "#ffd700", "#3d2f00"),
+        "A": ("🥈", "強勢 12-18%", "#58a6ff", "#0d2b50"),
+        "B": ("🥉", "試單 5-10%", "#f0b429", "#3d2a08"),
+        "C": ("⚪", "觀察 / 跳過", "#6e7681", "#21262d"),
+    }
+
+    tier_blocks: list[str] = []
+    for tier in TIER_ORDER:
+        recs = plan.tiers.get(tier) or []
+        if not recs:
+            continue
+        emoji, label, colour, bg = tier_meta[tier]
+        rows: list[str] = []
+        for r in recs:
+            nm = _esc(name_map.get(r.ticker, r.ticker))
+            ind = _esc(industry_map.get(r.ticker, ""))
+            rows.append(
+                f'<div class="alloc-row" data-ticker="{_esc(r.ticker)}">'
+                f'  <div class="alloc-tk"><span class="alloc-code">{_esc(r.ticker)}</span>'
+                f'    <span class="alloc-name">{nm}</span>'
+                f'    <span class="alloc-ind">{ind}</span></div>'
+                f'  <div class="alloc-pct" style="color:{colour}">{r.suggested_pct:.1f}%</div>'
+                f'  <div class="alloc-rot" title="輪動分">{r.rotation_score:.0f}</div>'
+                f'  <div class="alloc-why">{_esc(r.reasoning[:140])}</div>'
+                f'</div>'
+            )
+        tier_blocks.append(
+            f'<div class="alloc-tier" style="border-color:{colour};background:{bg}">'
+            f'  <div class="alloc-tier-head">'
+            f'    <span class="alloc-tier-badge" style="background:{colour};color:#0d1117">{emoji} {tier}</span>'
+            f'    <span class="alloc-tier-label">{label}</span>'
+            f'    <span class="alloc-tier-count">{len(recs)} 支</span>'
+            f'  </div>'
+            f'  <div class="alloc-rows">{"".join(rows)}</div>'
+            f'</div>'
+        )
+
+    warn_html = ""
+    if plan.warnings:
+        warns = []
+        for w in plan.warnings:
+            colour = {"high": "#f85149", "medium": "#f0b429", "low": "#8b949e"}.get(w.severity, "#f0b429")
+            warns.append(
+                f'<div class="alloc-warn" style="border-left-color:{colour}">'
+                f'<span class="alloc-warn-icon" style="color:{colour}">⚠</span> {_esc(w.message)}'
+                f'</div>'
+            )
+        warn_html = f'<div class="alloc-warns">{"".join(warns)}</div>'
+
+    invested = sum(r.suggested_pct for r in plan.all_recommendations())
+    cash = max(0.0, 100.0 - invested)
+    footer = (
+        f'<div class="alloc-footer">'
+        f'  📊 投入 <b style="color:#ff6b6b">{invested:.1f}%</b> · '
+        f'保留現金 <b style="color:#3fb950">{cash:.1f}%</b> · '
+        f'<span style="color:#8b949e">LLM={_esc(plan.provider)}</span>'
+        f'</div>'
+    )
+
+    summary = f'<div class="alloc-summary">{_esc(plan.summary)}</div>' if plan.summary else ""
+
+    return (
+        '<div class="alloc-panel">'
+        '  <div class="alloc-title">💰 資金配置建議 <span class="alloc-sub">Tier System</span></div>'
+        f'  {summary}'
+        f'  <div class="alloc-grid">{"".join(tier_blocks)}</div>'
+        f'  {warn_html}'
+        f'  {footer}'
+        '</div>'
+    )
+
+
 def _generate_plan_html(
     results: list[dict],
     scan_date: str,
@@ -2700,6 +3243,8 @@ def _generate_plan_html(
     llm_provider=None,
     min_confidence: int = 50,
     finmind_client=None,
+    allocation_plan=None,
+    allocation_html_path: Path | None = None,
 ) -> None:
     """Dark-themed HTML report for plan scan results (LONG + actionable WATCH only)."""
     import json as _json
@@ -3285,6 +3830,76 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .ks-neutral{{background:rgba(139,148,158,.1);color:#8b949e;border:1px solid rgba(139,148,158,.2)}}
 .ks-warm{{background:rgba(56,139,253,.1);color:#58a6ff;border:1px solid rgba(56,139,253,.2)}}
 .ks-hot{{background:rgba(63,185,80,.1);color:#3fb950;border:1px solid rgba(63,185,80,.2)}}
+.sf-panel{{background:linear-gradient(180deg,#0a1320,#0d1117);border-top:1px solid #21262d;
+  border-bottom:1px solid #21262d;padding:18px 28px}}
+.sf-title{{font-size:17px;font-weight:700;color:#e6edf3;margin-bottom:2px}}
+.sf-sub{{font-size:11px;color:#8b949e;font-weight:400;margin-left:6px}}
+.sf-period{{font-size:10px;color:#6e7681;margin-bottom:12px;letter-spacing:.5px}}
+.sf-grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
+.sf-col{{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:10px 12px}}
+.sf-coltitle{{font-size:13px;font-weight:700;margin-bottom:8px;padding-bottom:6px;
+  border-bottom:1px solid rgba(255,255,255,.06)}}
+.sf-rows{{display:flex;flex-direction:column;gap:3px}}
+.sf-row{{display:grid;grid-template-columns:1.2fr 1.6fr .5fr .6fr .9fr 1.3fr;
+  gap:8px;align-items:center;padding:4px 6px;font-size:11px;color:#c9d1d9;
+  border-radius:4px}}
+.sf-row:hover{{background:rgba(255,255,255,.04)}}
+.sf-head{{font-size:10px;color:#6e7681;text-transform:uppercase;letter-spacing:.5px;
+  border-bottom:1px solid rgba(255,255,255,.05);padding-bottom:6px;margin-bottom:2px}}
+.sf-head:hover{{background:none}}
+.sf-name{{font-weight:600;color:#e6edf3;white-space:nowrap}}
+.sf-spark{{display:flex;align-items:center}}
+.sf-spark svg{{display:block}}
+.sf-now{{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}}
+.sf-delta{{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}}
+.sf-trend{{font-size:11px;white-space:nowrap}}
+.sf-meta{{font-size:10px;color:#8b949e}}
+@media (max-width: 900px){{
+  .sf-grid{{grid-template-columns:1fr}}
+}}
+.alloc-link-card{{display:flex;align-items:center;gap:16px;padding:14px 24px;
+  background:linear-gradient(135deg,#1a1a2e,#1e2a4a);border-top:1px solid #21262d;
+  border-bottom:1px solid #21262d}}
+.alc-icon{{font-size:28px}}
+.alc-body{{flex:1;min-width:0}}
+.alc-head{{font-size:15px;font-weight:700;color:#e6edf3;margin-bottom:4px}}
+.alc-sub{{font-size:11px;color:#8b949e;font-weight:400;margin-left:6px}}
+.alc-counts{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}}
+.alc-tier-pill{{font-weight:700;padding:2px 8px;border-radius:10px;font-size:11px}}
+.alc-stat{{color:#c9d1d9;margin-left:8px}}
+.alc-open{{padding:8px 16px;background:#238636;color:#fff;border-radius:6px;
+  text-decoration:none;font-weight:600;font-size:13px;white-space:nowrap}}
+.alc-open:hover{{background:#2ea043}}
+.alloc-panel{{background:linear-gradient(180deg,#1a1a2e,#0d1117);border-top:1px solid #21262d;
+  border-bottom:1px solid #21262d;padding:20px 28px}}
+.alloc-title{{font-size:18px;font-weight:700;color:#e6edf3;margin-bottom:6px}}
+.alloc-sub{{font-size:12px;color:#8b949e;font-weight:400;margin-left:6px}}
+.alloc-summary{{font-size:13px;color:#c9d1d9;font-style:italic;margin-bottom:14px;line-height:1.5}}
+.alloc-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px}}
+.alloc-tier{{border:1px solid;border-radius:10px;padding:12px;background:#161b22}}
+.alloc-tier-head{{display:flex;align-items:center;gap:10px;margin-bottom:8px;padding-bottom:8px;
+  border-bottom:1px solid rgba(255,255,255,.06)}}
+.alloc-tier-badge{{font-weight:800;padding:2px 10px;border-radius:6px;font-size:14px}}
+.alloc-tier-label{{font-size:12px;color:#8b949e}}
+.alloc-tier-count{{margin-left:auto;font-size:11px;color:#8b949e;
+  background:rgba(255,255,255,.05);padding:2px 8px;border-radius:10px}}
+.alloc-rows{{display:flex;flex-direction:column;gap:6px}}
+.alloc-row{{display:grid;grid-template-columns:1.6fr .6fr .4fr 2.2fr;gap:8px;align-items:center;
+  padding:6px 8px;background:rgba(255,255,255,.02);border-radius:6px;font-size:12px}}
+.alloc-row:hover{{background:rgba(255,255,255,.05)}}
+.alloc-tk{{display:flex;flex-direction:column;gap:2px}}
+.alloc-code{{font-weight:700;color:#e6edf3}}
+.alloc-name{{color:#c9d1d9;font-size:11px}}
+.alloc-ind{{color:#8b949e;font-size:10px}}
+.alloc-pct{{font-weight:700;text-align:right;font-size:14px}}
+.alloc-rot{{color:#8b949e;text-align:right;font-size:11px;font-variant-numeric:tabular-nums}}
+.alloc-why{{color:#8b949e;font-size:11px;line-height:1.4}}
+.alloc-warns{{margin-top:12px;display:flex;flex-direction:column;gap:6px}}
+.alloc-warn{{padding:8px 12px;border-left:3px solid;background:rgba(240,180,41,.08);
+  border-radius:0 6px 6px 0;font-size:12px;color:#c9d1d9}}
+.alloc-warn-icon{{font-weight:700;margin-right:6px}}
+.alloc-footer{{margin-top:14px;padding-top:10px;border-top:1px solid #21262d;
+  font-size:12px;color:#c9d1d9;text-align:center}}
 .filter-bar{{position:sticky;top:0;z-index:100;background:#0d1117cc;backdrop-filter:blur(12px);
   border-bottom:1px solid #21262d;padding:10px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}}
 .fb-group{{display:flex;align-items:center;gap:8px}}
@@ -3325,6 +3940,9 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
   </div>
   {radar_html}
 </div>
+{_render_sector_flow_html()}
+{_render_concept_flow_html()}
+{_render_allocation_link_card(allocation_plan, allocation_html_path)}
 <div class="filter-bar" id="filterBar">
   <div class="fb-group">
     <span class="fb-label">操作</span>

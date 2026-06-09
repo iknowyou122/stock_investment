@@ -175,6 +175,17 @@ class StrategistAgent:
         # --- Volume Profile proxy ---
         volume_profile = self._build_volume_profile(ticker, analysis_date, history)
 
+        # --- Per-ticker context: PER/valuation + revenue (FinMind paid) ---
+        taifex_ctx_for_ticker = dict(self._taifex_context)  # shallow copy preserves shared keys
+        paid = getattr(self._chip_proxy_fetcher, "_paid", None) if self._chip_proxy_fetcher else None
+        if paid is not None:
+            per_ctx = paid.fetch_per_context(ticker, analysis_date)
+            if isinstance(per_ctx, dict) and per_ctx.get("data_available"):
+                taifex_ctx_for_ticker["per_ctx"] = per_ctx
+            rev_ctx = paid.fetch_revenue_context(ticker, analysis_date)
+            if isinstance(rev_ctx, dict) and rev_ctx.get("data_available"):
+                taifex_ctx_for_ticker["rev_ctx"] = rev_ctx
+
         # --- Triple Confirmation (deterministic) ---
         signal, breakdown, hints = engine.score_full(
             ohlcv=today_ohlcv,
@@ -184,7 +195,7 @@ class StrategistAgent:
             twse_proxy=twse_proxy,
             taiex_history=taiex_history,
             market=market,
-            taifex_context=self._taifex_context or None,
+            taifex_context=taifex_ctx_for_ticker or None,
         )
 
         # --- LLM reasoning (Phase 3) ---
