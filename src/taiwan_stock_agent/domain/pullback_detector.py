@@ -89,6 +89,33 @@ class PullbackDetector:
         if not upper_bb_touched:
             return None
 
+        # ── Gate 4: distance from 20-day high — reject crashes ───────────
+        # A healthy pullback brushes back through MA20 from above; a crash
+        # plunges far below the recent high. >15% below 20-day high means
+        # this is no longer a controlled pullback, it's a downtrend.
+        # Discovered 2026-06-11 via 6182 合晶 (close 78.5 vs 20D high 101.5
+        # = -22.7% → PullbackDetector wrongly scored 102 LONG).
+        high_20 = max(highs[-20:])
+        if high_20 > 0 and close / high_20 < 0.85:
+            return None
+
+        # ── Gate 5: reject limit-down or near-limit-down day ─────────────
+        # Today's candle: open → close return of -8% or worse means
+        # capitulation, not bounce. PullbackDetector should look for an
+        # up-bounce candle, not a deeper red one.
+        last = sorted_h[-1]
+        if last.open > 0 and (last.close - last.open) / last.open <= -0.08:
+            return None
+
+        # ── Gate 6: reject sustained selling pressure ────────────────────
+        # 5+ red days within the last 7 bars = persistent downtrend,
+        # not a single-day pullback. The detector must see meaningful
+        # supply absorption before flagging buy.
+        recent_7 = sorted_h[-7:]
+        down_days = sum(1 for b in recent_7 if b.close < b.open)
+        if down_days >= 5:
+            return None
+
         # ── Scoring — Phase 4.46 continuous ──────────────────────────────
         flags: list[str] = ["PULLBACK_MA20"]
         score = 0.0

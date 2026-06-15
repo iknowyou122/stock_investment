@@ -245,3 +245,82 @@ def test_result_has_required_keys():
     assert result is not None
     for key in ("score", "flags", "ma20_pct", "ma20", "ma5", "ma60", "rsi", "pullback_days"):
         assert key in result, f"missing key: {key}"
+
+
+# ── 2026-06-11 regression: crash misidentified as pullback ────────────────────
+#
+# Background: 6182 合晶 crashed from ~101 to ~78 (-22.7%) over 10 days while
+# MA20 still lagged upward (large prior rally). Gate 1-3 all passed; the
+# detector scored 102 LONG, which the LLM then promoted to a 15% A-tier buy
+# recommendation. The three gates below are the missing checks that turn that
+# scenario into a correct "no signal".
+
+
+def _crash_history() -> list[DailyOHLCV]:
+    """60 bars of strong uptrend → 8 bars of -3% daily crash. Mimics 6182.
+
+    20-day high ends up ~30% above today's close, so Gate 4 fires.
+    """
+    closes: list[float] = []
+    c = 60.0
+    for _ in range(60):
+        c += 0.5
+        closes.append(round(c, 2))
+    # surge above upper BB
+    for _ in range(10):
+        c += 1.5
+        closes.append(round(c, 2))
+    # crash: 8 consecutive ~-3% red days
+    for _ in range(8):
+        c *= 0.97
+        closes.append(round(c, 2))
+    return _bars(closes)
+
+
+def test_rejects_crash_far_below_20d_high():
+    """Gate 4: close < 0.85 × max(highs[-20:]) must reject."""
+    assert PullbackDetector().score(_crash_history()) is None
+
+
+def test_rejects_limit_down_day():
+    """Gate 5: a -9.99% red bar today is capitulation, not a bounce candle."""
+    bars = _pullback_history()
+    # Replace the last bar with a near-limit-down candle: open 100, close 91
+    last = bars[-1]
+    bars[-1] = DailyOHLCV(
+        ticker=last.ticker,
+        trade_date=last.trade_date,
+        open=100.0,
+        high=100.5,
+        low=90.5,
+        close=91.0,  # -9% from open
+        volume=last.volume,
+    )
+    assert PullbackDetector().score(bars) is None
+
+
+def test_rejects_sustained_selling_pressure():
+    """Gate 6: 5+ red days within the last 7 bars = downtrend, not pullback."""
+    bars = _pullback_history()
+    # Force last 7 bars to all be red (close < open) without violating MA20 gate.
+    # We keep the closes identical (so MA chains still pass) but flip the opens
+    # to be higher than each close.
+    for i in range(-7, 0):
+        b = bars[i]
+        bars[i] = DailyOHLCV(
+            ticker=b.ticker,
+            trade_date=b.trade_date,
+            open=b.close + 1.0,    # open above close → red bar
+            high=b.close + 1.5,
+            low=b.close - 0.5,
+            close=b.close,
+            volume=b.volume,
+        )
+    assert PullbackDetector().score(bars) is None
+
+
+def test_legitimate_pullback_still_passes_after_new_gates():
+    """Sanity: the three new gates must NOT break healthy pullbacks."""
+    result = PullbackDetector().score(_pullback_history())
+    assert result is not None
+    assert result["score"] > 0

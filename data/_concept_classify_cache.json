@@ -1461,6 +1461,25 @@
     "6470": [
       "low_orbit_satellite"
     ],
-    "6154": []
+    "6154": [],
+    "8277": [
+      "AI_GPU_supply"
+    ],
+    "7772": [
+      "CoWoS_advanced_packaging"
+    ],
+    "3049": [
+      "CPO_silicon_photonics"
+    ],
+    "8089": [
+      "low_orbit_satellite"
+    ],
+    "5426": [
+      "AI_server_cooling"
+    ],
+    "1529": [],
+    "3005": [
+      "AI_server_cooling"
+    ]
   }
 }

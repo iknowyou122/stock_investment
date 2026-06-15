@@ -3605,6 +3605,26 @@ def _generate_plan_html(
             "HOT"      if "ROTATION_HOT"      in _flags_str else
             "COOLING"  if "ROTATION_COOLING"   in _flags_str else ""
         )
+
+        # BB compression filter: matches when BB width is in the bottom 35
+        # percentile (TCE Gate-2) AND no breakout signal has fired yet.
+        bb_compressed = "0"
+        if isinstance(_flags_list, list):
+            bb_pct_val = None
+            for _f in _flags_list:
+                if isinstance(_f, str) and "GATE_PASS:G2_BB_PCT:" in _f:
+                    try:
+                        bb_pct_val = float(_f.split("PCT:")[-1].rstrip("p"))
+                    except ValueError:
+                        pass
+                if _f == "GATE_PASS:G2_BB_NARROW":
+                    bb_pct_val = 30.0  # legacy flag means narrow
+            broke_out = any(
+                f in _flags_str
+                for f in ("BB_SQUEEZE_BREAKOUT", "BB_UPPER_WALK", "BREAKOUT_20D")
+            )
+            if bb_pct_val is not None and bb_pct_val < 35 and not broke_out:
+                bb_compressed = "1"
         rotation_label = {"EMERGING": "📡升溫", "HOT": "🔥熱門", "COOLING": "🔻降溫"}.get(rotation_status, "")
         yoy = r.get("growth_yoy")
         consec = r.get("growth_consecutive", 0) or 0
@@ -3643,7 +3663,7 @@ def _generate_plan_html(
         _border_col = _border_colors.get(strategy, "#388bfd")
 
         cards.append(f"""
-    <div class="card" data-action="{action}" data-conf="{conf}" data-industry="{_esc(raw_industry)}" data-concepts="{_esc(concept_names_joined)}" data-sigtype="{_esc(sig_type)}" data-horizon="{_esc(horizon_val)}" data-strategy="{strategy}" data-rotation="{rotation_status}" style="animation-delay:{delay}s;border-left:4px solid {_border_col}">
+    <div class="card" data-action="{action}" data-conf="{conf}" data-industry="{_esc(raw_industry)}" data-concepts="{_esc(concept_names_joined)}" data-sigtype="{_esc(sig_type)}" data-horizon="{_esc(horizon_val)}" data-strategy="{strategy}" data-rotation="{rotation_status}" data-bb-compressed="{bb_compressed}" style="animation-delay:{delay}s;border-left:4px solid {_border_col}">
       <div class="card-header">
         <div class="rank">{i+1}</div>
         <div class="info">
@@ -3903,6 +3923,8 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .filter-bar{{position:sticky;top:0;z-index:100;background:#0d1117cc;backdrop-filter:blur(12px);
   border-bottom:1px solid #21262d;padding:10px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}}
 .fb-group{{display:flex;align-items:center;gap:8px}}
+#conceptFilterGroup{{flex-wrap:wrap;row-gap:6px;max-width:100%;align-items:flex-start}}
+#conceptFilterGroup .fb-label{{align-self:center}}
 .fb-label{{font-size:11px;color:#8b949e;white-space:nowrap}}
 .fb-pill{{font-size:12px;font-weight:600;padding:5px 14px;border-radius:20px;border:1px solid #30363d;
   background:transparent;color:#8b949e;cursor:pointer;transition:all .15s;white-space:nowrap}}
@@ -3962,6 +3984,11 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
     <button class="fb-pill horizon-pill active" data-horizon="ALL">全部</button>
     <button class="fb-pill horizon-pill" data-horizon="波段">波段</button>
     <button class="fb-pill horizon-pill" data-horizon="短線">短線</button>
+  </div>
+  <div class="fb-group">
+    <span class="fb-label">BB 壓縮</span>
+    <button class="fb-pill bb-pill active" data-bb="ALL">全部</button>
+    <button class="fb-pill bb-pill" data-bb="ONLY" style="border-color:#3fb950" title="BB 寬度位於 60 日 35 分位內，且尚未突破">壓縮未突破</button>
   </div>
   {(('<div class="fb-group"><span class="fb-label">訊號型態</span>' +
      '<button class="fb-pill sigtype-pill active" data-sigtype="ALL">全部</button>' +
@@ -4138,6 +4165,7 @@ document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.ob
   var activeSigType = "ALL";
   var activeStrategy = "ALL";
   var activeHorizon = "ALL";
+  var activeBB = "ALL";
   var activeSort = "conf";
   var minConf = {min_confidence};
   var activeInd = "";
@@ -4185,6 +4213,7 @@ document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.ob
       var sigtype = c.dataset.sigtype || "";
       var strategy = c.dataset.strategy || "";
       var horizon = c.dataset.horizon || "";
+      var bbCompressed = c.dataset.bbCompressed === "1";
       var cardConceptsRaw = c.dataset.concepts || "";
       var cardConcepts = cardConceptsRaw ? new Set(cardConceptsRaw.split(",")) : new Set();
       var conceptMatch = selectedConcepts.size === 0
@@ -4193,6 +4222,7 @@ document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.ob
                && (activeSigType === "ALL" || sigtype === activeSigType)
                && (activeStrategy === "ALL" || strategy === activeStrategy)
                && (activeHorizon === "ALL" || horizon === activeHorizon)
+               && (activeBB === "ALL" || (activeBB === "ONLY" && bbCompressed))
                && conf >= minConf
                && (activeInd === "" || ind === activeInd)
                && conceptMatch;
@@ -4265,6 +4295,15 @@ document.querySelectorAll(".chart[data-ticker]").forEach(function(el) {{ _obs.ob
       document.querySelectorAll(".horizon-pill").forEach(function(b) {{ b.classList.remove("active"); }});
       btn.classList.add("active");
       activeHorizon = btn.dataset.horizon;
+      applyFilters();
+    }});
+  }});
+
+  document.querySelectorAll(".bb-pill").forEach(function(btn) {{
+    btn.addEventListener("click", function() {{
+      document.querySelectorAll(".bb-pill").forEach(function(b) {{ b.classList.remove("active"); }});
+      btn.classList.add("active");
+      activeBB = btn.dataset.bb;
       applyFilters();
     }});
   }});
