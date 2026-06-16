@@ -1480,6 +1480,23 @@
     "1529": [],
     "3005": [
       "AI_server_cooling"
-    ]
+    ],
+    "4560": [
+      "robotics_automation"
+    ],
+    "3027": [
+      "low_orbit_satellite"
+    ],
+    "3665": [
+      "AI_server_cooling",
+      "auto_electronics"
+    ],
+    "8085": [],
+    "4588": [
+      "heavy_electric"
+    ],
+    "3576": [],
+    "6167": [],
+    "7792": []
   }
 }

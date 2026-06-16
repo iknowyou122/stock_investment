@@ -56,6 +56,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from taiwan_stock_agent.agents.allocation_advisor import AllocationAdvisor
+from taiwan_stock_agent.agents.holdings_manager import (
+    DailyPortfolio,
+    HoldingsManager,
+    NewBuy,
+    HoldingSnapshot,
+)
+from taiwan_stock_agent.infrastructure.holdings_repository import HoldingsRepository
 from taiwan_stock_agent.agents.strategist_agent import StrategistAgent
 from taiwan_stock_agent.domain.capital_allocator import (
     CapitalAllocator,
@@ -2404,6 +2411,22 @@ def run_batch(
     if allocation_plan is not None:
         _print_allocation_panel(allocation_plan, name_map=name_map or {})
 
+    # ── 持倉模擬 (HoldingsManager) ─────────────────────────────────────────────
+    daily_portfolio = None
+    if allocation_plan is not None:
+        try:
+            daily_portfolio = _build_daily_portfolio(
+                allocation_plan=allocation_plan,
+                results=results,
+                analysis_date=analysis_date,
+                name_map=name_map or {},
+                industry_map=industry_map or {},
+            )
+            if daily_portfolio is not None:
+                _print_portfolio_panel(daily_portfolio)
+        except Exception as exc:
+            logger.warning("Portfolio simulation failed: %s", exc)
+
     html_path = (Path(__file__).resolve().parents[1] / "data" / "scans" / f"scan_{analysis_date}.html")
     alloc_path = (Path(__file__).resolve().parents[1] / "data" / "scans" / f"allocation_{analysis_date}.html")
     _generate_plan_html(results, str(analysis_date), html_path,
@@ -2414,7 +2437,8 @@ def run_batch(
                         min_confidence=min_confidence,
                         finmind_client=_shared_finmind,
                         allocation_plan=allocation_plan,
-                        allocation_html_path=alloc_path)
+                        allocation_html_path=alloc_path,
+                        daily_portfolio=daily_portfolio)
     # Write standalone allocation HTML (separate tab)
     if allocation_plan is not None:
         _write_allocation_standalone_html(
@@ -2475,6 +2499,129 @@ def _build_allocation_plan(
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Allocation advisor failed: %s", exc)
         return None
+
+
+def _build_daily_portfolio(
+    *,
+    allocation_plan,
+    results: list[dict],
+    analysis_date: date,
+    name_map: dict[str, str],
+    industry_map: dict[str, str],
+):
+    """Run HoldingsManager.process_day to update simulated holdings."""
+    prices: dict[str, float] = {}
+    confidences: dict[str, float] = {}
+    for r in results:
+        tk = str(r.get("ticker", ""))
+        if not tk:
+            continue
+        ep = float(r.get("entry_bid") or 0)
+        if ep <= 0:
+            continue
+        prices[tk] = ep
+        confidences[tk] = float(r.get("confidence") or 0)
+
+    # Concepts per ticker — read from the concepts.json mapping
+    from pathlib import Path as _P
+    import json as _j
+    concepts_path = _P(__file__).resolve().parents[1] / "config" / "concepts.json"
+    concepts_by_ticker: dict[str, list[str]] = {}
+    try:
+        data = _j.loads(concepts_path.read_text(encoding="utf-8"))
+        for key, body in (data.get("concepts") or {}).items():
+            for t in body.get("tickers") or []:
+                concepts_by_ticker.setdefault(str(t), []).append(key)
+    except Exception:
+        pass
+
+    manager = HoldingsManager()
+    return manager.process_day(
+        today=analysis_date,
+        plan=allocation_plan,
+        prices_today=prices,
+        confidences_today=confidences,
+        name_map=name_map,
+        industry_map=industry_map,
+        concepts_by_ticker=concepts_by_ticker,
+        commit=True,
+    )
+
+
+def _print_portfolio_panel(dp) -> None:
+    """Render Holdings / New Buys / Exits in terminal."""
+    _console.print()
+    _console.print(Panel(
+        Text("📦 持倉組合（模擬）", style="bold cyan"),
+        border_style="cyan", expand=False,
+    ))
+    if not dp.holdings and not dp.new_buys and not dp.pending_exits:
+        _console.print("  [dim]無持倉，無今日新買，無預期賣出[/dim]")
+        return
+
+    # Holdings table
+    if dp.holdings:
+        tbl = Table(
+            title=f"📦 持倉中  共 {len(dp.holdings)} 支  ｜  投入 {dp.total_invested_pct}% / 現金 {dp.cash_pct}%  ｜  Portfolio P&L {dp.portfolio_unrealised_pct:+.2f}%",
+            title_style="bold white",
+            box=box.ROUNDED,
+        )
+        tbl.add_column("代號")
+        tbl.add_column("名稱")
+        tbl.add_column("Tier")
+        tbl.add_column("進場日")
+        tbl.add_column("進場價", justify="right")
+        tbl.add_column("今價", justify="right")
+        tbl.add_column("損益%", justify="right")
+        tbl.add_column("天數", justify="right")
+        tbl.add_column("狀態")
+        for h in dp.holdings:
+            pl_str = f"{h.unrealised_pct:+.2f}%"
+            pl_color = "green" if h.unrealised_pct > 0.5 else "red" if h.unrealised_pct < -0.5 else "white"
+            status = "[red]🔴 待賣[/red]" if h.exit_decision.should_close else "[green]✓ 持有[/green]"
+            tbl.add_row(
+                h.holding.ticker, h.name[:10], h.holding.tier,
+                str(h.holding.entry_date), f"{h.holding.entry_price:.1f}",
+                f"{h.current_price:.1f}",
+                f"[{pl_color}]{pl_str}[/{pl_color}]",
+                str(h.days_held), status,
+            )
+        _console.print(tbl)
+
+    # Pending exits
+    if dp.pending_exits:
+        _console.print()
+        for h in dp.pending_exits:
+            _console.print(
+                f"  [red bold]🔴 賣出 {h.holding.ticker} {h.name}[/red bold]  "
+                f"[red]{h.exit_decision.close_reason}[/red]: {h.exit_decision.rationale}"
+            )
+
+    # New buys
+    if dp.new_buys:
+        _console.print()
+        tbl = Table(
+            title=f"🆕 今日新買候選  共 {len(dp.new_buys)} 支",
+            title_style="bold green",
+            box=box.ROUNDED,
+        )
+        tbl.add_column("代號"); tbl.add_column("名稱"); tbl.add_column("Tier")
+        tbl.add_column("配置%", justify="right")
+        tbl.add_column("進場", justify="right")
+        tbl.add_column("停損", justify="right")
+        tbl.add_column("停利", justify="right")
+        tbl.add_column("信心", justify="right")
+        for b in dp.new_buys:
+            tier_color = {"S": "gold1", "A": "cyan", "B": "yellow"}.get(b.tier, "white")
+            tbl.add_row(
+                b.ticker, b.name[:10],
+                f"[{tier_color}]{b.tier}[/{tier_color}]",
+                f"{b.suggested_pct:.1f}%",
+                f"{b.entry_price:.1f}", f"{b.stop_loss:.1f}",
+                f"{b.take_profit:.1f}",
+                f"{b.confidence:.0f}",
+            )
+        _console.print(tbl)
 
 
 def _print_allocation_panel(plan, *, name_map: dict[str, str]) -> None:
@@ -2953,7 +3100,7 @@ def _render_sector_flow_html(days: int = 10) -> str:
         summary,
         title="📈 產業資金流動趨勢",
         sub="10 日熱度時序",
-        rising_n=12, declining_n=6,
+        rising_n=8, declining_n=5,
     )
 
 
@@ -2971,8 +3118,8 @@ def _render_concept_flow_html(days: int = 10) -> str:
     return _render_flow_panel(
         summary,
         title="💎 概念題材資金流動",
-        sub="10 日熱度時序 · 37 題材籃子",
-        rising_n=18, declining_n=8,
+        sub=f"10 日熱度時序 · {len(summary.series)} 題材籃子（已合併同主題）",
+        rising_n=8, declining_n=6,
     )
 
 
@@ -3053,6 +3200,107 @@ def _legacy_render_sector_flow_unused(days: int = 10) -> str:
         f'        {declining_rows}'
         '      </div>'
         '    </div>'
+        '  </div>'
+        '</div>'
+    )
+
+
+def _render_portfolio_html(dp) -> str:
+    """Render Holdings / New Buys / Pending Exits as the top hero region.
+
+    Three cards side by side; collapses gracefully when fields are empty.
+    """
+    if dp is None:
+        return ""
+    from html import escape as _esc
+
+    # --- 1. Pending exits (red, action-required) ---
+    exit_rows = ""
+    if dp.pending_exits:
+        rows = []
+        for h in dp.pending_exits:
+            rows.append(
+                f'<div class="pf-row pf-exit-row">'
+                f'  <div class="pf-tk">{_esc(h.holding.ticker)}<br><span class="pf-nm">{_esc(h.name)}</span></div>'
+                f'  <div class="pf-detail">'
+                f'    進場 <b>{h.holding.entry_price:.1f}</b> → 現價 <b>{h.current_price:.1f}</b><br>'
+                f'    <span class="pf-pnl-neg">{h.unrealised_pct:+.2f}%</span> · 持有 {h.days_held} 天'
+                f'  </div>'
+                f'  <div class="pf-reason"><span class="pf-tag pf-tag-exit">{_esc(h.exit_decision.close_reason or "")}</span><br>'
+                f'    <span class="pf-reason-text">{_esc(h.exit_decision.rationale)}</span></div>'
+                f'</div>'
+            )
+        exit_rows = "".join(rows)
+
+    # --- 2. Holdings (current open positions) ---
+    hold_rows = ""
+    if dp.holdings:
+        rows = []
+        for h in dp.holdings:
+            if h.exit_decision.should_close:
+                continue  # shown in exit panel
+            pnl_class = (
+                "pf-pnl-pos" if h.unrealised_pct > 0.5
+                else "pf-pnl-neg" if h.unrealised_pct < -0.5
+                else "pf-pnl-neu"
+            )
+            tier_color = {"S": "#ffd700", "A": "#58a6ff", "B": "#f0b429", "C": "#6e7681"}.get(h.holding.tier, "#8b949e")
+            rows.append(
+                f'<div class="pf-row">'
+                f'  <div class="pf-tk">'
+                f'    <span class="pf-tier" style="background:{tier_color}">{h.holding.tier}</span>'
+                f'    {_esc(h.holding.ticker)}<br><span class="pf-nm">{_esc(h.name)}</span></div>'
+                f'  <div class="pf-detail">'
+                f'    {h.holding.entry_price:.1f} → <b>{h.current_price:.1f}</b><br>'
+                f'    <span class="pf-stop">停損 {h.holding.stop_loss:.1f}</span> · '
+                f'    <span class="pf-tp">停利 {h.holding.take_profit:.1f}</span>'
+                f'  </div>'
+                f'  <div class="pf-pnl {pnl_class}">{h.unrealised_pct:+.2f}%<br>'
+                f'    <span class="pf-days">{h.days_held} 天</span></div>'
+                f'</div>'
+            )
+        hold_rows = "".join(rows)
+
+    # --- 3. New buys (today's fresh tier S/A/B) ---
+    buy_rows = ""
+    if dp.new_buys:
+        rows = []
+        for b in dp.new_buys:
+            tier_color = {"S": "#ffd700", "A": "#58a6ff", "B": "#f0b429"}.get(b.tier, "#8b949e")
+            rows.append(
+                f'<div class="pf-row pf-buy-row">'
+                f'  <div class="pf-tk">'
+                f'    <span class="pf-tier" style="background:{tier_color}">{b.tier}</span>'
+                f'    {_esc(b.ticker)}<br><span class="pf-nm">{_esc(b.name)}</span></div>'
+                f'  <div class="pf-detail">'
+                f'    進場 <b>{b.entry_price:.1f}</b><br>'
+                f'    停損 <span class="pf-stop">{b.stop_loss:.1f}</span> · '
+                f'    停利 <span class="pf-tp">{b.take_profit:.1f}</span>'
+                f'  </div>'
+                f'  <div class="pf-alloc">{b.suggested_pct:.0f}%<br>'
+                f'    <span class="pf-conf">conf {b.confidence:.0f}</span></div>'
+                f'</div>'
+            )
+        buy_rows = "".join(rows)
+
+    open_holdings_count = sum(1 for h in dp.holdings if not h.exit_decision.should_close)
+    pnl = dp.portfolio_unrealised_pct
+    pnl_class = "pf-pnl-pos" if pnl > 0.5 else "pf-pnl-neg" if pnl < -0.5 else "pf-pnl-neu"
+
+    return (
+        '<div class="pf-hero">'
+        '  <div class="pf-hero-head">📦 持倉組合 · 模擬</div>'
+        f'  <div class="pf-hero-summary">'
+        f'    <span class="pf-stat">📦 持倉 <b>{open_holdings_count}</b></span>'
+        f'    <span class="pf-stat">🆕 今日新買 <b>{len(dp.new_buys)}</b></span>'
+        f'    <span class="pf-stat">🔴 待賣 <b>{len(dp.pending_exits)}</b></span>'
+        f'    <span class="pf-stat">投入 <b>{dp.total_invested_pct}%</b> · 現金 <b>{dp.cash_pct}%</b></span>'
+        f'    <span class="pf-stat">Portfolio P&L <b class="{pnl_class}">{pnl:+.2f}%</b></span>'
+        '  </div>'
+        '  <div class="pf-grid">' +
+        (f'<div class="pf-card pf-card-exit"><div class="pf-card-head">🔴 預期賣出 ({len(dp.pending_exits)})</div>{exit_rows}</div>' if exit_rows else "") +
+        (f'<div class="pf-card pf-card-hold"><div class="pf-card-head">📦 持倉中 ({open_holdings_count})</div>{hold_rows}</div>' if hold_rows else '<div class="pf-card pf-card-empty">尚無持倉</div>') +
+        (f'<div class="pf-card pf-card-buy"><div class="pf-card-head">🆕 今日新買候選 ({len(dp.new_buys)})</div>{buy_rows}</div>' if buy_rows else "") +
         '  </div>'
         '</div>'
     )
@@ -3245,6 +3493,7 @@ def _generate_plan_html(
     finmind_client=None,
     allocation_plan=None,
     allocation_html_path: Path | None = None,
+    daily_portfolio=None,
 ) -> None:
     """Dark-themed HTML report for plan scan results (LONG + actionable WATCH only)."""
     import json as _json
@@ -3850,6 +4099,48 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .ks-neutral{{background:rgba(139,148,158,.1);color:#8b949e;border:1px solid rgba(139,148,158,.2)}}
 .ks-warm{{background:rgba(56,139,253,.1);color:#58a6ff;border:1px solid rgba(56,139,253,.2)}}
 .ks-hot{{background:rgba(63,185,80,.1);color:#3fb950;border:1px solid rgba(63,185,80,.2)}}
+/* ── Portfolio hero ───────────────────────────────────────────────────── */
+.pf-hero{{background:linear-gradient(135deg,#0a1f2e,#0d2137,#0a2744);padding:24px 28px;
+  border-bottom:1px solid #21262d}}
+.pf-hero-head{{font-size:20px;font-weight:800;color:#e6edf3;margin-bottom:8px}}
+.pf-hero-summary{{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-bottom:18px;
+  font-size:13px;color:#c9d1d9}}
+.pf-stat{{background:rgba(255,255,255,.05);padding:6px 14px;border-radius:18px;
+  border:1px solid rgba(255,255,255,.08)}}
+.pf-stat b{{color:#e6edf3;font-size:15px;margin-left:4px}}
+.pf-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}}
+.pf-card{{background:#161b22;border:1px solid #21262d;border-radius:10px;padding:12px 14px}}
+.pf-card-head{{font-size:13px;font-weight:700;color:#c9d1d9;margin-bottom:10px;
+  padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,.06)}}
+.pf-card-exit{{border-color:#f85149;background:rgba(248,81,73,.06)}}
+.pf-card-hold{{border-color:#388bfd}}
+.pf-card-buy{{border-color:#3fb950;background:rgba(63,185,80,.06)}}
+.pf-card-empty{{text-align:center;color:#8b949e;font-size:13px;padding:20px}}
+.pf-row{{display:grid;grid-template-columns:1.1fr 1.5fr .8fr;gap:8px;align-items:center;
+  padding:8px 6px;border-radius:6px;font-size:12px;color:#c9d1d9;
+  border-bottom:1px solid rgba(255,255,255,.04)}}
+.pf-row:last-child{{border-bottom:none}}
+.pf-row:hover{{background:rgba(255,255,255,.03)}}
+.pf-tk{{font-weight:700;color:#e6edf3;font-size:13px}}
+.pf-nm{{color:#8b949e;font-size:11px;font-weight:400}}
+.pf-tier{{display:inline-block;font-size:10px;font-weight:800;padding:1px 6px;border-radius:3px;
+  color:#0d1117;margin-right:4px;vertical-align:middle}}
+.pf-detail{{font-size:11px;color:#c9d1d9;line-height:1.5}}
+.pf-detail b{{color:#e6edf3}}
+.pf-stop{{color:#f0b429}}
+.pf-tp{{color:#3fb950}}
+.pf-pnl{{font-weight:800;text-align:right;font-size:15px;font-variant-numeric:tabular-nums}}
+.pf-pnl-pos{{color:#3fb950}}
+.pf-pnl-neg{{color:#f85149}}
+.pf-pnl-neu{{color:#8b949e}}
+.pf-days{{font-size:10px;color:#8b949e;font-weight:400}}
+.pf-alloc{{font-weight:800;text-align:right;font-size:18px;color:#58a6ff;font-variant-numeric:tabular-nums}}
+.pf-conf{{font-size:10px;color:#8b949e;font-weight:400}}
+.pf-reason{{font-size:11px;text-align:right}}
+.pf-tag{{display:inline-block;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700}}
+.pf-tag-exit{{background:#f85149;color:#fff}}
+.pf-reason-text{{color:#8b949e;font-size:10px}}
+
 .sf-panel{{background:linear-gradient(180deg,#0a1320,#0d1117);border-top:1px solid #21262d;
   border-bottom:1px solid #21262d;padding:18px 28px}}
 .sf-title{{font-size:17px;font-weight:700;color:#e6edf3;margin-bottom:2px}}
@@ -3861,7 +4152,7 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
   border-bottom:1px solid rgba(255,255,255,.06)}}
 .sf-rows{{display:flex;flex-direction:column;gap:3px}}
 .sf-row{{display:grid;grid-template-columns:1.2fr 1.6fr .5fr .6fr .9fr 1.3fr;
-  gap:8px;align-items:center;padding:4px 6px;font-size:11px;color:#c9d1d9;
+  gap:8px;align-items:center;padding:6px 8px;font-size:13px;color:#c9d1d9;
   border-radius:4px}}
 .sf-row:hover{{background:rgba(255,255,255,.04)}}
 .sf-head{{font-size:10px;color:#6e7681;text-transform:uppercase;letter-spacing:.5px;
@@ -3953,6 +4244,7 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 </style>
 </head>
 <body>
+{_render_portfolio_html(daily_portfolio)}
 <div class="header">
   <h1>📈 預突破掃描</h1>
   <div class="subtitle">{_esc(scan_date)} &nbsp;·&nbsp; 收盤掃描 &nbsp;·&nbsp; 共 {len(filtered)} 支</div>
