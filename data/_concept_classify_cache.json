@@ -1497,6 +1497,18 @@
     ],
     "3576": [],
     "6167": [],
-    "7792": []
+    "7792": [],
+    "5202": [],
+    "3466": [
+      "low_orbit_satellite",
+      "CPO_silicon_photonics"
+    ],
+    "8047": [
+      "AI_server_cooling",
+      "robotics_automation"
+    ],
+    "6419": [
+      "CPO_silicon_photonics"
+    ]
   }
 }
