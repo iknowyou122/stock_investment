@@ -186,6 +186,38 @@ class HoldingsRepository:
                 return h
         return None
 
+    def list_recent_closed(self, *, since: date | None = None) -> list[Holding]:
+        """Phase 4.50.5 — CLOSED holdings since the given date (default: 30 days).
+
+        Used by holdings_review.py for daily P&L recap and trigger-history
+        analysis (STOP_LOSS / TAKE_PROFIT / TIER_DROP / TIME_STOP counts).
+        """
+        if not self.available:
+            return []
+        try:
+            import psycopg2
+        except ImportError:
+            return []
+        if since is None:
+            since = date.today() - timedelta(days=30)
+        try:
+            with psycopg2.connect(self._db_url) as conn, conn.cursor() as cur:
+                cur.execute(
+                    """SELECT holding_id, ticker, entry_date, entry_price,
+                              suggested_pct, tier, stop_loss, take_profit,
+                              industry, concept_keys, entry_reason, status,
+                              close_date, close_price, close_reason,
+                              realised_pct, notes
+                       FROM simulated_holdings
+                       WHERE status = 'CLOSED' AND close_date >= %s
+                       ORDER BY close_date DESC, ticker""",
+                    (since,),
+                )
+                return [self._row_to_holding(r) for r in cur.fetchall()]
+        except Exception as exc:  # pragma: no cover
+            logger.warning("list_recent_closed failed: %s", exc)
+            return []
+
     def open_position(
         self,
         *,

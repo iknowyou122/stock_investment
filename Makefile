@@ -3,7 +3,7 @@ export PYTHONPATH
 PYTHON := .venv/bin/python
 _TODAY := $(shell date +%Y-%m-%d)
 
-.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune surge-backtest heat-scan heat-update theme-flow tight-base-bt tight-base-v2 rotation analyze growth brief
+.PHONY: plan report settle backtest backtest-compare factor-report optimize test setup migrate api install flow show bot-setup bot monitor surge surge-live surge-factor surge-tune surge-backtest heat-scan heat-update theme-flow tight-base-bt tight-base-v2 rotation analyze growth brief holdings-review
 
 DATE ?= $(shell date +%Y-%m-%d)
 LLM  ?=
@@ -300,3 +300,17 @@ monitor:
 		$(if $(DATE_TO),--date-to $(DATE_TO)) \
 		$(if $(EXPORT),--export $(EXPORT)) \
 		$(if $(filter 1,$(NO_FETCH)),--no-fetch)
+
+# ── 每日持倉復盤 (Phase 4.50.5) ──────────────────────────────────────────────
+# 用法:
+#   make holdings-review              # 復盤今天 (lookback 7 天)
+#   make holdings-review LOOKBACK=14  # 復盤最近 14 天
+#   make holdings-review NO_LLM=1     # 不用 LLM
+LOOKBACK  ?= 7
+NO_LLM    ?=
+
+holdings-review:
+	$(PYTHON) scripts/holdings_review.py \
+		$(if $(DATE),--date $(DATE)) \
+		--lookback $(LOOKBACK) \
+		$(if $(filter 1,$(NO_LLM)),--no-llm)

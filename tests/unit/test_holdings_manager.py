@@ -321,3 +321,159 @@ class TestProcessDay:
         assert dp.holdings[0].unrealised_pct == 0.0
         assert not dp.holdings[0].exit_decision.should_close
         assert repo.list_open() == [h]
+
+
+# ── Phase 4.50: capacity cap ────────────────────────────────────────────────
+
+
+class TestMaxOpenHoldings:
+    """MAX_OPEN_HOLDINGS prevents portfolio ballooning past 12 positions."""
+
+    def test_picks_exceeding_capacity_go_to_watchlist(self) -> None:
+        # 11 already held + 5 new picks → only 1 slot left, 4 go to watchlist
+        held = [
+            Holding(
+                holding_id=i, ticker=f"H{i:03d}",
+                entry_date=date(2026, 6, 16),
+                entry_price=100.0, suggested_pct=8.0, tier="B",
+                stop_loss=93.0, take_profit=115.0, industry="", concept_keys=(),
+                entry_reason="", status="OPEN",
+            )
+            for i in range(11)
+        ]
+        repo = _FakeRepo(held)
+        mgr = HoldingsManager(repository=repo)  # type: ignore[arg-type]
+        plan = AllocationPlan(
+            tiers={
+                "S": [], "B": [], "C": [],
+                "A": [
+                    TierRecommendation(ticker=f"NEW{i}", tier="A",
+                                       suggested_pct=15.0, reasoning="x",
+                                       rotation_score=70.0)
+                    for i in range(5)
+                ],
+            },
+            warnings=(), summary="", provider="t", snapshot_date="x",
+        )
+        prices = {f"NEW{i}": 100.0 for i in range(5)}
+        prices.update({f"H{i:03d}": 100.0 for i in range(11)})
+        dp = mgr.process_day(
+            today=date(2026, 6, 16), plan=plan,
+            prices_today=prices, commit=False,
+        )
+        assert len(dp.new_buys) == 1, "Only 1 slot should remain (11 held + 1 = 12 cap)"
+        assert len(dp.watchlist_picks) == 4
+        # Watchlist tickers are the leftover NEW1..NEW4
+        wl_tickers = {b.ticker for b in dp.watchlist_picks}
+        assert len(wl_tickers) == 4
+
+    def test_full_portfolio_all_picks_to_watchlist(self) -> None:
+        # 12 already held = at cap, all new picks go to watchlist
+        held = [
+            Holding(
+                holding_id=i, ticker=f"H{i:03d}",
+                entry_date=date(2026, 6, 16),
+                entry_price=100.0, suggested_pct=8.0, tier="B",
+                stop_loss=93.0, take_profit=115.0, industry="", concept_keys=(),
+                entry_reason="", status="OPEN",
+            )
+            for i in range(12)
+        ]
+        repo = _FakeRepo(held)
+        mgr = HoldingsManager(repository=repo)  # type: ignore[arg-type]
+        plan = AllocationPlan(
+            tiers={
+                "S": [], "B": [], "C": [],
+                "A": [
+                    TierRecommendation(ticker="NEW1", tier="A",
+                                       suggested_pct=15.0, reasoning="x",
+                                       rotation_score=70.0),
+                ],
+            },
+            warnings=(), summary="", provider="t", snapshot_date="x",
+        )
+        prices = {"NEW1": 100.0}
+        prices.update({f"H{i:03d}": 100.0 for i in range(12)})
+        dp = mgr.process_day(
+            today=date(2026, 6, 16), plan=plan,
+            prices_today=prices, commit=False,
+        )
+        assert len(dp.new_buys) == 0
+        assert len(dp.watchlist_picks) == 1
+
+    def test_watchlist_not_written_to_db(self) -> None:
+        # 12 held, 1 new pick → goes to watchlist; repo should not have it
+        held = [
+            Holding(
+                holding_id=i, ticker=f"H{i:03d}",
+                entry_date=date(2026, 6, 16),
+                entry_price=100.0, suggested_pct=8.0, tier="B",
+                stop_loss=93.0, take_profit=115.0, industry="", concept_keys=(),
+                entry_reason="", status="OPEN",
+            )
+            for i in range(12)
+        ]
+        repo = _FakeRepo(held)
+        mgr = HoldingsManager(repository=repo)  # type: ignore[arg-type]
+        plan = AllocationPlan(
+            tiers={
+                "S": [], "B": [], "C": [],
+                "A": [TierRecommendation(ticker="NEW1", tier="A",
+                                          suggested_pct=15.0, reasoning="x",
+                                          rotation_score=70.0)],
+            },
+            warnings=(), summary="", provider="t", snapshot_date="x",
+        )
+        prices = {"NEW1": 100.0}
+        prices.update({f"H{i:03d}": 100.0 for i in range(12)})
+        dp = mgr.process_day(
+            today=date(2026, 6, 16), plan=plan,
+            prices_today=prices, commit=True,
+        )
+        # Repo should still only have the 12 original held positions
+        assert len(repo.list_open()) == 12
+        assert "NEW1" not in {h.ticker for h in repo.list_open()}
+
+    def test_exit_frees_capacity_in_same_run(self) -> None:
+        """When today closes a position via STOP_LOSS, freed slot opens for a new buy."""
+        # 12 held; one will trigger STOP_LOSS (entry 100, today 80 = -20%)
+        held = []
+        for i in range(11):
+            held.append(Holding(
+                holding_id=i, ticker=f"H{i:03d}",
+                entry_date=date(2026, 6, 16),
+                entry_price=100.0, suggested_pct=8.0, tier="B",
+                stop_loss=93.0, take_profit=115.0, industry="", concept_keys=(),
+                entry_reason="", status="OPEN",
+            ))
+        # 12th will exit
+        held.append(Holding(
+            holding_id=99, ticker="EXIT",
+            entry_date=date(2026, 6, 16),
+            entry_price=100.0, suggested_pct=8.0, tier="B",
+            stop_loss=93.0, take_profit=115.0, industry="", concept_keys=(),
+            entry_reason="", status="OPEN",
+        ))
+        repo = _FakeRepo(held)
+        mgr = HoldingsManager(repository=repo)  # type: ignore[arg-type]
+        plan = AllocationPlan(
+            tiers={
+                "S": [], "B": [], "C": [],
+                "A": [TierRecommendation(ticker="NEW1", tier="A",
+                                          suggested_pct=15.0, reasoning="x",
+                                          rotation_score=70.0)],
+            },
+            warnings=(), summary="", provider="t", snapshot_date="x",
+        )
+        prices = {"EXIT": 80.0, "NEW1": 100.0}  # EXIT triggers stop loss
+        prices.update({f"H{i:03d}": 105.0 for i in range(11)})
+        dp = mgr.process_day(
+            today=date(2026, 6, 17), plan=plan,
+            prices_today=prices, commit=True,
+        )
+        # EXIT closed, so capacity = 11 remaining → 1 slot free → NEW1 entered
+        assert len(dp.pending_exits) == 1
+        assert dp.pending_exits[0].holding.ticker == "EXIT"
+        assert len(dp.new_buys) == 1
+        assert dp.new_buys[0].ticker == "NEW1"
+        assert len(dp.watchlist_picks) == 0

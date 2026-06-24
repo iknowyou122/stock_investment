@@ -121,31 +121,20 @@ class AllocationAdvisor:
         plan = self._plan_from_payload(parsed, llm_ctx, self._llm.name)
         if not truncated:
             return plan
-        # Leftover signals (past the LLM cap) get C tier with 0% — they are
-        # observational only. They MUST NOT contribute to the invested total,
-        # otherwise the user sees totals like "invested 1009%".
-        merged: dict[str, list[TierRecommendation]] = {t: list(plan.tiers.get(t, [])) for t in TIER_ORDER}
-        for sig in leftover:
-            tk = str(sig.get("ticker", ""))
-            if not tk:
-                continue
-            metrics = context.rotation_metrics.get(tk)
-            merged["C"].append(TierRecommendation(
-                ticker=tk,
-                tier="C",
-                suggested_pct=0.0,
-                reasoning=f"未進 LLM Top {self.MAX_LLM_CANDIDATES}，僅觀察",
-                rotation_score=metrics.rotation_score if metrics else 50.0,
-            ))
-        for t in TIER_ORDER:
-            merged[t].sort(key=lambda r: (-r.suggested_pct, -r.rotation_score))
-        return AllocationPlan(
-            tiers=merged,
-            warnings=plan.warnings,
-            summary=plan.summary + f"（LLM 處理 top {len(llm_signals)}；其餘 {len(leftover)} 支歸 C 觀察）",
-            provider=plan.provider,
-            snapshot_date=plan.snapshot_date,
-        )
+        # Phase 4.50 — leftover (past the LLM cap) are NOT written into the
+        # plan. Previously we appended them as tier C @ 0% but downstream
+        # consumers (HoldingsManager, DB recorder) ignored the 0% guard and
+        # ballooned positions to 200+ rows. Just drop them — the watchlist
+        # in HoldingsManager already surfaces overflow picks.
+        if leftover:
+            return AllocationPlan(
+                tiers=plan.tiers,
+                warnings=plan.warnings,
+                summary=plan.summary + f"（LLM 處理 top {len(llm_signals)}；其餘 {len(leftover)} 支跳過）",
+                provider=plan.provider,
+                snapshot_date=plan.snapshot_date,
+            )
+        return plan
 
     # --- prompt construction --------------------------------------------
 
@@ -282,18 +271,11 @@ class AllocationAdvisor:
             ))
             seen.add(tk)
 
-        # Append any signals the LLM forgot at C tier
-        for sig in context.signals:
-            tk = str(sig.get("ticker", ""))
-            if tk and tk not in seen:
-                metrics = context.rotation_metrics.get(tk)
-                tiers["C"].append(TierRecommendation(
-                    ticker=tk,
-                    tier="C",
-                    suggested_pct=0.0,
-                    reasoning="LLM 未涵蓋，預設為觀察",
-                    rotation_score=metrics.rotation_score if metrics else 50.0,
-                ))
+        # Phase 4.50 — signals the LLM forgot are NOT backfilled at C 0%.
+        # That backfill historically caused 100+ rows of "tier C 0%" to leak
+        # into the plan and downstream consumers treated them as picks.
+        # If the user wants to see "what was scanned but not picked", that
+        # belongs in a separate watchlist UI, not the allocation plan.
 
         for t in TIER_ORDER:
             tiers[t].sort(key=lambda r: (-r.suggested_pct, -r.rotation_score))
@@ -320,11 +302,28 @@ class AllocationAdvisor:
     # --- fallback when LLM unavailable ----------------------------------
 
     def _fallback_plan(self, context: AllocationContext, reason: str) -> AllocationPlan:
+        """Phase 4.50 — cap fallback to top FALLBACK_TOP_N picks by confidence.
+
+        Before: processed ALL signals → 200-300 fake A/B-tier recs written
+        to DB whenever LLM failed. Now: take only the top-N by confidence,
+        skip the rest (downstream HoldingsManager will surface them as
+        watchlist if needed).
+        """
+        FALLBACK_TOP_N = 25
+        # Take top-N by confidence so fallback can never balloon
+        ranked = sorted(
+            context.signals,
+            key=lambda s: -float(s.get("confidence", 0) or 0),
+        )[:FALLBACK_TOP_N]
+
         tiers: dict[str, list[TierRecommendation]] = {t: [] for t in TIER_ORDER}
-        for sig in context.signals:
+        for sig in ranked:
             tk = str(sig.get("ticker", ""))
             metrics = context.rotation_metrics.get(tk)
             tier, pct = self._rule_based_tier(sig, metrics)
+            # Skip if rule says 0% (C-tier observational) — don't pollute DB
+            if pct <= 0:
+                continue
             tiers[tier].append(TierRecommendation(
                 ticker=tk,
                 tier=tier,
@@ -337,7 +336,7 @@ class AllocationAdvisor:
         return AllocationPlan(
             tiers=tiers,
             warnings=context.concentration.warnings,
-            summary=self._auto_summary(tiers) + f"（LLM 不可用，採用規則式分級：{reason}）",
+            summary=self._auto_summary(tiers) + f"（LLM 不可用，規則式 top {FALLBACK_TOP_N}：{reason}）",
             provider=f"fallback:{reason}",
             snapshot_date=context.snapshot_date,
         )

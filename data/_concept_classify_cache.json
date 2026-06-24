@@ -1509,6 +1509,36 @@
     ],
     "6419": [
       "CPO_silicon_photonics"
+    ],
+    "6510": [
+      "CoWoS_advanced_packaging"
+    ],
+    "3520": [],
+    "3605": [],
+    "7734": [
+      "AI_GPU_supply",
+      "CoWoS_advanced_packaging"
+    ],
+    "4513": [
+      "robotics_automation"
+    ],
+    "6928": [
+      "AI_GPU_supply",
+      "AI_server_cooling"
+    ],
+    "6142": [
+      "low_orbit_satellite"
+    ],
+    "3296": [
+      "PCB_substrate"
+    ],
+    "7744": [
+      "CPO_silicon_photonics"
+    ],
+    "5340": [],
+    "6532": [
+      "CoWoS_advanced_packaging",
+      "HBM_memory"
     ]
   }
 }

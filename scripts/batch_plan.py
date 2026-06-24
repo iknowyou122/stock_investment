@@ -64,11 +64,17 @@ from taiwan_stock_agent.agents.holdings_manager import (
 )
 from taiwan_stock_agent.infrastructure.holdings_repository import HoldingsRepository
 from taiwan_stock_agent.agents.strategist_agent import StrategistAgent
+from taiwan_stock_agent.domain.budget_allocator import (
+    BudgetAllocator,
+    PortfolioAllocation,
+    PositionPlan,
+)
 from taiwan_stock_agent.domain.capital_allocator import (
     CapitalAllocator,
     TIER_COLORS,
     TIER_ORDER,
 )
+from taiwan_stock_agent.domain.refined_picks import RefinedPickFilter
 from taiwan_stock_agent.domain.sector_flow import (
     ConceptFlowAnalyzer,
     SectorFlowAnalyzer,
@@ -2193,6 +2199,15 @@ def run_batch(
 ) -> None:
     _print_yesterday_results(analysis_date)
 
+    # Phase 4.50.5 — 持倉復盤 (run BEFORE Phase 1 so user sees "yesterday's
+    # holdings P&L + risk warnings" before today's scan results)
+    try:
+        from scripts.holdings_review import run_review as _run_holdings_review
+        _run_holdings_review(today=analysis_date, lookback_days=7,
+                              budget_twd=3_000_000, use_llm=True)
+    except Exception as exc:
+        logger.warning("Holdings review skipped: %s", exc)
+
     llm_label = getattr(llm_provider, "name", None) or "（無 LLM）"
     label_status = (
         f"[green]{len(label_repo.list_all())} 筆標籤[/green]"
@@ -2413,6 +2428,7 @@ def run_batch(
 
     # ── 持倉模擬 (HoldingsManager) ─────────────────────────────────────────────
     daily_portfolio = None
+    budget_allocation = None
     if allocation_plan is not None:
         try:
             daily_portfolio = _build_daily_portfolio(
@@ -2427,6 +2443,19 @@ def run_batch(
         except Exception as exc:
             logger.warning("Portfolio simulation failed: %s", exc)
 
+        # Phase 4.50 — NT$3M actual capital allocation
+        try:
+            budget_allocation = _build_budget_allocation(
+                results=results,
+                industry_map=industry_map or {},
+                name_map=name_map or {},
+                analysis_date=analysis_date,
+            )
+            if budget_allocation is not None:
+                _print_budget_panel(budget_allocation)
+        except Exception as exc:
+            logger.warning("Budget allocation failed: %s", exc)
+
     html_path = (Path(__file__).resolve().parents[1] / "data" / "scans" / f"scan_{analysis_date}.html")
     alloc_path = (Path(__file__).resolve().parents[1] / "data" / "scans" / f"allocation_{analysis_date}.html")
     _generate_plan_html(results, str(analysis_date), html_path,
@@ -2438,7 +2467,8 @@ def run_batch(
                         finmind_client=_shared_finmind,
                         allocation_plan=allocation_plan,
                         allocation_html_path=alloc_path,
-                        daily_portfolio=daily_portfolio)
+                        daily_portfolio=daily_portfolio,
+                        budget_allocation=budget_allocation)
     # Write standalone allocation HTML (separate tab)
     if allocation_plan is not None:
         _write_allocation_standalone_html(
@@ -2546,6 +2576,139 @@ def _build_daily_portfolio(
         concepts_by_ticker=concepts_by_ticker,
         commit=True,
     )
+
+
+def _build_budget_allocation(
+    *,
+    results: list[dict],
+    industry_map: dict[str, str],
+    name_map: dict[str, str],
+    analysis_date: date,
+) -> "PortfolioAllocation | None":
+    """Phase 4.50: distil scan results → top-N refined picks → NT$3M plan.
+
+    The output is a `PortfolioAllocation` with concrete share counts and
+    NT$ amounts per position, ready for HTML/terminal display.
+    """
+    from taiwan_stock_agent.infrastructure.holdings_repository import HoldingsRepository
+
+    # Load rotation + concept context (best-effort)
+    from pathlib import Path as _P
+    import json as _j
+    heat_dir = _P(__file__).resolve().parents[1] / "data" / "market_heat"
+    rotation_signal = {}
+    try:
+        rotation_signal = _j.loads((heat_dir / "rotation_signal.json").read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    concepts_path = _P(__file__).resolve().parents[1] / "config" / "concepts.json"
+    concept_membership: dict[str, list[str]] = {}
+    hot_concepts: set[str] = set()
+    try:
+        cfg = _j.loads(concepts_path.read_text(encoding="utf-8"))
+        for k, body in (cfg.get("concepts") or {}).items():
+            for t in body.get("tickers") or []:
+                concept_membership.setdefault(str(t), []).append(k)
+        # Hot concepts come from latest concept_heat snapshot
+        ch_files = sorted(heat_dir.glob("concept_heat_*.json"))
+        if ch_files:
+            ch = _j.loads(ch_files[-1].read_text(encoding="utf-8"))
+            for k, v in (ch.get("concepts") or {}).items():
+                if isinstance(v, dict) and float(v.get("rank_pct", 0) or 0) >= 70:
+                    hot_concepts.add(k)
+    except Exception:
+        pass
+
+    repo = HoldingsRepository()
+    held = repo.list_open() if repo.available else []
+    held_tickers = {h.ticker for h in held}
+
+    refined = RefinedPickFilter().refine(
+        results,
+        industry_map=industry_map,
+        rotation_signal=rotation_signal,
+        concept_membership=concept_membership,
+        hot_concepts=hot_concepts,
+        held_tickers=held_tickers,
+        name_map=name_map,
+        top_n=25,
+    )
+    if not refined and not held:
+        return None
+
+    return BudgetAllocator().allocate(
+        refined_picks=refined,
+        held_positions=held,
+        today=analysis_date,
+    )
+
+
+def _print_budget_panel(allocation: "PortfolioAllocation") -> None:
+    """Phase 4.50 — terminal table for NT$3M actual capital allocation."""
+    _console.print()
+    _console.print(Panel(
+        Text(f"💰 NT${allocation.budget_twd:,} 預算配置（精煉版）", style="bold cyan"),
+        border_style="cyan",
+        expand=False,
+    ))
+    # Stats line
+    _console.print(
+        f"  📊 持倉 {len(allocation.held_positions)} 支  "
+        f"｜ 新買 {len(allocation.new_buy_positions)} 支  "
+        f"｜ 觀察 {len(allocation.skipped_picks)} 支  "
+        f"｜ 持倉占用 NT${allocation.held_value_twd:,}  "
+        f"｜ 新買投入 NT${allocation.new_buys_twd:,}  "
+        f"｜ 現金 NT${allocation.cash_reserve_twd:,} ({allocation.cash_pct}%)"
+    )
+    if not allocation.positions:
+        _console.print("  [dim]無持倉、無新買[/dim]")
+        return
+
+    # Table
+    tbl = Table(box=box.ROUNDED, padding=(0, 1))
+    tbl.add_column("Tier")
+    tbl.add_column("代號")
+    tbl.add_column("名稱")
+    tbl.add_column("產業", style="dim")
+    tbl.add_column("狀態")
+    tbl.add_column("股數", justify="right")
+    tbl.add_column("Lots/零股", justify="right", style="dim")
+    tbl.add_column("進場價", justify="right")
+    tbl.add_column("投入 NT$", justify="right", style="bold")
+    tbl.add_column("停損", justify="right", style="yellow")
+    tbl.add_column("停利", justify="right", style="green")
+
+    for p in allocation.positions:
+        tier_color = {"S": "gold1", "A": "cyan", "B": "yellow"}.get(p.tier, "white")
+        status = "[blue]📦 持倉[/blue]" if p.is_held else "[green]🆕 新買[/green]"
+        lots_str = f"{p.lots}張+{p.odd_shares}零" if p.odd_shares else f"{p.lots}張"
+        if p.lots == 0 and p.odd_shares > 0:
+            lots_str = f"{p.odd_shares}零股"
+        tbl.add_row(
+            f"[{tier_color}]{p.tier}[/{tier_color}]",
+            p.ticker,
+            p.name[:10],
+            p.sector[:8],
+            status,
+            f"{p.shares:,}",
+            lots_str,
+            f"{p.entry_price:,.1f}",
+            f"NT${p.actual_twd:,}",
+            f"{p.stop_loss:,.1f}",
+            f"{p.take_profit:,.1f}",
+        )
+    _console.print(tbl)
+
+    # Watchlist (skipped)
+    if allocation.skipped_picks:
+        skip_str = ", ".join(
+            f"{p.ticker}({p.name})" for p in allocation.skipped_picks[:10]
+        )
+        _console.print(
+            f"\n  [dim]📋 觀察清單 (capacity 滿/預算用罄): {skip_str}"
+            + (f" ... +{len(allocation.skipped_picks)-10}" if len(allocation.skipped_picks) > 10 else "")
+            + "[/dim]"
+        )
 
 
 def _print_portfolio_panel(dp) -> None:
@@ -3306,6 +3469,84 @@ def _render_portfolio_html(dp) -> str:
     )
 
 
+def _render_budget_allocation_html(allocation) -> str:
+    """Phase 4.50 — NT$3M budget allocation table at the top of scan HTML.
+
+    Renders a single table showing every position with concrete share count,
+    NT$ amount, stop/take prices, and held vs new-buy status. Replaces the
+    old percentage-based abstraction with actionable numbers.
+    """
+    if allocation is None:
+        return ""
+    from html import escape as _esc
+
+    def _format_lots(lots: int, odd: int) -> str:
+        if lots > 0 and odd > 0:
+            return f"{lots}張 + {odd}零"
+        if lots > 0:
+            return f"{lots}張"
+        if odd > 0:
+            return f"{odd}零股"
+        return "—"
+
+    rows = []
+    for p in allocation.positions:
+        tier_bg = {"S": "#ffd700", "A": "#58a6ff", "B": "#f0b429"}.get(p.tier, "#6e7681")
+        tier_fg = "#0d1117" if p.tier in ("S", "A", "B") else "#fff"
+        status_badge = (
+            '<span class="bg-status bg-status-held">📦 持倉</span>'
+            if p.is_held else
+            '<span class="bg-status bg-status-buy">🆕 新買</span>'
+        )
+        rows.append(
+            f'<tr>'
+            f'  <td class="bg-tier" style="background:{tier_bg};color:{tier_fg}">{p.tier}</td>'
+            f'  <td><b>{_esc(p.ticker)}</b><br><span class="bg-name">{_esc(p.name)}</span></td>'
+            f'  <td class="bg-sector">{_esc(p.sector)}</td>'
+            f'  <td>{status_badge}</td>'
+            f'  <td class="bg-num">{p.shares:,}</td>'
+            f'  <td class="bg-lots">{_esc(_format_lots(p.lots, p.odd_shares))}</td>'
+            f'  <td class="bg-num">{p.entry_price:,.1f}</td>'
+            f'  <td class="bg-twd"><b>NT${p.actual_twd:,}</b></td>'
+            f'  <td class="bg-stop">{p.stop_loss:,.1f}</td>'
+            f'  <td class="bg-tp">{p.take_profit:,.1f}</td>'
+            f'</tr>'
+        )
+
+    skipped_rows = ""
+    if allocation.skipped_picks:
+        items = ", ".join(
+            f"{_esc(p.ticker)} ({_esc(p.name)})"
+            for p in allocation.skipped_picks[:15]
+        )
+        more = f" ... +{len(allocation.skipped_picks)-15}" if len(allocation.skipped_picks) > 15 else ""
+        skipped_rows = f'<div class="bg-watch">📋 觀察清單（容量/預算用罄）: {items}{more}</div>'
+
+    invested_pct = round(allocation.total_invested_twd / allocation.budget_twd * 100, 1) if allocation.budget_twd > 0 else 0
+
+    return (
+        '<div class="budget-panel">'
+        f'  <div class="budget-head">💰 NT${allocation.budget_twd:,} 預算配置 · {allocation.today}</div>'
+        f'  <div class="budget-stats">'
+        f'    <span class="bs-stat">📦 持倉 <b>{len(allocation.held_positions)}</b></span>'
+        f'    <span class="bs-stat">🆕 新買 <b>{len(allocation.new_buy_positions)}</b></span>'
+        f'    <span class="bs-stat">📋 觀察 <b>{len(allocation.skipped_picks)}</b></span>'
+        f'    <span class="bs-stat">投入 <b>NT${allocation.total_invested_twd:,}</b> ({invested_pct}%)</span>'
+        f'    <span class="bs-stat">現金 <b style="color:#3fb950">NT${allocation.cash_reserve_twd:,}</b> ({allocation.cash_pct}%)</span>'
+        f'  </div>'
+        f'  <table class="budget-table">'
+        f'    <thead><tr>'
+        f'      <th>Tier</th><th>標的</th><th>產業</th><th>狀態</th>'
+        f'      <th>股數</th><th>張/零</th><th>進場價</th><th>投入 NT$</th>'
+        f'      <th>停損</th><th>停利</th>'
+        f'    </tr></thead>'
+        f'    <tbody>{"".join(rows)}</tbody>'
+        f'  </table>'
+        f'  {skipped_rows}'
+        '</div>'
+    )
+
+
 def _render_allocation_link_card(plan, alloc_path) -> str:
     """Compact summary card in main scan HTML that links to the standalone tab."""
     from html import escape as _esc
@@ -3494,6 +3735,7 @@ def _generate_plan_html(
     allocation_plan=None,
     allocation_html_path: Path | None = None,
     daily_portfolio=None,
+    budget_allocation=None,
 ) -> None:
     """Dark-themed HTML report for plan scan results (LONG + actionable WATCH only)."""
     import json as _json
@@ -4141,6 +4383,38 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 .pf-tag-exit{{background:#f85149;color:#fff}}
 .pf-reason-text{{color:#8b949e;font-size:10px}}
 
+/* ── Phase 4.50 — NT$3M budget allocation panel ─────────────────────── */
+.budget-panel{{background:linear-gradient(180deg,#0a1f2e,#0d1117);padding:24px 28px;
+  border-top:1px solid #21262d;border-bottom:1px solid #21262d}}
+.budget-head{{font-size:18px;font-weight:800;color:#e6edf3;margin-bottom:10px}}
+.budget-stats{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;font-size:13px;color:#c9d1d9}}
+.bs-stat{{background:rgba(255,255,255,.04);padding:5px 12px;border-radius:14px;
+  border:1px solid rgba(255,255,255,.07)}}
+.bs-stat b{{color:#e6edf3;font-size:14px;margin-left:3px}}
+.budget-table{{width:100%;border-collapse:collapse;font-size:12px;
+  background:#161b22;border:1px solid #21262d;border-radius:8px;overflow:hidden}}
+.budget-table thead th{{background:#1c2333;color:#8b949e;padding:8px 10px;text-align:left;
+  font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;
+  border-bottom:1px solid #21262d}}
+.budget-table tbody td{{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.04);
+  color:#c9d1d9}}
+.budget-table tbody tr:hover{{background:rgba(255,255,255,.03)}}
+.bg-tier{{font-weight:800;text-align:center;padding:6px 8px !important;
+  font-size:13px}}
+.bg-name{{font-size:10px;color:#8b949e}}
+.bg-sector{{color:#8b949e;font-size:11px}}
+.bg-num{{text-align:right;font-variant-numeric:tabular-nums;color:#e6edf3}}
+.bg-lots{{color:#8b949e;font-size:11px;text-align:right}}
+.bg-twd{{text-align:right;font-variant-numeric:tabular-nums;color:#ff6b6b}}
+.bg-stop{{text-align:right;color:#f0b429;font-variant-numeric:tabular-nums;font-size:11px}}
+.bg-tp{{text-align:right;color:#3fb950;font-variant-numeric:tabular-nums;font-size:11px}}
+.bg-status{{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;
+  font-weight:700;white-space:nowrap}}
+.bg-status-held{{background:rgba(56,139,253,.15);color:#58a6ff;border:1px solid rgba(56,139,253,.3)}}
+.bg-status-buy{{background:rgba(63,185,80,.15);color:#3fb950;border:1px solid rgba(63,185,80,.3)}}
+.bg-watch{{margin-top:14px;padding:10px 14px;background:rgba(240,180,41,.06);
+  border-left:3px solid #f0b429;border-radius:0 6px 6px 0;font-size:11px;color:#c9d1d9}}
+
 .sf-panel{{background:linear-gradient(180deg,#0a1320,#0d1117);border-top:1px solid #21262d;
   border-bottom:1px solid #21262d;padding:18px 28px}}
 .sf-title{{font-size:17px;font-weight:700;color:#e6edf3;margin-bottom:2px}}
@@ -4245,6 +4519,7 @@ body{{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemF
 </head>
 <body>
 {_render_portfolio_html(daily_portfolio)}
+{_render_budget_allocation_html(budget_allocation)}
 <div class="header">
   <h1>📈 預突破掃描</h1>
   <div class="subtitle">{_esc(scan_date)} &nbsp;·&nbsp; 收盤掃描 &nbsp;·&nbsp; 共 {len(filtered)} 支</div>

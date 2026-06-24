@@ -445,3 +445,18 @@ class AllocationPlan:
     def all_recommendations(self) -> Iterable[TierRecommendation]:
         for t in TIER_ORDER:
             yield from self.tiers.get(t, [])
+
+    @property
+    def actionable_recommendations(self) -> list[TierRecommendation]:
+        """Tier S/A/B with suggested_pct > 0 — safe to write to DB.
+
+        Phase 4.50: filters out tier C and 0%-allocations so downstream code
+        (HoldingsManager.process_day) cannot accidentally write 200+ rows
+        when LLM falls back.
+        """
+        out: list[TierRecommendation] = []
+        for t in ("S", "A", "B"):
+            for rec in self.tiers.get(t, []):
+                if rec.suggested_pct > 0:
+                    out.append(rec)
+        return out

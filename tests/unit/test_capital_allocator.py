@@ -244,13 +244,19 @@ class TestAdvisorFallback:
         assert all_recs[0].tier == "S"
         assert all_recs[0].suggested_pct >= 20.0
 
-    def test_no_llm_cooling_industry_goes_to_c(self, allocator: CapitalAllocator) -> None:
+    def test_no_llm_cooling_industry_dropped_phase_4_50(self, allocator: CapitalAllocator) -> None:
+        """Phase 4.50: cooling-industry 0% picks are dropped from fallback plan.
+
+        Previously these polluted the plan with tier C 0% rows that downstream
+        consumers (HoldingsManager, DB) didn't filter, causing 200+ row writes.
+        New behavior: only emit picks with suggested_pct > 0.
+        """
         signals = [{"ticker": "1301", "action": "LONG", "confidence": 70}]
         ctx = allocator.assess(signals, {"1301": "塑膠工業"}, snapshot_date="2026-06-04")
         plan = AllocationAdvisor(llm=None).recommend(ctx)
-        rec = next(iter(plan.all_recommendations()))
-        assert rec.tier == "C"
-        assert rec.suggested_pct == 0.0
+        # Cooling-industry rule_based_tier returns 0% → must be filtered out
+        assert list(plan.all_recommendations()) == []
+        assert plan.actionable_recommendations == []
 
     def test_no_llm_watch_with_tailwind_goes_to_b(self, allocator: CapitalAllocator) -> None:
         signals = [{"ticker": "3008", "action": "WATCH", "confidence": 67}]
@@ -303,14 +309,20 @@ class TestAdvisorLLMParsing:
         assert plan.provider == "fallback:parse_error"
         assert len(list(plan.all_recommendations())) == 1
 
-    def test_missing_ticker_filled_at_c_tier(self, allocator: CapitalAllocator) -> None:
+    def test_missing_ticker_dropped_phase_4_50(self, allocator: CapitalAllocator) -> None:
+        """Phase 4.50: tickers the LLM forgot are NOT backfilled at C 0%.
+
+        Previously these polluted the plan and downstream consumers wrote
+        200+ rows to DB. Now only tickers the LLM explicitly assigned a
+        tier+pct survive.
+        """
         signals = [
             {"ticker": "2330", "action": "LONG", "confidence": 80},
             {"ticker": "1301", "action": "LONG", "confidence": 65},
         ]
         ind = {"2330": "電腦及週邊設備業", "1301": "塑膠工業"}
         ctx = allocator.assess(signals, ind, snapshot_date="2026-06-04")
-        # LLM only returns 2330
+        # LLM only returns 2330; 1301 should NOT be backfilled at C 0%
         fake = _FakeLLM(json.dumps({
             "summary": "only 2330",
             "recommendations": [
@@ -319,9 +331,9 @@ class TestAdvisorLLMParsing:
         }, ensure_ascii=False))
         plan = AllocationAdvisor(llm=fake).recommend(ctx)
         tickers = {r.ticker for r in plan.all_recommendations()}
-        assert tickers == {"2330", "1301"}
-        c_recs = plan.tiers["C"]
-        assert any(r.ticker == "1301" for r in c_recs)
+        assert tickers == {"2330"}
+        # 1301 has zero entries in any tier (LLM forgot it; we don't backfill)
+        assert all(r.ticker != "1301" for r in plan.all_recommendations())
 
     def test_pct_clamped_to_tier_cap(self, allocator: CapitalAllocator) -> None:
         signals = [{"ticker": "1301", "action": "WATCH", "confidence": 60}]
@@ -349,6 +361,54 @@ class TestAdvisorLLMParsing:
         plan = AllocationAdvisor(llm=fake).recommend(ctx)
         rec = next(iter(plan.all_recommendations()))
         assert rec.tier == "C"
+
+
+class TestPhase450FallbackCap:
+    """Phase 4.50 — fallback must never balloon to 200+ DB writes."""
+
+    def test_fallback_capped_at_25_picks(self, allocator: CapitalAllocator) -> None:
+        # 100 signals, no LLM → fallback should emit at most 25 (excluding 0%)
+        signals = [
+            {"ticker": f"{1000+i:04d}", "action": "LONG", "confidence": 90 - i % 30}
+            for i in range(100)
+        ]
+        ind = {s["ticker"]: "電腦及週邊設備業" for s in signals}
+        ctx = allocator.assess(signals, ind, snapshot_date="2026-06-04")
+        plan = AllocationAdvisor(llm=None).recommend(ctx)
+        # All emitted recs must come from top-25 by confidence
+        emitted = list(plan.all_recommendations())
+        assert len(emitted) <= 25
+
+    def test_fallback_skips_zero_pct_picks(self, allocator: CapitalAllocator) -> None:
+        # Cooling industry → rule gives 0% → must be dropped
+        signals = [
+            {"ticker": "1301", "action": "LONG", "confidence": 70},  # cooling → 0%
+            {"ticker": "2330", "action": "LONG", "confidence": 80},  # leader+HOT → S
+        ]
+        ind = {"1301": "塑膠工業", "2330": "電腦及週邊設備業"}
+        ctx = allocator.assess(signals, ind, snapshot_date="2026-06-04")
+        plan = AllocationAdvisor(llm=None).recommend(ctx)
+        # 1301 dropped (0%), only 2330 survives
+        emitted = [r.ticker for r in plan.all_recommendations()]
+        assert "1301" not in emitted
+        assert "2330" in emitted
+
+    def test_actionable_recommendations_excludes_c_and_zero_pct(
+        self, allocator: CapitalAllocator
+    ) -> None:
+        signals = [{"ticker": "2330", "action": "LONG", "confidence": 80}]
+        ctx = allocator.assess(signals, {"2330": "電腦及週邊設備業"}, snapshot_date="2026-06-04")
+        # LLM returns mix of tiers including C 0%
+        fake = _FakeLLM(json.dumps({
+            "summary": "x",
+            "recommendations": [
+                {"ticker": "2330", "tier": "S", "suggested_pct": 25.0, "reasoning": "good"},
+            ],
+        }, ensure_ascii=False))
+        plan = AllocationAdvisor(llm=fake).recommend(ctx)
+        actionable = plan.actionable_recommendations
+        assert all(r.tier in ("S", "A", "B") for r in actionable)
+        assert all(r.suggested_pct > 0 for r in actionable)
 
 
 class TestPlanOutputStructure:

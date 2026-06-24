@@ -79,8 +79,9 @@ class DailyPortfolio:
     today: date
     holdings: tuple[HoldingSnapshot, ...]        # all OPEN at start of day
     pending_exits: tuple[HoldingSnapshot, ...]   # subset that should close today
-    new_buys: tuple[NewBuy, ...]                 # fresh tier S/A/B not held
+    new_buys: tuple[NewBuy, ...]                 # fresh tier S/A/B that fit within MAX_OPEN
     skipped_recs: tuple[NewBuy, ...]             # tier C-tier-with-pct fresh recs
+    watchlist_picks: tuple[NewBuy, ...] = ()     # Phase 4.50 — S/A/B picks denied due to capacity cap
 
     @property
     def holding_count(self) -> int:
@@ -114,15 +115,25 @@ class HoldingsManager:
     (`AllocationAdvisor` handles LLM allocation tier).
     """
 
+    # Phase 4.50 — concentration cap. When held + new_buys would exceed this,
+    # excess picks go to watchlist (informational) rather than open new
+    # positions. Prevents the dashboard from ballooning past actionable size.
+    MAX_OPEN_HOLDINGS = 12
+
     def __init__(
         self,
         repository: Optional[HoldingsRepository] = None,
         stop_loss_pct: float = DEFAULT_STOP_LOSS_PCT,
         take_profit_pct: float = DEFAULT_TAKE_PROFIT_PCT,
+        max_open_holdings: int | None = None,
     ) -> None:
         self._repo = repository or HoldingsRepository()
         self._stop_loss_pct = stop_loss_pct
         self._take_profit_pct = take_profit_pct
+        self._max_open_holdings = (
+            max_open_holdings if max_open_holdings is not None
+            else self.MAX_OPEN_HOLDINGS
+        )
 
     # --- public API ----------------------------------------------------
 
@@ -205,7 +216,18 @@ class HoldingsManager:
                     )
 
         # ── Identify new buys (fresh tier S/A/B not held) ───────────
+        # Phase 4.50: cap concurrent positions at MAX_OPEN_HOLDINGS. Picks
+        # past the cap go to `watchlist` (informational, no DB write).
+        # `open_holdings` already counts BEFORE today's closures because
+        # closures happen above and we want capacity to reflect post-exit
+        # state — so re-derive remaining count from snapshots.
+        remaining_open = sum(
+            1 for s in snapshots if not s.exit_decision.should_close
+        )
+        capacity = max(0, self._max_open_holdings - remaining_open)
+
         new_buys: list[NewBuy] = []
+        watchlist: list[NewBuy] = []
         skipped: list[NewBuy] = []
         for tier in ("S", "A", "B"):
             for rec in plan.tiers.get(tier, []):
@@ -229,20 +251,25 @@ class HoldingsManager:
                     concept_keys=concepts,
                     reasoning=rec.reasoning,
                 )
-                new_buys.append(buy)
-                if commit and self._repo.available:
-                    self._repo.open_position(
-                        ticker=rec.ticker,
-                        entry_date=today,
-                        entry_price=price,
-                        suggested_pct=rec.suggested_pct,
-                        tier=tier,
-                        industry=buy.industry,
-                        concept_keys=concepts,
-                        entry_reason=rec.reasoning,
-                        stop_loss_pct=self._stop_loss_pct,
-                        take_profit_pct=self._take_profit_pct,
-                    )
+                if capacity > 0:
+                    new_buys.append(buy)
+                    capacity -= 1
+                    if commit and self._repo.available:
+                        self._repo.open_position(
+                            ticker=rec.ticker,
+                            entry_date=today,
+                            entry_price=price,
+                            suggested_pct=rec.suggested_pct,
+                            tier=tier,
+                            industry=buy.industry,
+                            concept_keys=concepts,
+                            entry_reason=rec.reasoning,
+                            stop_loss_pct=self._stop_loss_pct,
+                            take_profit_pct=self._take_profit_pct,
+                        )
+                else:
+                    # Capacity full — surface as watchlist (no DB write)
+                    watchlist.append(buy)
 
         # Also surface fresh C-tier with pct > 0 as low-conviction candidates
         for rec in plan.tiers.get("C", []):
@@ -273,4 +300,5 @@ class HoldingsManager:
             pending_exits=tuple(pending_exits),
             new_buys=tuple(new_buys),
             skipped_recs=tuple(skipped),
+            watchlist_picks=tuple(watchlist),
         )
