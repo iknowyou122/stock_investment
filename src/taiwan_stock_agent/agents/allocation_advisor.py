@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import replace
 from typing import Iterable, Mapping
 
 from ..domain.capital_allocator import (
@@ -333,6 +334,20 @@ class AllocationAdvisor:
             ))
         for t in TIER_ORDER:
             tiers[t].sort(key=lambda r: (-r.suggested_pct, -r.rotation_score))
+
+        # Phase 4.50.6 — normalize so sum(pct) ≤ TARGET_TOTAL.
+        # Before: 11×15% + 14×8% = 277% (over-allocated; user can't act on it).
+        # After: scale all picks down proportionally so total ≤ 85% (15% cash).
+        TARGET_TOTAL = 85.0
+        total_pct = sum(r.suggested_pct for t in TIER_ORDER for r in tiers[t])
+        if total_pct > TARGET_TOTAL:
+            scale = TARGET_TOTAL / total_pct
+            for t in TIER_ORDER:
+                tiers[t] = [
+                    replace(r, suggested_pct=round(r.suggested_pct * scale, 1))
+                    for r in tiers[t]
+                ]
+
         return AllocationPlan(
             tiers=tiers,
             warnings=context.concentration.warnings,

@@ -150,7 +150,10 @@ class TestAllocation:
         assert len(alloc.positions) == 1
         assert alloc.positions[0].is_held is True
         assert alloc.positions[0].ticker == "2330"
-        assert alloc.held_value_twd == 450_000  # 15% × 3M
+        # Phase 4.50.6: held value capped at TIER_TWD["A"]=180K.
+        # Legacy suggested_pct=15% × 3M=450K is now bounded so 12 持倉
+        # cannot blow past NT$3M budget.
+        assert alloc.held_value_twd == 180_000
 
     def test_held_ticker_not_re_bought(self) -> None:
         held = [_FakeHolding(ticker="2330", suggested_pct=15.0)]

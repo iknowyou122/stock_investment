@@ -1836,10 +1836,11 @@ def _print_focus_list(
         _console.print(wt)
 
     total_shown = len(conviction) + len(watchlist)
+    filtered = max(0, len(valid) - total_shown)
     _console.print(
-        f"\n[dim]  顯示 {total_shown} 檔  "
-        f"（CONVICTION {len(conviction)} + WATCHLIST {len(watchlist)}）"
-        f"  全部通過門檻: {len(valid)} 檔[/dim]"
+        f"\n[bold green]  ✓ 精煉清單 {total_shown} 檔[/bold green]"
+        f"  [dim]（CONVICTION {len(conviction)} + WATCHLIST {len(watchlist)}）"
+        f"  ｜ 已過濾 {filtered} 檔低分雜訊（原始通過門檻 {len(valid)} 檔）[/dim]"
     )
 
 
@@ -2202,9 +2203,14 @@ def run_batch(
     # Phase 4.50.5 — 持倉復盤 (run BEFORE Phase 1 so user sees "yesterday's
     # holdings P&L + risk warnings" before today's scan results)
     try:
-        from scripts.holdings_review import run_review as _run_holdings_review
-        _run_holdings_review(today=analysis_date, lookback_days=7,
-                              budget_twd=3_000_000, use_llm=True)
+        import importlib.util as _ilu
+        _hr_path = Path(__file__).resolve().parent / "holdings_review.py"
+        _spec = _ilu.spec_from_file_location("_holdings_review_mod", _hr_path)
+        if _spec and _spec.loader:
+            _hr_mod = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_hr_mod)
+            _hr_mod.run_review(today=analysis_date, lookback_days=7,
+                                budget_twd=3_000_000, use_llm=True)
     except Exception as exc:
         logger.warning("Holdings review skipped: %s", exc)
 
@@ -2403,7 +2409,7 @@ def run_batch(
     else:
         _print_focus_list(
             results,
-            top_conviction=10,
+            top_conviction=5,
             top_watchlist=20,
             min_confidence=min_confidence,
             scan_date=str(analysis_date),

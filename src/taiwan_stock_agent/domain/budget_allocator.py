@@ -138,14 +138,18 @@ class BudgetAllocator:
         held_by_ticker = {h.ticker: h for h in held_positions}
         n_held = len(held_by_ticker)
 
-        # Held value: rough estimate using entry_price × suggested_pct ×
-        # historical "%-based" budget. For Phase 4.50 we approximate using
-        # the current 3M budget so the dashboard reflects NT$, not the
-        # historical "%-of-portfolio" abstraction.
-        held_value_twd = sum(
-            int(float(h.suggested_pct) / 100.0 * budget)
-            for h in held_positions
-        )
+        # Phase 4.50.6 — held value is bounded by TIER_TWD per position so
+        # 12 持倉 cannot exceed NT$3M even if historical suggested_pct sums
+        # >100% (legacy data wrote %-of-portfolio numbers that weren't
+        # budget-aware). Cap each held to TIER_TWD[tier], whichever is
+        # smaller compared to its historical %×budget.
+        def _held_twd(h) -> int:
+            tier_cap = self.TIER_TWD.get((h.tier or "B").upper(), self.TIER_TWD["B"])
+            legacy = int(float(h.suggested_pct) / 100.0 * budget)
+            return min(legacy, tier_cap) if legacy > 0 else tier_cap
+
+        per_held_twd = {h.ticker: _held_twd(h) for h in held_positions}
+        held_value_twd = sum(per_held_twd.values())
 
         # Available budget for NEW buys = budget × (1 - cash_reserve) - held_value
         cash_floor = int(budget * self.CASH_RESERVE_PCT)
@@ -155,12 +159,14 @@ class BudgetAllocator:
         positions: list[PositionPlan] = []
         skipped: list[RefinedPick] = []
 
-        # 1) Emit held positions first (informational, no buy)
+        # 1) Emit held positions first (informational, no buy).
+        # target = per_held_twd[ticker] (already TIER_TWD-capped above)
         held_picks_emitted: set[str] = set()
         for h in held_positions:
             tier_letter = (h.tier or "B").upper()
             entry_price = float(h.entry_price)
-            shares = self._lots_for_pct(float(h.suggested_pct), budget, entry_price)
+            target_twd = per_held_twd.get(h.ticker, 0)
+            shares = int(target_twd / entry_price) if entry_price > 0 else 0
             lots, odd = divmod(shares, self.LOT_SIZE)
             actual = int(shares * entry_price)
             positions.append(PositionPlan(
@@ -168,7 +174,7 @@ class BudgetAllocator:
                 name=getattr(h, "name", h.ticker),
                 sector=getattr(h, "industry", ""),
                 tier=tier_letter,
-                target_twd=int(float(h.suggested_pct) / 100.0 * budget),
+                target_twd=target_twd,
                 actual_twd=actual,
                 shares=shares,
                 lots=lots,
