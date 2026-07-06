@@ -368,6 +368,14 @@ class AllocationAdvisor:
             return "S", 25.0
         if action == "LONG" and tail and conf >= 70:
             return "A", 15.0
+        # 6/25 optimization: high-confidence WATCH signals with tailwind + leader
+        # (e.g. 6/25's 5210 寶碩 WATCH conf=110 → +10.47%, 6121 新普 WATCH
+        # conf=100 → +11.21%) should upgrade to A tier so they get position
+        # allocation instead of just observation.
+        if action == "WATCH" and tail and conf >= 100 and leader:
+            return "A", 12.0
+        if action == "WATCH" and tail and conf >= 100:
+            return "A", 10.0
         if action in {"LONG", "WATCH"} and tail and conf >= 65:
             return "B", 8.0
         if head:

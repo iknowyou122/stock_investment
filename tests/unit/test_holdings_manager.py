@@ -98,11 +98,29 @@ class TestExitRules:
         assert not dec.should_close
 
     def test_tier_drop_triggered_when_conf_collapses(self) -> None:
+        # Phase 4.50.7: TIER_DROP now requires conf<20 AND held_days>=5
+        # (was single-day <30). This test uses 6/10 → 6/18 (~6 weekdays)
+        # with conf=15 to trigger.
         h = _holding(entry_price=100.0, entry_date=date(2026, 6, 10))
-        dec = evaluate_exit(h, current_price=98.0, today=date(2026, 6, 12),
+        dec = evaluate_exit(h, current_price=98.0, today=date(2026, 6, 18),
                             tce_confidence_today=15.0)
         assert dec.should_close
         assert dec.close_reason == "TIER_DROP"
+
+    def test_tier_drop_NOT_triggered_before_cooldown(self) -> None:
+        # New guard: don't fire TIER_DROP within first 5 days even if
+        # conf collapses (avoids day-2 whipsaw exit).
+        h = _holding(entry_price=100.0, entry_date=date(2026, 6, 10))
+        dec = evaluate_exit(h, current_price=98.0, today=date(2026, 6, 12),
+                            tce_confidence_today=15.0)
+        assert not dec.should_close
+
+    def test_tier_drop_NOT_triggered_at_conf_25(self) -> None:
+        # Old threshold was <30, new is <20. conf=25 should no longer fire.
+        h = _holding(entry_price=100.0, entry_date=date(2026, 6, 10))
+        dec = evaluate_exit(h, current_price=98.0, today=date(2026, 6, 20),
+                            tce_confidence_today=25.0)
+        assert not dec.should_close
 
     def test_no_exit_when_within_bounds(self) -> None:
         h = _holding(entry_price=100.0, entry_date=date(2026, 6, 10))
@@ -111,10 +129,10 @@ class TestExitRules:
         assert not dec.should_close
 
     def test_stop_loss_priority_over_take_profit(self) -> None:
-        # Both stop loss and take profit shouldn't both trigger; stop wins
+        # Both stop loss and take profit shouldn't both trigger; stop wins.
+        # Phase 4.50.7: stop_loss default -8% so entry 100 → stop 92.0
         h = _holding(entry_price=100.0)
-        # Bizarre case: price at stop level — should close as STOP
-        dec = evaluate_exit(h, current_price=93.0, today=date(2026, 6, 5))
+        dec = evaluate_exit(h, current_price=92.0, today=date(2026, 6, 5))
         assert dec.should_close
         assert dec.close_reason == "STOP_LOSS"
 
@@ -241,7 +259,7 @@ class TestProcessDay:
         assert buy.ticker == "2330"
         assert buy.tier == "A"
         assert buy.entry_price == 100.0
-        assert buy.stop_loss == 93.0
+        assert buy.stop_loss == 92.0  # Phase 4.50.7: -8% stop
         assert buy.take_profit == 115.0
         # Position should be opened in repo
         assert len(repo.list_open()) == 1
@@ -274,7 +292,7 @@ class TestProcessDay:
         h2 = Holding(
             holding_id=2, ticker="2317", entry_date=date(2026, 6, 1),
             entry_price=100.0, suggested_pct=15.0, tier="B",
-            stop_loss=93.0, take_profit=115.0, industry="", concept_keys=(),
+            stop_loss=92.0, take_profit=115.0, industry="", concept_keys=(),
             entry_reason="", status="OPEN",
         )
         repo = _FakeRepo([h1, h2])
@@ -336,7 +354,7 @@ class TestMaxOpenHoldings:
                 holding_id=i, ticker=f"H{i:03d}",
                 entry_date=date(2026, 6, 16),
                 entry_price=100.0, suggested_pct=8.0, tier="B",
-                stop_loss=93.0, take_profit=115.0, industry="", concept_keys=(),
+                stop_loss=92.0, take_profit=115.0, industry="", concept_keys=(),
                 entry_reason="", status="OPEN",
             )
             for i in range(11)
@@ -374,7 +392,7 @@ class TestMaxOpenHoldings:
                 holding_id=i, ticker=f"H{i:03d}",
                 entry_date=date(2026, 6, 16),
                 entry_price=100.0, suggested_pct=8.0, tier="B",
-                stop_loss=93.0, take_profit=115.0, industry="", concept_keys=(),
+                stop_loss=92.0, take_profit=115.0, industry="", concept_keys=(),
                 entry_reason="", status="OPEN",
             )
             for i in range(12)
@@ -408,7 +426,7 @@ class TestMaxOpenHoldings:
                 holding_id=i, ticker=f"H{i:03d}",
                 entry_date=date(2026, 6, 16),
                 entry_price=100.0, suggested_pct=8.0, tier="B",
-                stop_loss=93.0, take_profit=115.0, industry="", concept_keys=(),
+                stop_loss=92.0, take_profit=115.0, industry="", concept_keys=(),
                 entry_reason="", status="OPEN",
             )
             for i in range(12)
@@ -443,7 +461,7 @@ class TestMaxOpenHoldings:
                 holding_id=i, ticker=f"H{i:03d}",
                 entry_date=date(2026, 6, 16),
                 entry_price=100.0, suggested_pct=8.0, tier="B",
-                stop_loss=93.0, take_profit=115.0, industry="", concept_keys=(),
+                stop_loss=92.0, take_profit=115.0, industry="", concept_keys=(),
                 entry_reason="", status="OPEN",
             ))
         # 12th will exit
@@ -451,7 +469,7 @@ class TestMaxOpenHoldings:
             holding_id=99, ticker="EXIT",
             entry_date=date(2026, 6, 16),
             entry_price=100.0, suggested_pct=8.0, tier="B",
-            stop_loss=93.0, take_profit=115.0, industry="", concept_keys=(),
+            stop_loss=92.0, take_profit=115.0, industry="", concept_keys=(),
             entry_reason="", status="OPEN",
         ))
         repo = _FakeRepo(held)

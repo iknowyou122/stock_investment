@@ -64,7 +64,9 @@ class ExitDecision:
 # ── Default exit policy ─────────────────────────────────────────────────────
 
 
-DEFAULT_STOP_LOSS_PCT = 0.07     # -7%
+DEFAULT_STOP_LOSS_PCT = 0.08     # -8% (was -7%): 6/25→7/6 data 12/16 期間內
+                                  # 觸停損但多數只有 -6~-9%（whipsaw）。放寬 1pt
+                                  # 給進場後 2-3 天必然波動的空間
 DEFAULT_TAKE_PROFIT_PCT = 0.15   # +15%
 DEFAULT_TIME_STOP_DAYS = 10
 DEFAULT_TIME_STOP_MIN_PROFIT = 0.05  # if after 10 days price < entry * 1.05 → exit
@@ -111,14 +113,20 @@ def evaluate_exit(
                 f"{threshold:.2f} (entry × 1.05)",
             )
 
-    # Tier drop: if TCE confidence has collapsed significantly, the original
-    # thesis is no longer valid.
-    if tce_confidence_today is not None and tce_confidence_today < 30:
+    # Tier drop: 6/25 data showed 5/6 平倉原因 = TIER_DROP，但 T+1 高分 picks
+    # 勝率仍 66.7%。單日 conf<30 誤傷 whipsaw 標的。改為：
+    #   - 收得更嚴：conf < 20（極端崩盤才觸發，不是短暫波動）
+    #   - 加冷卻期：持有 ≥5 天才可觸發（避免進場 2-3 天就砍）
+    if (
+        tce_confidence_today is not None
+        and tce_confidence_today < 20
+        and held_days >= 5
+    ):
         return ExitDecision(
             True,
             "TIER_DROP",
-            f"TCE conf collapsed to {tce_confidence_today:.0f} (<30) — thesis "
-            "broken",
+            f"TCE conf collapsed to {tce_confidence_today:.0f} (<20) after "
+            f"{held_days} days — thesis fully broken",
         )
 
     return ExitDecision(False)
