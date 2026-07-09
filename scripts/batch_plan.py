@@ -2558,33 +2558,45 @@ def _build_daily_portfolio(
         prices[tk] = ep
         confidences[tk] = float(r.get("confidence") or 0)
 
-    # Phase 4.50.8 — Price fallback for held tickers NOT in today's scan.
-    # 7/7 bug: 8 支持倉 (5274 信驊 -20%, 6126 信音 -14%) 因今日 scan 未涵蓋
-    # → prices[] 沒值 → evaluate_exit 拿 cur_price=0 → 跳過停損檢查。
-    # Fetch latest close from FinMind so deep-drop positions still get
-    # STOP_LOSS / TIME_STOP correctly.
+    # Phase 4.50.8 (revised in 4.50.9) — Price fallback for held tickers NOT
+    # in today's scan. Original 4.50.8 hit FinMind API and got 403 Forbidden.
+    # Now use L2 cache (OHLCVRepository) first, then yfinance fallback.
     try:
         from taiwan_stock_agent.infrastructure.holdings_repository import HoldingsRepository
-        from taiwan_stock_agent.infrastructure.finmind_client import FinMindClient
-        import os
+        from taiwan_stock_agent.infrastructure.ohlcv_repository import OHLCVRepository
         from datetime import timedelta as _td
         _repo = HoldingsRepository()
         if _repo.available:
             _open_held = _repo.list_open()
             _missing = [h.ticker for h in _open_held if h.ticker not in prices]
             if _missing:
-                _fm = FinMindClient(api_key=os.environ.get("FINMIND_API_KEY"))
-                _start = (analysis_date - _td(days=7)).isoformat()
-                _end = analysis_date.isoformat()
+                _ohlcv = OHLCVRepository()
+                _start = analysis_date - _td(days=14)
+                _end = analysis_date
                 for _tk in _missing:
+                    _price = None
+                    # 1) L2 DB cache
                     try:
-                        _df = _fm.fetch_ohlcv(ticker=_tk, start_date=_start, end_date=_end)
-                        if _df is None or _df.empty:
-                            continue
-                        _df = _df.sort_values("trade_date")
-                        prices[_tk] = float(_df.iloc[-1]["close"])
+                        _df = _ohlcv.get(_tk, _start, _end)
+                        if _df is not None and not _df.empty:
+                            _df = _df.sort_values("trade_date")
+                            _price = float(_df.iloc[-1]["close"])
                     except Exception:
-                        continue
+                        pass
+                    # 2) yfinance fallback (FinMind API 403's this endpoint)
+                    if _price is None:
+                        try:
+                            import yfinance as _yf
+                            _suffix = ".TW"
+                            _hist = _yf.Ticker(f"{_tk}{_suffix}").history(period="7d")
+                            if _hist.empty:
+                                _hist = _yf.Ticker(f"{_tk}.TWO").history(period="7d")
+                            if not _hist.empty:
+                                _price = float(_hist["Close"].iloc[-1])
+                        except Exception:
+                            pass
+                    if _price and _price > 0:
+                        prices[_tk] = _price
     except Exception as _exc:
         logger.debug("Held-ticker price fallback skipped: %s", _exc)
 
